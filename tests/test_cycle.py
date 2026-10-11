@@ -1,6 +1,17 @@
 import unittest
 
-from pocketautonomo.cycle import CALL, LOSS, PUT, UNKNOWN, WIN, Cycle, Entry
+from pocketautonomo.cycle import (
+    CALL,
+    CANCELLED,
+    DRAW,
+    LOSS,
+    PUT,
+    REJECTED,
+    UNKNOWN,
+    WIN,
+    Cycle,
+    Entry,
+)
 
 ASSET = "EURUSD_otc"
 BALANCE = 100_000  # R$1.000,00 in cents
@@ -188,10 +199,51 @@ class IndependentCycleTest(unittest.TestCase):
         self.assertEqual(Cycle(ASSET, PUT).next_stake(), 500)
 
 
+class EndingResultTest(unittest.TestCase):
+    def test_draw_cancelled_and_rejected_end_cycle_without_gale(self):
+        for result in (DRAW, CANCELLED, REJECTED):
+            for losses in (0, 3):  # ending on the first and on the last attempt
+                with self.subTest(result=result, losses=losses):
+                    cycle = Cycle(ASSET, CALL)
+                    for attempt in range(1, losses + 1):
+                        cycle.record_result(attempt, LOSS)
+                    ending = losses + 1
+                    self.assertTrue(cycle.record_result(ending, result))
+                    self.assertEqual(
+                        (cycle.is_active, cycle.outcome, cycle.attempt), (False, result, ending)
+                    )
+                    self.assertIsNone(cycle.next_entry(BALANCE))
+                    if ending < 4:
+                        with self.assertRaises(ValueError):
+                            cycle.record_result(ending + 1, LOSS)
+
+    def test_duplicate_ending_results_change_nothing(self):
+        for result in (DRAW, CANCELLED, REJECTED):
+            with self.subTest(result=result):
+                cycle = Cycle(ASSET, PUT)
+                cycle.record_result(1, result)
+                self.assertFalse(cycle.record_result(1, result))
+                self.assertFalse(cycle.record_result(1, UNKNOWN))
+                with self.assertRaises(ValueError):
+                    cycle.record_result(1, WIN)
+                self.assertEqual((cycle.is_active, cycle.outcome, cycle.attempt), (False, result, 1))
+
+    def test_timeout_stays_unknown_until_cancellation_is_confirmed(self):
+        cycle = Cycle(ASSET, CALL)
+        cycle.record_result(1, LOSS)
+        self.assertTrue(cycle.record_result(2, UNKNOWN))  # timeout: nothing confirmed yet
+        self.assertIsNone(cycle.next_entry(BALANCE))
+        self.assertTrue(cycle.record_result(2, CANCELLED))
+        self.assertEqual((cycle.is_blocked, cycle.outcome, cycle.attempt), (False, CANCELLED, 2))
+
+
 class InvalidInputTest(unittest.TestCase):
     def test_rejects_invalid_attempt_or_result(self):
         cycle = Cycle(ASSET, CALL)
-        invalid = ((0, LOSS), (5, LOSS), (True, LOSS), ("1", LOSS), (1, "DRAW"), (1, "win"))
+        invalid = (
+            (0, LOSS), (5, LOSS), (True, LOSS), ("1", LOSS),
+            (1, "TIMEOUT"), (1, "NETWORK_ERROR"), (1, "draw"), (1, "win"),
+        )
         for attempt, result in invalid:
             with self.subTest(attempt=attempt, result=result):
                 with self.assertRaises(ValueError):

@@ -6,10 +6,16 @@ CALL = "CALL"
 PUT = "PUT"
 WIN = "WIN"
 LOSS = "LOSS"
+DRAW = "DRAW"
+CANCELLED = "CANCELLED"
+REJECTED = "REJECTED"
 UNKNOWN = "UNKNOWN"
 
 DIRECTIONS = (CALL, PUT)
-RESULTS = (WIN, LOSS, UNKNOWN)
+# CANCELLED and REJECTED must be confirmed by the broker. A timeout or a network
+# error proves neither: report it as UNKNOWN so the attempt stays pending.
+DEFINITIVE_RESULTS = (WIN, LOSS, DRAW, CANCELLED, REJECTED)
+RESULTS = DEFINITIVE_RESULTS + (UNKNOWN,)
 MAX_ATTEMPTS = len(PROGRESSION_CENTS)
 
 
@@ -50,7 +56,7 @@ class Cycle:
 
     @property
     def outcome(self):
-        """None while the cycle is active; WIN or LOSS once it has ended."""
+        """None while the cycle is active; afterwards, the result that ended it."""
         return self._outcome
 
     @property
@@ -84,7 +90,7 @@ class Cycle:
         """Record the result of an attempt. Returns True if the state changed."""
         stake_for_attempt(attempt)  # raises ValueError unless attempt is 1 to 4
         if result not in RESULTS:
-            raise ValueError("result must be WIN, LOSS or UNKNOWN")
+            raise ValueError("result must be one of " + ", ".join(RESULTS))
 
         recorded = self._results.get(attempt)
         if recorded is not None:
@@ -105,10 +111,8 @@ class Cycle:
 
         self._results[attempt] = result
         self._blocked = False
-        if result == WIN:
-            self._outcome = WIN
-        elif attempt == MAX_ATTEMPTS:
-            self._outcome = LOSS
+        if result == LOSS and attempt < MAX_ATTEMPTS:
+            self._attempt += 1  # only a LOSS moves on to the next gale
         else:
-            self._attempt += 1
+            self._outcome = result
         return True

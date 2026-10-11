@@ -56,7 +56,7 @@ class Coordinator:
         self._cycle = None
         self._cycle_id = 0
         self._pending = None
-        self._resolved = {}  # reservation_id -> definitive result (WIN or LOSS)
+        self._resolved = {}  # reservation_id -> definitive result
 
     def start_cycle(self, asset, direction):
         """Start a new independent cycle at attempt 1 and return its id."""
@@ -92,13 +92,13 @@ class Coordinator:
         """Record the result of a reservation. Returns True if the state changed.
 
         Only the pending reservation can change the cycle. UNKNOWN keeps it pending
-        until WIN or LOSS arrives for the same id; repeating the result of a resolved
-        reservation returns False and changes nothing.
+        until a definitive result arrives for the same id; repeating the result of a
+        resolved reservation returns False and changes nothing.
         """
         if not isinstance(reservation_id, str):
             raise ValueError("reservation_id must be a string")
         if result not in RESULTS:
-            raise ValueError("result must be WIN, LOSS or UNKNOWN")
+            raise ValueError("result must be one of " + ", ".join(RESULTS))
         with self._lock:
             pending = self._pending
             if pending is not None and reservation_id == pending.reservation_id:

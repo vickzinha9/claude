@@ -9,7 +9,18 @@ from pocketautonomo.coordinator import (
     Reservation,
     UnknownReservationError,
 )
-from pocketautonomo.cycle import CALL, LOSS, PUT, UNKNOWN, WIN, Cycle, Entry
+from pocketautonomo.cycle import (
+    CALL,
+    CANCELLED,
+    DRAW,
+    LOSS,
+    PUT,
+    REJECTED,
+    UNKNOWN,
+    WIN,
+    Cycle,
+    Entry,
+)
 
 ASSET = "EURUSD_otc"
 BALANCE = 100_000  # R$1.000,00 in cents
@@ -156,6 +167,54 @@ class CycleRulesTest(unittest.TestCase):
         self.assertIsNone(coordinator.reserve_next_entry(BALANCE))
 
 
+class EndingResultTest(unittest.TestCase):
+    def test_draw_cancelled_and_rejected_end_cycle_and_release_reservation(self):
+        for result in (DRAW, CANCELLED, REJECTED):
+            with self.subTest(result=result):
+                coordinator = started()
+                play(coordinator, LOSS)
+                reservation = coordinator.reserve_next_entry(BALANCE)
+                self.assertTrue(coordinator.record_result(reservation.reservation_id, result))
+                status = coordinator.status()
+                self.assertEqual(
+                    (status.is_active, status.outcome, status.attempt), (False, result, 2)
+                )
+                self.assertIsNone(status.pending)
+                self.assertTrue(status.can_start_cycle)
+                self.assertIsNone(coordinator.reserve_next_entry(BALANCE))
+
+    def test_duplicates_and_wrong_ids_do_not_change_ended_cycle(self):
+        for result in (DRAW, CANCELLED, REJECTED):
+            with self.subTest(result=result):
+                coordinator = started()
+                rid = play(coordinator, result).reservation_id
+                ended = coordinator.status()
+                self.assertFalse(coordinator.record_result(rid, result))
+                self.assertFalse(coordinator.record_result(rid, UNKNOWN))
+                with self.assertRaises(ValueError):
+                    coordinator.record_result(rid, WIN)
+                with self.assertRaises(UnknownReservationError):
+                    coordinator.record_result(rid + "0", result)
+                self.assertEqual(coordinator.status(), ended)
+
+    def test_timeout_stays_unknown_until_rejection_is_confirmed(self):
+        coordinator = started()
+        reservation = coordinator.reserve_next_entry(BALANCE)
+        with self.assertRaises(ValueError):
+            coordinator.record_result(reservation.reservation_id, "TIMEOUT")
+        coordinator.record_result(reservation.reservation_id, UNKNOWN)  # timeout or network error
+        status = coordinator.status()
+        self.assertEqual((status.pending, status.is_blocked), (reservation, True))
+        self.assertIsNone(coordinator.reserve_next_entry(BALANCE))
+        with self.assertRaises(CoordinatorError):
+            coordinator.start_cycle(ASSET, CALL)
+        self.assertTrue(coordinator.record_result(reservation.reservation_id, REJECTED))
+        status = coordinator.status()
+        self.assertEqual((status.outcome, status.pending, status.is_blocked), (REJECTED, None, False))
+        self.assertEqual(coordinator.start_cycle(ASSET, CALL), 2)
+        self.assertEqual(coordinator.reserve_next_entry(BALANCE).entry, Entry(ASSET, CALL, 1, 500))
+
+
 class UnknownResultTest(unittest.TestCase):
     def setUp(self):
         self.coordinator = started()
@@ -277,7 +336,10 @@ class WrongIdentifierTest(unittest.TestCase):
 
     def test_non_string_id_or_invalid_result_is_rejected(self):
         rid = self.reservation.reservation_id
-        invalid = ((None, LOSS), (1, LOSS), (self.reservation, LOSS), (rid, "DRAW"), (rid, "win"))
+        invalid = (
+            (None, LOSS), (1, LOSS), (self.reservation, LOSS),
+            (rid, "TIMEOUT"), (rid, "NETWORK_ERROR"), (rid, "win"),
+        )
         for wrong_id, result in invalid:
             with self.subTest(wrong_id=wrong_id, result=result):
                 with self.assertRaises(ValueError):
