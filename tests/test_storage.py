@@ -24,7 +24,7 @@ from pocketautonomo.cycle import (
     WIN,
     Entry,
 )
-from pocketautonomo.storage import SqliteStore, StorageError
+from pocketautonomo.storage import SqliteStore, StorageError, connect_read_only
 
 ASSET = "EURUSD_otc"
 BALANCE = 100_000  # R$1.000,00 in cents
@@ -45,19 +45,16 @@ class StorageTestCase(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.directory = directory.name
         self.path = os.path.join(self.directory, "state.db")
-        self.stores = {}
 
     def open(self):
         """Open the database the way a restarted process would."""
-        store = SqliteStore(self.path)
-        self.addCleanup(store.close)
-        coordinator = Coordinator(store)
-        self.stores[coordinator] = store
+        coordinator = Coordinator(SqliteStore(self.path))
+        self.addCleanup(coordinator.close)
         return coordinator
 
     def restart(self, previous):
         """Close the previous instance, then open the database again."""
-        self.stores.pop(previous).close()
+        previous.close()
         return self.open()
 
     def running(self):
@@ -66,8 +63,8 @@ class StorageTestCase(unittest.TestCase):
         return coordinator
 
     def query(self, sql):
-        """Read committed rows through an independent connection."""
-        with closing(sqlite3.connect(self.path)) as connection:
+        """Read committed rows through an independent read-only connection."""
+        with closing(connect_read_only(self.path)) as connection:
             return connection.execute(sql).fetchall()
 
     def execute(self, sql):
@@ -416,17 +413,18 @@ class IntegrityTest(StorageTestCase):
                 coordinator = self.running()
                 coordinator.start_cycle(ASSET, CALL)
                 coordinator.reserve_next_entry(BALANCE)
-                self.stores.pop(coordinator).close()
+                coordinator.close()
                 self.execute(sql)
                 with self.assertRaisesRegex(StorageError, "inconsistent saved state"):
                     self.open()
+                SqliteStore(self.path).close()  # the refused open released the lock
 
     def test_store_refuses_writes_that_contradict_saved_state(self):
         coordinator = self.running()
         coordinator.start_cycle(ASSET, CALL)
         lost = play(coordinator, LOSS)
         coordinator.reserve_next_entry(BALANCE)  # attempt 2 stays pending
-        self.stores.pop(coordinator).close()
+        coordinator.close()
         store = SqliteStore(self.path)
         self.addCleanup(store.close)
         with self.assertRaises(StorageError):

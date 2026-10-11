@@ -1,6 +1,6 @@
 # Status
 
-Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O estado do coordenador pode ser salvo em SQLite; sem banco, tudo fica em memória. Ainda não há conexão com a corretora.
+Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O estado do coordenador pode ser salvo em SQLite, e só um coordenador por vez opera cada banco; sem banco, tudo fica em memória. Ainda não há conexão com a corretora.
 
 ## Concluído
 
@@ -34,12 +34,19 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
    - A recuperação termina quando o ciclo antigo se encerra: pelo resultado definitivo da reserva pendente (aceito mesmo com o coordenador pausado) ou por `abandon_cycle()`. Um LOSS que ainda deixa outra tentativa mantém a recuperação bloqueada; a 4ª perda encerra o ciclo sem 5ª entrada.
    - `abandon_cycle()` encerra o ciclo aberto sem registrar resultado de aposta: o `outcome` do ciclo vira ABANDONED e nenhuma tentativa recebe resultado. O abandono é gravado antes de mudar o estado em memória e continua valendo depois de reiniciar.
    - O abandono é recusado com `CoordinatorError` enquanto houver reserva pendente, inclusive com UNKNOWN. Também vale fora da recuperação, para um ciclo aberto sem reserva pendente.
+7. **Exclusividade entre processos:** `pocketautonomo/storage.py`, com testes em `tests/test_exclusivity.py`
+   - `SqliteStore(caminho)` toma uma trava exclusiva do sistema operacional antes de tocar no banco, portanto antes de carregar o estado e de liberar qualquer reserva. A trava fica no arquivo `<banco>-lock`: `fcntl.flock` em Linux/macOS e `msvcrt.locking` no Windows.
+   - O sistema operacional libera a trava quando o arquivo é fechado ou o processo termina, inclusive à força. O arquivo `-lock` pode continuar no disco: o que protege é a trava, não a existência do arquivo.
+   - A segunda instância, no mesmo processo ou em outro, falha com `DatabaseInUseError` ("another coordinator is already using <banco>; close it before opening this database again ...") sem abrir o banco, portanto sem alterar o estado.
+   - `connect_read_only(caminho)` abre uma conexão independente só de leitura, que funciona com o coordenador rodando; o SQLite recusa escrita por ela.
+   - `Coordinator.close()` fecha o coordenador e o banco e libera a trava; também funciona com `with`. Fechar de novo não faz nada. Depois de fechado, qualquer operação gera `CoordinatorError` e o `SqliteStore` fechado gera `StorageError`.
+   - Os testes usam dois processos reais: o segundo é recusado enquanto o primeiro está aberto, abre depois que o primeiro fecha e também depois que o primeiro é encerrado com `kill`. Nos testes de reinício, a instância anterior é fechada antes de abrir outra.
 
 ## Testes
 
     python3 -m unittest discover -s tests -v
 
-Último resultado: 82 testes, todos passando, no Python 3.9.25. A suíte também passa no 3.10, 3.12, 3.13 e 3.14.
+Último resultado: 85 testes, todos passando, no Python 3.9.25. A suíte também passa no 3.10, 3.12, 3.13 e 3.14. Tudo foi executado em Linux; o caminho do Windows (`msvcrt.locking`) ainda não foi executado.
 
 ## Decisões em vigor
 
@@ -52,11 +59,13 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
 - A pausa bloqueia `start_cycle` e `reserve_next_entry`, mas não `record_result` nem `abandon_cycle`.
 - ABANDONED não é resultado de aposta: só `abandon_cycle()` o produz e `record_result` o recusa com `ValueError`.
 - Todo ciclo restaurado em aberto é tratado como vencido, por mais curto que tenha sido o reinício.
+- O coordenador é dono do banco que recebe: `close()` fecha o banco e uma restauração recusada também o fecha, liberando a trava.
+- A trava impede um segundo coordenador, mas não impede que outro programa escreva direto no SQLite. Para consultas, use `connect_read_only`.
 
 ## Em aberto para as próximas etapas
 
-- Dois processos ainda conseguem abrir o mesmo banco ao mesmo tempo.
+- Rodar a suíte no Windows para confirmar o caminho `msvcrt.locking`.
+- Executor de ordens e conexão com a corretora.
 - A reserva ainda não guarda o id da ordem na corretora, que vai ser necessário para conferir pendências depois de reiniciar.
 - Uma reserva pendente só se resolve com resultado definitivo. Falta definir o que registrar quando a ordem comprovadamente nem chegou a ser enviada (falha local antes do envio).
 - UNKNOWN não tem prazo: o bloqueio dura até chegar um resultado definitivo.
-- Conexão com a corretora.

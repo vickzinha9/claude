@@ -65,11 +65,15 @@ class Coordinator:
     paused: results are accepted, but no cycle starts and no entry is released until
     resume() is called. A restored pending reservation is never handed out again, and
     a cycle restored still open never releases another entry, not even after resume().
+
+    The coordinator owns its store: close() closes it, and so does a failed restore.
+    After close() every operation raises CoordinatorError.
     """
 
     def __init__(self, store=None):
         self._lock = threading.Lock()
         self._store = store
+        self._closed = False
         self._cycle = None
         self._cycle_id = 0
         self._pending = None
@@ -77,19 +81,40 @@ class Coordinator:
         self._paused = False
         self._stale_cycle_id = None  # cycle restored still open: its decision has expired
         if store is not None:
-            self._restore(*store.load())
+            try:
+                self._restore(*store.load())
+            except BaseException:
+                store.close()  # a refused restore must not keep the database locked
+                raise
             self._paused = True
             if self._cycle is not None and self._cycle.is_active:
                 self._stale_cycle_id = self._cycle_id
 
+    def close(self):
+        """Close the coordinator and its store. Closing again does nothing."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            if self._store is not None:
+                self._store.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.close()
+
     def resume(self):
         """Allow new cycles and entries again. A restored open cycle stays stale."""
         with self._lock:
+            self._check_open()
             self._paused = False
 
     def start_cycle(self, asset, direction):
         """Start a new independent cycle at attempt 1 and return its id."""
         with self._lock:
+            self._check_open()
             if self._paused:
                 raise CoordinatorError("the coordinator is paused; call resume() first")
             if self._recovery_pending():
@@ -118,6 +143,7 @@ class Coordinator:
         if isinstance(balance_cents, bool) or not isinstance(balance_cents, int):
             raise ValueError("balance_cents must be an integer")
         with self._lock:
+            self._check_open()
             if self._paused or self._cycle is None or self._pending is not None:
                 return None
             if self._recovery_pending():
@@ -143,6 +169,7 @@ class Coordinator:
         if result not in RESULTS:
             raise ValueError("result must be one of " + ", ".join(RESULTS))
         with self._lock:
+            self._check_open()
             pending = self._pending
             if pending is not None and reservation_id == pending.reservation_id:
                 cycle = copy.deepcopy(self._cycle)  # becomes current only once saved
@@ -171,6 +198,7 @@ class Coordinator:
         abandonment is saved before it takes effect.
         """
         with self._lock:
+            self._check_open()
             if self._cycle is None or not self._cycle.is_active:
                 raise CoordinatorError("there is no open cycle to abandon")
             if self._pending is not None:
@@ -187,7 +215,12 @@ class Coordinator:
     def status(self):
         """Consistent snapshot of the current state."""
         with self._lock:
+            self._check_open()
             return self._status()
+
+    def _check_open(self):
+        if self._closed:
+            raise CoordinatorError("the coordinator is closed")
 
     def _status(self):
         cycle = self._cycle
