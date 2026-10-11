@@ -1,7 +1,7 @@
 import sqlite3
 from contextlib import contextmanager
 
-from pocketautonomo.cycle import UNKNOWN
+from pocketautonomo.cycle import ABANDONED, UNKNOWN
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -95,6 +95,18 @@ class SqliteStore:
                     "UPDATE cycles SET outcome = ? WHERE cycle_id = ?",
                     (outcome, reservation.cycle_id),
                 )
+
+    def save_abandonment(self, cycle_id):
+        """Mark an open cycle without pending reservations as abandoned."""
+        with self._transaction("saving the abandonment"):
+            updated = self._connection.execute(
+                "UPDATE cycles SET outcome = ? WHERE cycle_id = ? AND outcome IS NULL"
+                " AND NOT EXISTS (SELECT 1 FROM reservations WHERE cycle_id = ?"
+                " AND (result IS NULL OR result = ?))",
+                (ABANDONED, cycle_id, cycle_id, UNKNOWN),
+            ).rowcount
+            if updated != 1:
+                raise StorageError(f"cycle {cycle_id} is not open without pending reservations")
 
     def close(self):
         self._connection.close()

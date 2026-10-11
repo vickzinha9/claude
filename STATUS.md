@@ -29,12 +29,17 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
    - Depois de reiniciar, resultados já processados continuam sendo ignorados como duplicados e a numeração de ciclos continua de onde parou.
    - Um banco inconsistente (por exemplo, com duas reservas pendentes) é recusado com `StorageError`.
    - Os bancos de execução (`*.db`, `*.sqlite`, `*.sqlite3` e arquivos auxiliares) ficam fora do Git pelo `.gitignore`. Os testes usam bancos em pastas temporárias.
+6. **Recuperação após reinício:** `pocketautonomo/coordinator.py`, com testes em `tests/test_storage.py`
+   - Um ciclo restaurado em aberto conta como decisão vencida: não libera nenhuma entrada nova, nem depois de `resume()`. Enquanto ele estiver aberto, `status().recovery_pending` fica `True` e nenhum ciclo novo começa.
+   - A recuperação termina quando o ciclo antigo se encerra: pelo resultado definitivo da reserva pendente (aceito mesmo com o coordenador pausado) ou por `abandon_cycle()`. Um LOSS que ainda deixa outra tentativa mantém a recuperação bloqueada; a 4ª perda encerra o ciclo sem 5ª entrada.
+   - `abandon_cycle()` encerra o ciclo aberto sem registrar resultado de aposta: o `outcome` do ciclo vira ABANDONED e nenhuma tentativa recebe resultado. O abandono é gravado antes de mudar o estado em memória e continua valendo depois de reiniciar.
+   - O abandono é recusado com `CoordinatorError` enquanto houver reserva pendente, inclusive com UNKNOWN. Também vale fora da recuperação, para um ciclo aberto sem reserva pendente.
 
 ## Testes
 
     python3 -m unittest discover -s tests -v
 
-Último resultado: 73 testes, todos passando, no Python 3.9.25. A suíte também passa no 3.10, 3.12, 3.13 e 3.14.
+Último resultado: 82 testes, todos passando, no Python 3.9.25. A suíte também passa no 3.10, 3.12, 3.13 e 3.14.
 
 ## Decisões em vigor
 
@@ -44,11 +49,13 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
 - Id de reserva desconhecido gera `UnknownReservationError`. Iniciar um ciclo fora de hora gera `CoordinatorError`.
 - Saldo insuficiente não encerra o ciclo; a entrada fica disponível de novo quando o saldo cobrir o valor.
 - Com banco, o coordenador sempre abre pausado, inclusive na primeira execução com o banco vazio.
-- A pausa bloqueia `start_cycle` e `reserve_next_entry`, mas não `record_result`.
+- A pausa bloqueia `start_cycle` e `reserve_next_entry`, mas não `record_result` nem `abandon_cycle`.
+- ABANDONED não é resultado de aposta: só `abandon_cycle()` o produz e `record_result` o recusa com `ValueError`.
+- Todo ciclo restaurado em aberto é tratado como vencido, por mais curto que tenha sido o reinício.
 
 ## Em aberto para as próximas etapas
 
-- Um ciclo restaurado sem reserva pendente continua da tentativa em que parou depois de `resume()`. Não há como abandoná-lo se o sinal já não valer.
+- Dois processos ainda conseguem abrir o mesmo banco ao mesmo tempo.
 - A reserva ainda não guarda o id da ordem na corretora, que vai ser necessário para conferir pendências depois de reiniciar.
 - Uma reserva pendente só se resolve com resultado definitivo. Falta definir o que registrar quando a ordem comprovadamente nem chegou a ser enviada (falha local antes do envio).
 - UNKNOWN não tem prazo: o bloqueio dura até chegar um resultado definitivo.

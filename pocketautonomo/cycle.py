@@ -16,6 +16,9 @@ DIRECTIONS = (CALL, PUT)
 # error proves neither: report it as UNKNOWN so the attempt stays pending.
 DEFINITIVE_RESULTS = (WIN, LOSS, DRAW, CANCELLED, REJECTED)
 RESULTS = DEFINITIVE_RESULTS + (UNKNOWN,)
+# Outcome of a cycle ended by abandon(). It is not a bet result: record_result never
+# accepts it and no attempt receives it.
+ABANDONED = "ABANDONED"
 MAX_ATTEMPTS = len(PROGRESSION_CENTS)
 
 
@@ -56,7 +59,7 @@ class Cycle:
 
     @property
     def outcome(self):
-        """None while the cycle is active; afterwards, the result that ended it."""
+        """None while the cycle is active; afterwards, the result that ended it or ABANDONED."""
         return self._outcome
 
     @property
@@ -99,6 +102,8 @@ class Cycle:
             raise ValueError(
                 f"conflicting result for attempt {attempt}: {recorded} then {result}"
             )
+        if not self.is_active:
+            raise ValueError(f"the cycle has already ended with {self._outcome}")
         if attempt != self._attempt:
             raise ValueError(
                 f"attempt {attempt} is not the current attempt {self._attempt}"
@@ -116,3 +121,11 @@ class Cycle:
         else:
             self._outcome = result
         return True
+
+    def abandon(self):
+        """End the cycle without a bet result. Not allowed while waiting after UNKNOWN."""
+        if not self.is_active:
+            raise ValueError(f"the cycle has already ended with {self._outcome}")
+        if self._blocked:
+            raise ValueError("cannot abandon while waiting for a definitive result")
+        self._outcome = ABANDONED

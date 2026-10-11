@@ -13,6 +13,7 @@ from pocketautonomo.coordinator import (
     UnknownReservationError,
 )
 from pocketautonomo.cycle import (
+    ABANDONED,
     CALL,
     CANCELLED,
     DRAW,
@@ -44,12 +45,20 @@ class StorageTestCase(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.directory = directory.name
         self.path = os.path.join(self.directory, "state.db")
+        self.stores = {}
 
     def open(self):
         """Open the database the way a restarted process would."""
         store = SqliteStore(self.path)
         self.addCleanup(store.close)
-        return Coordinator(store)
+        coordinator = Coordinator(store)
+        self.stores[coordinator] = store
+        return coordinator
+
+    def restart(self, previous):
+        """Close the previous instance, then open the database again."""
+        self.stores.pop(previous).close()
+        return self.open()
 
     def running(self):
         coordinator = self.open()
@@ -98,42 +107,34 @@ class RestoreTest(StorageTestCase):
         self.assertTrue(coordinator.status().can_start_cycle)
         self.assertEqual(coordinator.start_cycle(ASSET, CALL), 1)
 
-    def test_restored_cycle_releases_no_entry_until_resume(self):
+    def test_resume_does_not_continue_a_restored_gale(self):
         before = self.running()
         before.start_cycle(ASSET, PUT)
         play(before, LOSS)
+        saved = before.status()
 
-        after = self.open()
-        self.assertEqual(after.status(), replace(before.status(), is_paused=True))
+        after = self.restart(before)
+        self.assertEqual(after.status(), replace(saved, is_paused=True, recovery_pending=True))
+        after.resume()
         self.assertIsNone(after.reserve_next_entry(BALANCE))
         with self.assertRaises(CoordinatorError):
             after.start_cycle(ASSET, CALL)
-        after.resume()
-        self.assertEqual(after.reserve_next_entry(BALANCE).entry, Entry(ASSET, PUT, 2, 1000))
+        self.assertTrue(after.status().recovery_pending)
+        self.assertEqual(len(self.query("SELECT * FROM reservations")), 1)
 
     def test_pending_reservation_is_restored_but_never_handed_out_again(self):
         before = self.running()
         before.start_cycle(ASSET, CALL)
         play(before, LOSS)
         pending = before.reserve_next_entry(BALANCE)
+        saved = before.status()
 
-        after = self.open()
-        self.assertEqual(after.status(), replace(before.status(), is_paused=True))
+        after = self.restart(before)
+        self.assertEqual(after.status(), replace(saved, is_paused=True, recovery_pending=True))
         after.resume()
         self.assertIsNone(after.reserve_next_entry(BALANCE))
         self.assertEqual(after.status().pending, pending)
         self.assertEqual(len(self.query("SELECT * FROM reservations")), 2)
-
-    def test_results_for_restored_reservation_are_accepted_while_paused(self):
-        before = self.running()
-        before.start_cycle(ASSET, CALL)
-        pending = before.reserve_next_entry(BALANCE)
-
-        after = self.open()
-        self.assertTrue(after.record_result(pending.reservation_id, LOSS))
-        self.assertIsNone(after.reserve_next_entry(BALANCE))  # still paused
-        after.resume()
-        self.assertEqual(after.reserve_next_entry(BALANCE).entry, Entry(ASSET, CALL, 2, 1000))
 
     def test_ended_cycles_are_restored_with_their_outcome(self):
         histories = {
@@ -150,14 +151,106 @@ class RestoreTest(StorageTestCase):
                 before.start_cycle(ASSET, CALL)
                 for result in results:
                     play(before, result)
+                saved = before.status()
 
-                after = self.open()
-                self.assertEqual(after.status(), replace(before.status(), is_paused=True))
+                after = self.restart(before)
+                self.assertEqual(after.status(), replace(saved, is_paused=True))
                 self.assertEqual(after.status().outcome, outcome)
                 self.assertEqual(self.query("SELECT outcome FROM cycles"), [(outcome,)])
                 self.assertFalse(after.status().can_start_cycle)
                 after.resume()
                 self.assertTrue(after.status().can_start_cycle)
+
+
+class RecoveryTest(StorageTestCase):
+    def restored_after_loss(self):
+        """Restart with a cycle still open: LOSS on attempt 1 and nothing pending."""
+        before = self.running()
+        before.start_cycle(ASSET, PUT)
+        old = play(before, LOSS)
+        return self.restart(before), old
+
+    def test_abandon_is_saved_and_frees_a_new_decision(self):
+        coordinator, _ = self.restored_after_loss()
+        saved = self.query("SELECT * FROM reservations")
+        coordinator.abandon_cycle()  # allowed while paused
+        self.assertEqual(self.query("SELECT outcome FROM cycles"), [(ABANDONED,)])
+        self.assertEqual(self.query("SELECT * FROM reservations"), saved)  # no invented result
+        status = coordinator.status()
+        self.assertEqual(
+            (status.outcome, status.is_active, status.attempt, status.recovery_pending),
+            (ABANDONED, False, 2, False),
+        )
+        coordinator.resume()
+        self.assertEqual(coordinator.start_cycle(ASSET, CALL), 2)
+        self.assertEqual(coordinator.reserve_next_entry(BALANCE).entry, Entry(ASSET, CALL, 1, 500))
+
+    def test_restart_after_abandon_keeps_the_cycle_abandoned(self):
+        coordinator, old = self.restored_after_loss()
+        coordinator.abandon_cycle()
+        abandoned = coordinator.status()
+
+        after = self.restart(coordinator)
+        self.assertEqual(after.status(), abandoned)
+        self.assertFalse(after.record_result(old.reservation_id, LOSS))
+        with self.assertRaises(CoordinatorError):
+            after.abandon_cycle()
+        after.resume()
+        self.assertEqual(after.start_cycle(ASSET, CALL), 2)
+
+    def test_abandon_is_refused_while_a_reservation_is_pending(self):
+        for unknown in (False, True):
+            with self.subTest(unknown=unknown):
+                self.path = os.path.join(self.directory, f"pending-{unknown}.db")
+                before = self.running()
+                before.start_cycle(ASSET, CALL)
+                pending = before.reserve_next_entry(BALANCE)
+                if unknown:
+                    before.record_result(pending.reservation_id, UNKNOWN)
+
+                after = self.restart(before)
+                restored = after.status()
+                self.assertTrue(restored.recovery_pending)
+                with self.assertRaises(CoordinatorError):
+                    after.abandon_cycle()
+                self.assertEqual(after.status(), restored)
+                self.assertEqual(self.query("SELECT outcome FROM cycles"), [(None,)])
+                self.assertTrue(after.record_result(pending.reservation_id, WIN))  # while paused
+                self.assertFalse(after.status().recovery_pending)
+
+    def test_loss_for_restored_reservation_keeps_recovery_blocked(self):
+        before = self.running()
+        before.start_cycle(ASSET, CALL)
+        pending = before.reserve_next_entry(BALANCE)
+
+        after = self.restart(before)
+        self.assertTrue(after.record_result(pending.reservation_id, LOSS))  # while paused
+        status = after.status()
+        self.assertEqual((status.attempt, status.is_active, status.recovery_pending), (2, True, True))
+        after.resume()
+        self.assertIsNone(after.reserve_next_entry(BALANCE))
+        with self.assertRaises(CoordinatorError):
+            after.start_cycle(ASSET, CALL)
+        after.abandon_cycle()
+        self.assertEqual(after.start_cycle(ASSET, PUT), 2)
+        self.assertEqual(after.reserve_next_entry(BALANCE).entry, Entry(ASSET, PUT, 1, 500))
+
+    def test_last_loss_for_restored_reservation_ends_recovery_without_fifth_entry(self):
+        before = self.running()
+        before.start_cycle(ASSET, CALL)
+        for _ in range(3):
+            play(before, LOSS)
+        last = before.reserve_next_entry(BALANCE)
+        self.assertEqual(last.entry.stake_cents, 4000)
+
+        after = self.restart(before)
+        self.assertTrue(after.record_result(last.reservation_id, LOSS))
+        status = after.status()
+        self.assertEqual((status.outcome, status.recovery_pending), (LOSS, False))
+        after.resume()
+        self.assertIsNone(after.reserve_next_entry(BALANCE))
+        self.assertEqual(after.start_cycle(ASSET, CALL), 2)
+        self.assertEqual(after.reserve_next_entry(BALANCE).entry, Entry(ASSET, CALL, 1, 500))
 
 
 class UnknownAfterRestartTest(StorageTestCase):
@@ -168,15 +261,20 @@ class UnknownAfterRestartTest(StorageTestCase):
         pending = before.reserve_next_entry(BALANCE)
         before.record_result(pending.reservation_id, UNKNOWN)
 
-        after = self.running()
+        after = self.restart(before)
+        after.resume()
         status = after.status()
-        self.assertEqual((status.pending, status.is_blocked, status.attempt), (pending, True, 2))
+        self.assertEqual(
+            (status.pending, status.is_blocked, status.attempt, status.recovery_pending),
+            (pending, True, 2, True),
+        )
         self.assertIsNone(after.reserve_next_entry(BALANCE))
         with self.assertRaises(CoordinatorError):
             after.start_cycle(ASSET, CALL)
         self.assertFalse(after.record_result(pending.reservation_id, UNKNOWN))
         self.assertTrue(after.record_result(pending.reservation_id, LOSS))
-        self.assertEqual(after.reserve_next_entry(BALANCE).entry, Entry(ASSET, CALL, 3, 2000))
+        self.assertTrue(after.status().recovery_pending)  # the old gale is not continued
+        self.assertIsNone(after.reserve_next_entry(BALANCE))
 
     def test_confirmation_after_unknown_survives_another_restart(self):
         before = self.running()
@@ -185,12 +283,14 @@ class UnknownAfterRestartTest(StorageTestCase):
         before.record_result(pending.reservation_id, UNKNOWN)
         self.assertEqual(self.query("SELECT result FROM reservations"), [(UNKNOWN,)])
 
-        self.assertTrue(self.open().record_result(pending.reservation_id, CANCELLED))
+        middle = self.restart(before)
+        self.assertTrue(middle.record_result(pending.reservation_id, CANCELLED))
 
-        after = self.open()
+        after = self.restart(middle)
         status = after.status()
         self.assertEqual(
-            (status.outcome, status.pending, status.is_blocked), (CANCELLED, None, False)
+            (status.outcome, status.pending, status.is_blocked, status.recovery_pending),
+            (CANCELLED, None, False, False),
         )
         self.assertFalse(after.record_result(pending.reservation_id, CANCELLED))
         self.assertEqual(self.query("SELECT result FROM reservations"), [(CANCELLED,)])
@@ -202,9 +302,10 @@ class DuplicateAfterRestartTest(StorageTestCase):
         before.start_cycle(ASSET, CALL)
         lost = play(before, LOSS)
         won = play(before, WIN)
+        saved_status = before.status()
         saved = self.query("SELECT * FROM reservations ORDER BY attempt")
 
-        after = self.open()
+        after = self.restart(before)
         self.assertFalse(after.record_result(lost.reservation_id, LOSS))
         self.assertFalse(after.record_result(won.reservation_id, WIN))
         self.assertFalse(after.record_result(won.reservation_id, UNKNOWN))
@@ -212,7 +313,7 @@ class DuplicateAfterRestartTest(StorageTestCase):
             after.record_result(lost.reservation_id, WIN)
         with self.assertRaises(UnknownReservationError):
             after.record_result("unknown-id", WIN)
-        self.assertEqual(after.status(), replace(before.status(), is_paused=True))
+        self.assertEqual(after.status(), replace(saved_status, is_paused=True))
         self.assertEqual(self.query("SELECT * FROM reservations ORDER BY attempt"), saved)
 
     def test_old_results_do_not_touch_a_cycle_started_after_restart(self):
@@ -220,7 +321,8 @@ class DuplicateAfterRestartTest(StorageTestCase):
         before.start_cycle(ASSET, CALL)
         old = play(before, WIN)
 
-        after = self.running()
+        after = self.restart(before)
+        after.resume()
         self.assertEqual(after.start_cycle(ASSET, PUT), 2)
         current = after.reserve_next_entry(BALANCE)
         self.assertEqual(current.entry, Entry(ASSET, PUT, 1, 500))
@@ -239,7 +341,6 @@ class WriteFailureTest(StorageTestCase):
             coordinator.reserve_next_entry(BALANCE)
         self.assertIsNone(coordinator.status().pending)
         self.assertEqual(self.query("SELECT * FROM reservations"), [])
-        self.assertIsNone(self.open().status().pending)  # nothing pending after a restart
         undo()
         reservation = coordinator.reserve_next_entry(BALANCE)
         self.assertEqual(reservation.entry, Entry(ASSET, CALL, 1, 500))
@@ -285,11 +386,26 @@ class WriteFailureTest(StorageTestCase):
         undo()
         self.assertEqual(coordinator.start_cycle(ASSET, CALL), 1)
 
+    def test_failed_abandon_write_keeps_the_cycle_open(self):
+        coordinator = self.running()
+        coordinator.start_cycle(ASSET, CALL)
+        play(coordinator, LOSS)
+        before = coordinator.status()
+        undo = self.fail_writes("UPDATE", "cycles")
+        with self.assertRaises(StorageError):
+            coordinator.abandon_cycle()
+        self.assertEqual(coordinator.status(), before)
+        self.assertEqual(self.query("SELECT outcome FROM cycles"), [(None,)])
+        undo()
+        coordinator.abandon_cycle()
+        self.assertEqual(coordinator.status().outcome, ABANDONED)
+
 
 class IntegrityTest(StorageTestCase):
     def test_inconsistent_saved_state_is_refused(self):
         tamperings = (
             "UPDATE cycles SET outcome = 'WIN'",
+            "UPDATE cycles SET outcome = 'ABANDONED'",
             "INSERT INTO reservations VALUES ('extra', 1, 2, 1000, NULL)",
             "UPDATE reservations SET result = 'TIMEOUT'",
             "INSERT INTO cycles VALUES (2, 'EURUSD_otc', 'CALL', NULL)",
@@ -300,19 +416,27 @@ class IntegrityTest(StorageTestCase):
                 coordinator = self.running()
                 coordinator.start_cycle(ASSET, CALL)
                 coordinator.reserve_next_entry(BALANCE)
+                self.stores.pop(coordinator).close()
                 self.execute(sql)
-                with self.assertRaises(StorageError):
+                with self.assertRaisesRegex(StorageError, "inconsistent saved state"):
                     self.open()
 
-    def test_store_never_overwrites_a_definitive_result(self):
+    def test_store_refuses_writes_that_contradict_saved_state(self):
         coordinator = self.running()
         coordinator.start_cycle(ASSET, CALL)
-        reservation = play(coordinator, LOSS)
+        lost = play(coordinator, LOSS)
+        coordinator.reserve_next_entry(BALANCE)  # attempt 2 stays pending
+        self.stores.pop(coordinator).close()
         store = SqliteStore(self.path)
         self.addCleanup(store.close)
         with self.assertRaises(StorageError):
-            store.save_result(reservation, WIN, WIN)
-        self.assertEqual(self.query("SELECT result FROM reservations"), [(LOSS,)])
+            store.save_result(lost, WIN, WIN)  # attempt 1 already has a definitive result
+        with self.assertRaises(StorageError):
+            store.save_abandonment(1)  # a reservation is pending
+        self.assertEqual(
+            self.query("SELECT attempt, result FROM reservations ORDER BY attempt"),
+            [(1, LOSS), (2, None)],
+        )
         self.assertEqual(self.query("SELECT outcome FROM cycles"), [(None,)])
 
     def test_simultaneous_reservations_save_a_single_entry(self):

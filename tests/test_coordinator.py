@@ -10,6 +10,7 @@ from pocketautonomo.coordinator import (
     UnknownReservationError,
 )
 from pocketautonomo.cycle import (
+    ABANDONED,
     CALL,
     CANCELLED,
     DRAW,
@@ -213,6 +214,37 @@ class EndingResultTest(unittest.TestCase):
         self.assertEqual((status.outcome, status.pending, status.is_blocked), (REJECTED, None, False))
         self.assertEqual(coordinator.start_cycle(ASSET, CALL), 2)
         self.assertEqual(coordinator.reserve_next_entry(BALANCE).entry, Entry(ASSET, CALL, 1, 500))
+
+
+class AbandonTest(unittest.TestCase):
+    def test_abandon_ends_cycle_without_a_bet_result(self):
+        coordinator = started()
+        lost = play(coordinator, LOSS)
+        coordinator.abandon_cycle()
+        status = coordinator.status()
+        self.assertEqual(
+            (status.outcome, status.is_active, status.attempt, status.pending),
+            (ABANDONED, False, 2, None),
+        )
+        self.assertIsNone(coordinator.reserve_next_entry(BALANCE))
+        self.assertFalse(coordinator.record_result(lost.reservation_id, LOSS))
+        with self.assertRaises(ValueError):
+            coordinator.record_result(lost.reservation_id, ABANDONED)  # not a bet result
+        self.assertEqual(coordinator.start_cycle(ASSET, PUT), 2)
+        self.assertEqual(coordinator.reserve_next_entry(BALANCE).entry, Entry(ASSET, PUT, 1, 500))
+
+    def test_abandon_is_refused_without_open_cycle_or_with_pending_reservation(self):
+        with self.assertRaises(CoordinatorError):
+            Coordinator().abandon_cycle()
+        ended = started()
+        play(ended, WIN)
+        pending = started()
+        pending.reserve_next_entry(BALANCE)
+        for coordinator in (ended, pending):
+            before = coordinator.status()
+            with self.assertRaises(CoordinatorError):
+                coordinator.abandon_cycle()
+            self.assertEqual(coordinator.status(), before)
 
 
 class UnknownResultTest(unittest.TestCase):

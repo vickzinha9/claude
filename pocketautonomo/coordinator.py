@@ -4,7 +4,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Optional
 
-from pocketautonomo.cycle import RESULTS, UNKNOWN, Cycle, Entry
+from pocketautonomo.cycle import ABANDONED, RESULTS, UNKNOWN, Cycle, Entry
 from pocketautonomo.storage import StorageError
 
 
@@ -29,7 +29,12 @@ class Reservation:
 
 @dataclass(frozen=True)
 class Status:
-    """Consistent snapshot of a coordinator; every field is empty before the first cycle."""
+    """Consistent snapshot of a coordinator; every field is empty before the first cycle.
+
+    recovery_pending is True while the current cycle was restored still open. Its
+    decision predates the restart, so it releases no entry and has to end, through the
+    result of its pending reservation or abandon_cycle(), before a new cycle starts.
+    """
 
     cycle_id: Optional[int] = None
     asset: Optional[str] = None
@@ -40,6 +45,7 @@ class Status:
     is_blocked: bool = False
     pending: Optional[Reservation] = None
     is_paused: bool = False
+    recovery_pending: bool = False
 
     @property
     def can_start_cycle(self):
@@ -57,7 +63,8 @@ class Coordinator:
     already saved when it is returned. If saving fails, StorageError is raised and
     nothing changes. A coordinator with a store restores the saved state and starts
     paused: results are accepted, but no cycle starts and no entry is released until
-    resume() is called. A restored pending reservation is never handed out again.
+    resume() is called. A restored pending reservation is never handed out again, and
+    a cycle restored still open never releases another entry, not even after resume().
     """
 
     def __init__(self, store=None):
@@ -68,12 +75,15 @@ class Coordinator:
         self._pending = None
         self._resolved = {}  # reservation_id -> definitive result
         self._paused = False
+        self._stale_cycle_id = None  # cycle restored still open: its decision has expired
         if store is not None:
             self._restore(*store.load())
             self._paused = True
+            if self._cycle is not None and self._cycle.is_active:
+                self._stale_cycle_id = self._cycle_id
 
     def resume(self):
-        """Allow new cycles and entries again after a restore."""
+        """Allow new cycles and entries again. A restored open cycle stays stale."""
         with self._lock:
             self._paused = False
 
@@ -82,6 +92,11 @@ class Coordinator:
         with self._lock:
             if self._paused:
                 raise CoordinatorError("the coordinator is paused; call resume() first")
+            if self._recovery_pending():
+                raise CoordinatorError(
+                    "the cycle restored from before the restart is still open; "
+                    "record its pending result or call abandon_cycle() first"
+                )
             if not self._status().can_start_cycle:
                 raise CoordinatorError(
                     "a new cycle needs the previous one ended and no reservation pending"
@@ -97,13 +112,15 @@ class Coordinator:
         """Reserve the next entry of the current cycle.
 
         Returns a Reservation with a unique reservation_id, or None when no entry is
-        available: paused, no cycle, a reservation still pending, the cycle has ended,
-        or the balance does not cover the stake.
+        available: paused, recovery pending, no cycle, a reservation still pending, the
+        cycle has ended, or the balance does not cover the stake.
         """
         if isinstance(balance_cents, bool) or not isinstance(balance_cents, int):
             raise ValueError("balance_cents must be an integer")
         with self._lock:
             if self._paused or self._cycle is None or self._pending is not None:
+                return None
+            if self._recovery_pending():
                 return None
             entry = self._cycle.next_entry(balance_cents)
             if entry is None:
@@ -146,6 +163,27 @@ class Coordinator:
                 f"conflicting result for reservation {reservation_id}: {recorded} then {result}"
             )
 
+    def abandon_cycle(self):
+        """End the open cycle without a bet result. Allowed while paused.
+
+        Refused while a reservation is pending, including after UNKNOWN. No attempt
+        receives a result: the cycle outcome becomes ABANDONED. With a store, the
+        abandonment is saved before it takes effect.
+        """
+        with self._lock:
+            if self._cycle is None or not self._cycle.is_active:
+                raise CoordinatorError("there is no open cycle to abandon")
+            if self._pending is not None:
+                raise CoordinatorError(
+                    f"reservation {self._pending.reservation_id} is still pending; "
+                    "record its definitive result before abandoning the cycle"
+                )
+            cycle = copy.deepcopy(self._cycle)  # becomes current only once saved
+            cycle.abandon()
+            if self._store is not None:
+                self._store.save_abandonment(self._cycle_id)
+            self._cycle = cycle
+
     def status(self):
         """Consistent snapshot of the current state."""
         with self._lock:
@@ -165,7 +203,11 @@ class Coordinator:
             is_blocked=cycle.is_blocked,
             pending=self._pending,
             is_paused=self._paused,
+            recovery_pending=self._recovery_pending(),
         )
+
+    def _recovery_pending(self):
+        return self._stale_cycle_id == self._cycle_id and self._cycle.is_active
 
     def _restore(self, cycles, reservations):
         try:
@@ -193,6 +235,10 @@ class Coordinator:
                 else:
                     cycle.record_result(attempt, result)
                     self._resolved[reservation_id] = result
+            if outcome == ABANDONED:
+                if self._pending is not None:
+                    raise ValueError(f"cycle {cycle_id} was abandoned with a reservation pending")
+                cycle.abandon()
             if cycle.outcome != outcome:
                 raise ValueError(f"cycle {cycle_id} outcome {outcome} does not match its results")
             self._cycle, self._cycle_id = cycle, cycle_id

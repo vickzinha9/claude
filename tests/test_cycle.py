@@ -1,6 +1,7 @@
 import unittest
 
 from pocketautonomo.cycle import (
+    ABANDONED,
     CALL,
     CANCELLED,
     DRAW,
@@ -235,6 +236,31 @@ class EndingResultTest(unittest.TestCase):
         self.assertIsNone(cycle.next_entry(BALANCE))
         self.assertTrue(cycle.record_result(2, CANCELLED))
         self.assertEqual((cycle.is_blocked, cycle.outcome, cycle.attempt), (False, CANCELLED, 2))
+
+
+class AbandonTest(unittest.TestCase):
+    def test_abandon_ends_cycle_without_recording_a_result(self):
+        cycle = Cycle(ASSET, CALL)
+        cycle.record_result(1, LOSS)
+        cycle.abandon()
+        self.assertEqual((cycle.is_active, cycle.outcome, cycle.attempt), (False, ABANDONED, 2))
+        self.assertIsNone(cycle.next_entry(BALANCE))
+        self.assertFalse(cycle.record_result(1, LOSS))  # the earlier result is untouched
+        for result in (WIN, LOSS, UNKNOWN, ABANDONED):
+            with self.subTest(result=result):
+                with self.assertRaises(ValueError):
+                    cycle.record_result(2, result)
+        self.assertEqual(cycle.outcome, ABANDONED)
+
+    def test_abandon_is_refused_while_blocked_or_after_the_end(self):
+        blocked = Cycle(ASSET, CALL)
+        blocked.record_result(1, UNKNOWN)
+        won = Cycle(ASSET, PUT)
+        won.record_result(1, WIN)
+        for cycle in (blocked, won):
+            with self.assertRaises(ValueError):
+                cycle.abandon()
+        self.assertEqual((blocked.is_blocked, blocked.outcome, won.outcome), (True, None, WIN))
 
 
 class InvalidInputTest(unittest.TestCase):
