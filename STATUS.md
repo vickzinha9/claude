@@ -1,6 +1,6 @@
 # Status
 
-Branch `feature/progression-core`. O núcleo roda em memória e usa só a biblioteca padrão do Python. Ainda não há conexão com a corretora nem persistência: o estado se perde quando o processo termina.
+Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O estado do coordenador pode ser salvo em SQLite; sem banco, tudo fica em memória. Ainda não há conexão com a corretora.
 
 ## Concluído
 
@@ -21,12 +21,20 @@ Branch `feature/progression-core`. O núcleo roda em memória e usa só a biblio
 4. **Resultados adicionais:** DRAW, CANCELLED e REJECTED no ciclo e no coordenador.
    - Encerram o ciclo e liberam a reserva pendente, com a mesma proteção contra duplicados e ids incorretos.
    - CANCELLED e REJECTED só devem ser registrados quando a corretora confirmar. Timeout ou erro de rede não comprovam nada: o executor registra UNKNOWN e a reserva continua pendente.
+5. **Persistência:** `pocketautonomo/storage.py`, com testes em `tests/test_storage.py`
+   - `SqliteStore(caminho)` guarda os ciclos (ativo, direção, resultado final) e as reservas (id, ciclo, tentativa, valor, resultado). Reserva sem resultado ou com UNKNOWN está pendente.
+   - `Coordinator(store)` grava cada mudança antes de aplicá-la. A reserva já está gravada (com commit) quando é devolvida ao executor.
+   - Se a gravação falhar, a operação gera `StorageError` e nada muda: nenhuma entrada é liberada, nenhum resultado é aplicado e nenhum ciclo começa.
+   - Ao abrir com banco, o estado é restaurado e o coordenador começa pausado. Resultados continuam sendo aceitos, mas nenhum ciclo começa e nenhuma entrada é liberada até `resume()`. A reserva pendente restaurada nunca é devolvida de novo.
+   - Depois de reiniciar, resultados já processados continuam sendo ignorados como duplicados e a numeração de ciclos continua de onde parou.
+   - Um banco inconsistente (por exemplo, com duas reservas pendentes) é recusado com `StorageError`.
+   - Os bancos de execução (`*.db`, `*.sqlite`, `*.sqlite3` e arquivos auxiliares) ficam fora do Git pelo `.gitignore`. Os testes usam bancos em pastas temporárias.
 
 ## Testes
 
     python3 -m unittest discover -s tests -v
 
-Último resultado: 56 testes, todos passando, no Python 3.9.25. A suíte também passa no 3.10, 3.12 e 3.14.
+Último resultado: 73 testes, todos passando, no Python 3.9.25. A suíte também passa no 3.10, 3.12, 3.13 e 3.14.
 
 ## Decisões em vigor
 
@@ -35,9 +43,13 @@ Branch `feature/progression-core`. O núcleo roda em memória e usa só a biblio
 - Repetir o mesmo resultado retorna `False` e não muda nada. UNKNOWN atrasado é ignorado. Um resultado definitivo diferente do já registrado gera `ValueError`.
 - Id de reserva desconhecido gera `UnknownReservationError`. Iniciar um ciclo fora de hora gera `CoordinatorError`.
 - Saldo insuficiente não encerra o ciclo; a entrada fica disponível de novo quando o saldo cobrir o valor.
+- Com banco, o coordenador sempre abre pausado, inclusive na primeira execução com o banco vazio.
+- A pausa bloqueia `start_cycle` e `reserve_next_entry`, mas não `record_result`.
 
 ## Em aberto para as próximas etapas
 
+- Um ciclo restaurado sem reserva pendente continua da tentativa em que parou depois de `resume()`. Não há como abandoná-lo se o sinal já não valer.
+- A reserva ainda não guarda o id da ordem na corretora, que vai ser necessário para conferir pendências depois de reiniciar.
 - Uma reserva pendente só se resolve com resultado definitivo. Falta definir o que registrar quando a ordem comprovadamente nem chegou a ser enviada (falha local antes do envio).
 - UNKNOWN não tem prazo: o bloqueio dura até chegar um resultado definitivo.
-- Conexão com a corretora e persistência do estado.
+- Conexão com a corretora.

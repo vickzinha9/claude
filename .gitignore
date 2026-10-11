@@ -1,0 +1,9 @@
+# SQLite databases created when the app runs
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+
+__pycache__/
