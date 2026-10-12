@@ -34,9 +34,16 @@ def started(direction=CALL):
     return coordinator
 
 
+def submit(coordinator, balance=BALANCE):
+    """Reserve the next entry and start its submission; return the reservation."""
+    reservation = coordinator.reserve_next_entry(balance)
+    coordinator.begin_submission(reservation.reservation_id)
+    return reservation
+
+
 def play(coordinator, result):
-    """Reserve the next entry and record its result; return the reservation."""
-    reservation = coordinator.reserve_next_entry(BALANCE)
+    """Reserve and submit the next entry, then record its result; return the reservation."""
+    reservation = submit(coordinator)
     coordinator.record_result(reservation.reservation_id, result)
     return reservation
 
@@ -64,7 +71,7 @@ class StartCycleTest(unittest.TestCase):
 
     def test_cannot_start_while_a_reservation_is_pending(self):
         coordinator = started()
-        reservation = coordinator.reserve_next_entry(BALANCE)
+        reservation = submit(coordinator)
         with self.assertRaises(CoordinatorError):
             coordinator.start_cycle(ASSET, CALL)
         coordinator.record_result(reservation.reservation_id, UNKNOWN)
@@ -119,6 +126,8 @@ class ReservationTest(unittest.TestCase):
             self.assertIsNone(coordinator.reserve_next_entry(BALANCE))
         status = coordinator.status()
         self.assertEqual((status.pending, status.attempt), (reservation, 1))
+        coordinator.begin_submission(reservation.reservation_id)
+        self.assertIsNone(coordinator.reserve_next_entry(BALANCE))  # still pending
         coordinator.record_result(reservation.reservation_id, LOSS)
         following = coordinator.reserve_next_entry(BALANCE)
         self.assertEqual(following.entry, Entry(ASSET, CALL, 2, 1000))
@@ -129,7 +138,7 @@ class ReservationTest(unittest.TestCase):
         self.assertIsNone(coordinator.reserve_next_entry(0))
         self.assertIsNone(coordinator.reserve_next_entry(499))
         self.assertIsNone(coordinator.status().pending)
-        first = coordinator.reserve_next_entry(500)
+        first = submit(coordinator, 500)
         self.assertEqual(first.entry, Entry(ASSET, CALL, 1, 500))
         coordinator.record_result(first.reservation_id, LOSS)
         self.assertIsNone(coordinator.reserve_next_entry(999))
@@ -174,7 +183,7 @@ class EndingResultTest(unittest.TestCase):
             with self.subTest(result=result):
                 coordinator = started()
                 play(coordinator, LOSS)
-                reservation = coordinator.reserve_next_entry(BALANCE)
+                reservation = submit(coordinator)
                 self.assertTrue(coordinator.record_result(reservation.reservation_id, result))
                 status = coordinator.status()
                 self.assertEqual(
@@ -200,7 +209,7 @@ class EndingResultTest(unittest.TestCase):
 
     def test_timeout_stays_unknown_until_rejection_is_confirmed(self):
         coordinator = started()
-        reservation = coordinator.reserve_next_entry(BALANCE)
+        reservation = submit(coordinator)
         with self.assertRaises(ValueError):
             coordinator.record_result(reservation.reservation_id, "TIMEOUT")
         coordinator.record_result(reservation.reservation_id, UNKNOWN)  # timeout or network error
@@ -251,7 +260,7 @@ class UnknownResultTest(unittest.TestCase):
     def setUp(self):
         self.coordinator = started()
         self.first = play(self.coordinator, LOSS)
-        self.second = self.coordinator.reserve_next_entry(BALANCE)
+        self.second = submit(self.coordinator)
         self.assertTrue(self.coordinator.record_result(self.second.reservation_id, UNKNOWN))
 
     def assert_still_blocked(self):
@@ -295,7 +304,7 @@ class UnknownResultTest(unittest.TestCase):
 class DuplicateResultTest(unittest.TestCase):
     def test_duplicate_loss_does_not_advance_again(self):
         coordinator = started()
-        first = coordinator.reserve_next_entry(BALANCE)
+        first = submit(coordinator)
         self.assertTrue(coordinator.record_result(first.reservation_id, LOSS))
         self.assertFalse(coordinator.record_result(first.reservation_id, LOSS))
         second = coordinator.reserve_next_entry(BALANCE)
@@ -325,7 +334,7 @@ class DuplicateResultTest(unittest.TestCase):
         old_loss = play(coordinator, LOSS)
         old_win = play(coordinator, WIN)
         coordinator.start_cycle(ASSET, PUT)
-        current = coordinator.reserve_next_entry(BALANCE)
+        current = submit(coordinator)
         self.assertFalse(coordinator.record_result(old_loss.reservation_id, LOSS))
         self.assertFalse(coordinator.record_result(old_win.reservation_id, WIN))
         self.assertFalse(coordinator.record_result(old_loss.reservation_id, UNKNOWN))
@@ -341,7 +350,7 @@ class DuplicateResultTest(unittest.TestCase):
 class WrongIdentifierTest(unittest.TestCase):
     def setUp(self):
         self.coordinator = started()
-        self.reservation = self.coordinator.reserve_next_entry(BALANCE)
+        self.reservation = submit(self.coordinator)
 
     def assert_untouched(self):
         status = self.coordinator.status()
@@ -442,7 +451,7 @@ class ConcurrencyTest(unittest.TestCase):
 
     def test_simultaneous_duplicate_results_advance_once(self):
         coordinator = started()
-        reservation = coordinator.reserve_next_entry(BALANCE)
+        reservation = submit(coordinator)
         results = self.run_simultaneously(
             lambda: coordinator.record_result(reservation.reservation_id, LOSS)
         )
@@ -460,6 +469,7 @@ class ConcurrencyTest(unittest.TestCase):
                 reservation = coordinator.reserve_next_entry(BALANCE)
                 if reservation is not None:
                     taken.append(reservation)
+                    coordinator.begin_submission(reservation.reservation_id)
                     coordinator.record_result(reservation.reservation_id, LOSS)
                 elif not coordinator.status().is_active:
                     return "done"

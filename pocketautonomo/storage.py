@@ -255,16 +255,17 @@ class SqliteStore:
     def save_acceptance(self, reservation_id, broker_order_id):
         """Save that the broker accepted a reservation as the order broker_order_id.
 
-        A pending reservation that is SUBMITTING or UNVERIFIED becomes ACCEPTED, and the
-        order id is committed before True is returned. Repeating the same acceptance
-        returns False and changes nothing. A different order id, an order id that
-        belongs to another reservation, a reservation still RESERVED or one with a
-        definitive result raises StorageError and changes nothing.
+        A reservation that is SUBMITTING or UNVERIFIED becomes ACCEPTED, also after its
+        result: the link is for checking and history and changes neither the result nor
+        the cycle. The order id is committed before True is returned. Repeating the same
+        acceptance returns False and changes nothing. A different order id, an order id
+        that belongs to another reservation or a reservation still RESERVED raises
+        StorageError and changes nothing.
         """
         _check_reservation_id(reservation_id)
         _check_order_id(broker_order_id)
         with self._transaction("saving the acceptance") as connection:
-            state, saved_order_id, result = self._submission_row(connection, reservation_id)
+            state, saved_order_id, _ = self._submission_row(connection, reservation_id)
             if state == ACCEPTED:
                 if saved_order_id == broker_order_id:
                     return False  # the same acceptance again
@@ -276,10 +277,6 @@ class SqliteStore:
                 raise StorageError(
                     f"reservation {reservation_id} is {state}: only {SUBMITTING} or"
                     f" {UNVERIFIED} can become {ACCEPTED}"
-                )
-            if result not in (None, UNKNOWN):
-                raise StorageError(
-                    f"reservation {reservation_id} already has the result {result}"
                 )
             owner = connection.execute(
                 "SELECT reservation_id FROM reservations WHERE broker_order_id = ?",

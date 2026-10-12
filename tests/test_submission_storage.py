@@ -69,7 +69,7 @@ class SubmissionStorageTestCase(unittest.TestCase):
         """A store holding a reservation whose submission has started."""
         store = self.open_store()
         coordinator, reservation_id = self.reserve(store)
-        store.save_submission_start(reservation_id)
+        coordinator.begin_submission(reservation_id)
         return store, coordinator, reservation_id
 
     def make_legacy_database(self, pending_result=None):
@@ -97,6 +97,16 @@ class SubmissionStorageTestCase(unittest.TestCase):
         return (
             self.query("SELECT * FROM cycles ORDER BY cycle_id"),
             self.query("SELECT * FROM reservations ORDER BY cycle_id, attempt"),
+        )
+
+    def settled_rows(self):
+        """Cycle outcomes and reservation results: what an acceptance must never change."""
+        return (
+            self.query("SELECT * FROM cycles ORDER BY cycle_id"),
+            self.query(
+                "SELECT reservation_id, cycle_id, attempt, stake_cents, result"
+                " FROM reservations ORDER BY cycle_id, attempt"
+            ),
         )
 
     def execute(self, sql, parameters=()):
@@ -135,7 +145,10 @@ class MigrationTest(SubmissionStorageTestCase):
             (status.cycle_id, status.attempt, status.is_blocked, status.recovery_pending),
             (3, 2, True, True),
         )
-        self.assertEqual(status.pending.reservation_id, "old-5")
+        self.assertEqual(
+            (status.pending.reservation_id, status.submission_state, status.broker_order_id),
+            ("old-5", UNVERIFIED, None),
+        )
 
     def test_failed_migration_is_rolled_back(self):
         self.make_legacy_database()
@@ -210,8 +223,13 @@ class SubmissionStartTest(SubmissionStorageTestCase):
             with self.subTest(result=result):
                 self.path = os.path.join(self.directory, f"{result}.db")
                 store = self.open_store()
-                coordinator, reservation_id = self.reserve(store)
-                coordinator.record_result(reservation_id, result)
+                _, reservation_id = self.reserve(store)
+                # The coordinator refuses results before the submission starts, so a
+                # RESERVED row with a result only comes from older code or tampering.
+                self.execute(
+                    "UPDATE reservations SET result = ? WHERE reservation_id = ?",
+                    (result, reservation_id),
+                )
                 with self.assertRaisesRegex(StorageError, f"already has the result {result}"):
                     store.save_submission_start(reservation_id)
                 self.assertEqual(self.submission(reservation_id), (RESERVED, None))
@@ -244,7 +262,7 @@ class AcceptanceTest(SubmissionStorageTestCase):
         store.save_acceptance(first, "ORD-1")
         coordinator.record_result(first, LOSS)
         second = coordinator.reserve_next_entry(BALANCE).reservation_id
-        store.save_submission_start(second)
+        coordinator.begin_submission(second)
         with self.assertRaisesRegex(StorageError, f"ORD-1 already belongs to reservation {first}"):
             store.save_acceptance(second, "ORD-1")
         self.assertEqual(self.submission(second), (SUBMITTING, None))
@@ -257,7 +275,7 @@ class AcceptanceTest(SubmissionStorageTestCase):
         self.assertEqual(self.submission(second), (SUBMITTING, None))
         self.assertTrue(store.save_acceptance(second, "ORD-2"))
 
-    def test_acceptance_needs_a_pending_reservation_whose_submission_started(self):
+    def test_acceptance_needs_a_started_submission_and_never_changes_the_result(self):
         store, coordinator, reservation_id = self.started()
         coordinator.record_result(reservation_id, UNKNOWN)  # e.g. a timeout: still pending
         self.assertTrue(store.save_acceptance(reservation_id, "ORD-1"))
@@ -266,22 +284,26 @@ class AcceptanceTest(SubmissionStorageTestCase):
         later = coordinator.reserve_next_entry(BALANCE).reservation_id
         with self.assertRaisesRegex(StorageError, "is RESERVED: only SUBMITTING or UNVERIFIED"):
             store.save_acceptance(later, "ORD-2")  # its submission never started
-        store.save_submission_start(later)
+        coordinator.begin_submission(later)
         coordinator.record_result(later, WIN)
-        with self.assertRaisesRegex(StorageError, "already has the result WIN"):
-            store.save_acceptance(later, "ORD-2")
-        self.assertEqual(self.submission(later), (SUBMITTING, None))
+        settled = self.settled_rows()
+        self.assertTrue(store.save_acceptance(later, "ORD-2"))  # late: after its result
+        self.assertEqual(self.submission(later), (ACCEPTED, "ORD-2"))
+        self.assertEqual(self.settled_rows(), settled)  # results and outcomes untouched
         with self.assertRaisesRegex(StorageError, "does not exist"):
             store.save_acceptance("unknown-id", "ORD-3")
 
-    def test_unverified_pending_reservation_can_be_accepted(self):
+    def test_unverified_reservations_can_be_accepted_also_after_their_result(self):
         self.make_legacy_database()
         store = self.open_store()
-        self.assertTrue(store.save_acceptance("old-5", "ORD-OLD"))
-        self.assertEqual(self.submission("old-5"), (ACCEPTED, "ORD-OLD"))
-        with self.assertRaisesRegex(StorageError, "already has the result LOSS"):
-            store.save_acceptance("old-4", "ORD-OLD-4")  # UNVERIFIED, but resolved
-        self.assertEqual(self.submission("old-4"), (UNVERIFIED, None))
+        settled = self.settled_rows()
+        self.assertTrue(store.save_acceptance("old-5", "ORD-OLD-5"))  # pending
+        self.assertTrue(store.save_acceptance("old-4", "ORD-OLD-4"))  # resolved with LOSS
+        self.assertEqual(self.submission("old-4"), (ACCEPTED, "ORD-OLD-4"))
+        self.assertEqual(self.settled_rows(), settled)
+        with self.assertRaisesRegex(StorageError, "ORD-OLD-4 already belongs to reservation old-4"):
+            store.save_acceptance("old-3", "ORD-OLD-4")  # unique also for late links
+        self.assertEqual(self.submission("old-3"), (UNVERIFIED, None))
 
     def test_only_non_empty_text_is_an_order_id(self):
         store, _, reservation_id = self.started()

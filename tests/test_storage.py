@@ -30,9 +30,16 @@ ASSET = "EURUSD_otc"
 BALANCE = 100_000  # R$1.000,00 in cents
 
 
-def play(coordinator, result):
-    """Reserve the next entry and record its result; return the reservation."""
+def submit(coordinator):
+    """Reserve the next entry and start its submission; return the reservation."""
     reservation = coordinator.reserve_next_entry(BALANCE)
+    coordinator.begin_submission(reservation.reservation_id)
+    return reservation
+
+
+def play(coordinator, result):
+    """Reserve and submit the next entry, then record its result; return the reservation."""
+    reservation = submit(coordinator)
     coordinator.record_result(reservation.reservation_id, result)
     return reservation
 
@@ -201,7 +208,7 @@ class RecoveryTest(StorageTestCase):
                 self.path = os.path.join(self.directory, f"pending-{unknown}.db")
                 before = self.running()
                 before.start_cycle(ASSET, CALL)
-                pending = before.reserve_next_entry(BALANCE)
+                pending = submit(before)
                 if unknown:
                     before.record_result(pending.reservation_id, UNKNOWN)
 
@@ -218,7 +225,7 @@ class RecoveryTest(StorageTestCase):
     def test_loss_for_restored_reservation_keeps_recovery_blocked(self):
         before = self.running()
         before.start_cycle(ASSET, CALL)
-        pending = before.reserve_next_entry(BALANCE)
+        pending = submit(before)
 
         after = self.restart(before)
         self.assertTrue(after.record_result(pending.reservation_id, LOSS))  # while paused
@@ -237,7 +244,7 @@ class RecoveryTest(StorageTestCase):
         before.start_cycle(ASSET, CALL)
         for _ in range(3):
             play(before, LOSS)
-        last = before.reserve_next_entry(BALANCE)
+        last = submit(before)
         self.assertEqual(last.entry.stake_cents, 4000)
 
         after = self.restart(before)
@@ -255,7 +262,7 @@ class UnknownAfterRestartTest(StorageTestCase):
         before = self.running()
         before.start_cycle(ASSET, CALL)
         play(before, LOSS)
-        pending = before.reserve_next_entry(BALANCE)
+        pending = submit(before)
         before.record_result(pending.reservation_id, UNKNOWN)
 
         after = self.restart(before)
@@ -276,7 +283,7 @@ class UnknownAfterRestartTest(StorageTestCase):
     def test_confirmation_after_unknown_survives_another_restart(self):
         before = self.running()
         before.start_cycle(ASSET, CALL)
-        pending = before.reserve_next_entry(BALANCE)
+        pending = submit(before)
         before.record_result(pending.reservation_id, UNKNOWN)
         self.assertEqual(self.query("SELECT result FROM reservations"), [(UNKNOWN,)])
 
@@ -346,7 +353,7 @@ class WriteFailureTest(StorageTestCase):
     def test_failed_result_write_keeps_reservation_pending(self):
         coordinator = self.running()
         coordinator.start_cycle(ASSET, CALL)
-        reservation = coordinator.reserve_next_entry(BALANCE)
+        reservation = submit(coordinator)
         before = coordinator.status()
         undo = self.fail_writes("UPDATE", "reservations")
         for result in (UNKNOWN, LOSS, WIN):
@@ -362,7 +369,7 @@ class WriteFailureTest(StorageTestCase):
     def test_failed_outcome_write_rolls_back_the_whole_result(self):
         coordinator = self.running()
         coordinator.start_cycle(ASSET, CALL)
-        reservation = coordinator.reserve_next_entry(BALANCE)
+        reservation = submit(coordinator)
         undo = self.fail_writes("UPDATE", "cycles")
         with self.assertRaises(StorageError):
             coordinator.record_result(reservation.reservation_id, WIN)

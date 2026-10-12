@@ -107,6 +107,7 @@ class ExclusivityTest(unittest.TestCase):
         first.resume()
         first.start_cycle(ASSET, CALL)
         reservation = first.reserve_next_entry(BALANCE)
+        first.begin_submission(reservation.reservation_id)
         saved = self.digest()
 
         refused = self.second_instance()
@@ -156,6 +157,10 @@ class ExclusivityTest(unittest.TestCase):
             "start_cycle": lambda: coordinator.start_cycle(ASSET, CALL),
             "reserve_next_entry": lambda: coordinator.reserve_next_entry(BALANCE),
             "record_result": lambda: coordinator.record_result(reservation.reservation_id, LOSS),
+            "begin_submission": lambda: coordinator.begin_submission(reservation.reservation_id),
+            "confirm_acceptance": lambda: coordinator.confirm_acceptance(
+                reservation.reservation_id, "ORD-1"
+            ),
             "abandon_cycle": coordinator.abandon_cycle,
         }
         for name, operation in operations.items():
