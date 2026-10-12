@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from pocketautonomo.cycle import ABANDONED, UNKNOWN
 from pocketautonomo.submission import (
     ACCEPTED,
+    NOT_SUBMITTED,
     RESERVED,
     SUBMISSION_STATES,
     SUBMITTING,
@@ -58,6 +59,11 @@ MIGRATIONS = {
         "CREATE UNIQUE INDEX reservations_broker_order_id ON reservations (broker_order_id)",
     ),
 }
+
+# SQL condition of a pending reservation: no definitive result yet (NULL or UNKNOWN),
+# unless it was closed as NOT_SUBMITTED. Its two parameters are UNKNOWN and
+# NOT_SUBMITTED, in that order.
+_PENDING = "(result IS NULL OR result = ?) AND submission_state <> ?"
 
 # errno values meaning that another open file already holds the lock.
 _LOCK_HELD = {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK, errno.EDEADLK}
@@ -147,9 +153,12 @@ class SqliteStore:
     afterwards. The methods take no lock of their own: the coordinator calls them
     under its lock.
 
-    A reservation whose result is NULL or UNKNOWN is still pending. Its submission
-    state is RESERVED until save_submission_start(), SUBMITTING until
-    save_acceptance() and then ACCEPTED, together with the broker order id. A
+    A reservation whose result is NULL or UNKNOWN is still pending, unless it was
+    closed as NOT_SUBMITTED. Its submission state is RESERVED until
+    save_submission_start(), SUBMITTING until save_acceptance() and then ACCEPTED,
+    together with the broker order id. save_not_submitted() closes a RESERVED
+    reservation whose submission never started as NOT_SUBMITTED and abandons its
+    cycle; it never gets a result, a submission start or an acceptance afterwards. A
     reservation saved before submissions were tracked is UNVERIFIED: it may have been
     submitted, so it is never submitted again.
     """
@@ -238,6 +247,11 @@ class SqliteStore:
                     f"reservation {reservation_id} is {UNVERIFIED}: it may already have"
                     " been submitted, so no submission can start"
                 )
+            if state == NOT_SUBMITTED:
+                raise StorageError(
+                    f"reservation {reservation_id} was closed as {NOT_SUBMITTED}: it can"
+                    " never be submitted"
+                )
             if state != RESERVED:
                 raise StorageError(
                     f"reservation {reservation_id} is {state}: a submission starts only"
@@ -259,13 +273,18 @@ class SqliteStore:
         result: the link is for checking and history and changes neither the result nor
         the cycle. The order id is committed before True is returned. Repeating the same
         acceptance returns False and changes nothing. A different order id, an order id
-        that belongs to another reservation or a reservation still RESERVED raises
-        StorageError and changes nothing.
+        that belongs to another reservation, a reservation still RESERVED or one closed
+        as NOT_SUBMITTED raises StorageError and changes nothing.
         """
         _check_reservation_id(reservation_id)
         _check_order_id(broker_order_id)
         with self._transaction("saving the acceptance") as connection:
             state, saved_order_id, _ = self._submission_row(connection, reservation_id)
+            if state == NOT_SUBMITTED:
+                raise StorageError(
+                    f"reservation {reservation_id} was closed as {NOT_SUBMITTED}: it was"
+                    " never submitted, so no broker order can belong to it"
+                )
             if state == ACCEPTED:
                 if saved_order_id == broker_order_id:
                     return False  # the same acceptance again
@@ -293,15 +312,114 @@ class SqliteStore:
             )
             return True
 
-    def save_result(self, reservation, result, outcome):
-        """Save a result of a pending reservation and, if the cycle ended, its outcome."""
-        with self._transaction("saving the result") as connection:
+    def save_not_submitted(self, reservation_id):
+        """Close a reservation whose submission never started, and abandon its cycle.
+
+        Only a RESERVED reservation without a result or a broker order id, in an open
+        cycle, can be closed: RESERVED is the only state that proves that no submission
+        started, because the start is saved as SUBMITTING before anything is sent. In
+        one transaction the reservation becomes NOT_SUBMITTED and its cycle ABANDONED,
+        which is refused while another reservation of the cycle is still pending. Both
+        changes are committed before True is returned. NOT_SUBMITTED is not a bet
+        result: no result is saved and the attempt does not move.
+
+        Repeating a consistent closure returns False and changes nothing. Any other
+        state, a result (UNKNOWN included), an order id, an ended cycle, an
+        inconsistent closure or a failed write raises StorageError; the transaction is
+        then rolled back, so neither change is kept.
+        """
+        _check_reservation_id(reservation_id)
+        with self._transaction("saving the NOT_SUBMITTED closure") as connection:
+            row = connection.execute(
+                "SELECT r.submission_state, r.broker_order_id, r.result, r.cycle_id,"
+                " c.cycle_id IS NOT NULL, c.outcome"
+                " FROM reservations AS r LEFT JOIN cycles AS c ON c.cycle_id = r.cycle_id"
+                " WHERE r.reservation_id = ?",
+                (reservation_id,),
+            ).fetchone()
+            if row is None:
+                raise StorageError(f"reservation {reservation_id} does not exist")
+            state, order_id, result, cycle_id, cycle_exists, outcome = row
+            if not cycle_exists:
+                raise StorageError(
+                    f"inconsistent saved state: cycle {cycle_id} of reservation"
+                    f" {reservation_id} does not exist"
+                )
+            if state == NOT_SUBMITTED:
+                consistent = (result, order_id, outcome) == (None, None, ABANDONED)
+                if not consistent or self._has_pending(connection, cycle_id):
+                    raise StorageError(
+                        f"inconsistent saved state: reservation {reservation_id} is"
+                        f" {NOT_SUBMITTED} with result {result!r} and order id"
+                        f" {order_id!r} in cycle {cycle_id} ({outcome or 'open'}); a"
+                        f" closure has neither and leaves its cycle {ABANDONED} without"
+                        " pending reservations"
+                    )
+                return False  # the same closure again
+            if state != RESERVED:
+                raise StorageError(
+                    f"reservation {reservation_id} is {state}: only a {RESERVED}"
+                    " reservation, whose submission never started, can be closed as"
+                    f" {NOT_SUBMITTED}"
+                )
+            if order_id is not None:
+                raise StorageError(
+                    f"reservation {reservation_id} is linked to order {order_id}, so it"
+                    f" cannot be closed as {NOT_SUBMITTED}"
+                )
+            if result == UNKNOWN:
+                raise StorageError(
+                    f"reservation {reservation_id} has an {UNKNOWN} result: it may have"
+                    f" been submitted, so it cannot be closed as {NOT_SUBMITTED}"
+                )
+            if result is not None:
+                raise StorageError(
+                    f"reservation {reservation_id} already has the result {result}"
+                )
+            if outcome is not None:
+                raise StorageError(f"cycle {cycle_id} already ended with {outcome}")
             updated = connection.execute(
-                "UPDATE reservations SET result = ?"
-                " WHERE reservation_id = ? AND (result IS NULL OR result = ?)",
-                (result, reservation.reservation_id, UNKNOWN),
+                "UPDATE reservations SET submission_state = ? WHERE reservation_id = ?"
+                " AND submission_state = ? AND result IS NULL AND broker_order_id IS NULL",
+                (NOT_SUBMITTED, reservation_id, RESERVED),
             ).rowcount
             if updated != 1:
+                raise StorageError(f"reservation {reservation_id} is no longer {RESERVED}")
+            # The reservation is NOT_SUBMITTED now, so only another pending reservation
+            # of the cycle can stop the abandonment, which also undoes the update above.
+            updated = connection.execute(
+                "UPDATE cycles SET outcome = ? WHERE cycle_id = ? AND outcome IS NULL"
+                f" AND NOT EXISTS (SELECT 1 FROM reservations WHERE cycle_id = ? AND {_PENDING})",
+                (ABANDONED, cycle_id, cycle_id, UNKNOWN, NOT_SUBMITTED),
+            ).rowcount
+            if updated != 1:
+                raise StorageError(
+                    f"cycle {cycle_id} cannot be {ABANDONED}: another reservation of the"
+                    " cycle is still pending"
+                )
+            return True
+
+    def save_result(self, reservation, result, outcome):
+        """Save a result of a pending reservation and, if the cycle ended, its outcome.
+
+        A reservation closed as NOT_SUBMITTED is not pending, so it never gets a result.
+        """
+        with self._transaction("saving the result") as connection:
+            updated = connection.execute(
+                f"UPDATE reservations SET result = ? WHERE reservation_id = ? AND {_PENDING}",
+                (result, reservation.reservation_id, UNKNOWN, NOT_SUBMITTED),
+            ).rowcount
+            if updated != 1:
+                row = connection.execute(
+                    "SELECT submission_state FROM reservations WHERE reservation_id = ?",
+                    (reservation.reservation_id,),
+                ).fetchone()
+                if row is not None and row[0] == NOT_SUBMITTED:
+                    raise StorageError(
+                        f"reservation {reservation.reservation_id} was closed as"
+                        f" {NOT_SUBMITTED}: it was never submitted, so it cannot have a"
+                        " result"
+                    )
                 raise StorageError(f"reservation {reservation.reservation_id} is not pending")
             if outcome is not None:
                 connection.execute(
@@ -314,9 +432,8 @@ class SqliteStore:
         with self._transaction("saving the abandonment") as connection:
             updated = connection.execute(
                 "UPDATE cycles SET outcome = ? WHERE cycle_id = ? AND outcome IS NULL"
-                " AND NOT EXISTS (SELECT 1 FROM reservations WHERE cycle_id = ?"
-                " AND (result IS NULL OR result = ?))",
-                (ABANDONED, cycle_id, cycle_id, UNKNOWN),
+                f" AND NOT EXISTS (SELECT 1 FROM reservations WHERE cycle_id = ? AND {_PENDING})",
+                (ABANDONED, cycle_id, cycle_id, UNKNOWN, NOT_SUBMITTED),
             ).rowcount
             if updated != 1:
                 raise StorageError(f"cycle {cycle_id} is not open without pending reservations")
@@ -361,6 +478,15 @@ class SqliteStore:
         if row is None:
             raise StorageError(f"reservation {reservation_id} does not exist")
         return row
+
+    @staticmethod
+    def _has_pending(connection, cycle_id):
+        """Whether a reservation of the cycle is still pending."""
+        row = connection.execute(
+            f"SELECT EXISTS (SELECT 1 FROM reservations WHERE cycle_id = ? AND {_PENDING})",
+            (cycle_id, UNKNOWN, NOT_SUBMITTED),
+        ).fetchone()
+        return bool(row[0])
 
     def _open_connection(self):
         if self._connection is None:
