@@ -6,7 +6,13 @@ from typing import Optional
 
 from pocketautonomo.cycle import ABANDONED, RESULTS, UNKNOWN, Cycle, Entry
 from pocketautonomo.storage import StorageError
-from pocketautonomo.submission import ACCEPTED, RESERVED, SUBMITTING, UNVERIFIED
+from pocketautonomo.submission import (
+    ACCEPTED,
+    NOT_SUBMITTED,
+    RESERVED,
+    SUBMITTING,
+    UNVERIFIED,
+)
 
 
 class CoordinatorError(Exception):
@@ -34,11 +40,13 @@ class Status:
 
     recovery_pending is True while the current cycle was restored still open. Its
     decision predates the restart, so it releases no entry and has to end, through the
-    result of its pending reservation or abandon_cycle(), before a new cycle starts.
+    result of its pending reservation, close_not_submitted() or abandon_cycle(), before
+    a new cycle starts.
 
     submission_state and broker_order_id describe the pending reservation.
-    submission_failure holds the storage error that stopped every new submission. It
-    stays, even after resume(), until the coordinator is closed and reopened.
+    submission_failure holds the storage error that stopped every new submission and
+    every new NOT_SUBMITTED closure. It stays, even after resume(), until the
+    coordinator is closed and reopened.
     """
 
     cycle_id: Optional[int] = None
@@ -82,12 +90,15 @@ class Coordinator:
     A reservation is RESERVED when it is handed out. begin_submission() makes it
     SUBMITTING right before it is sent, and confirm_acceptance() makes it ACCEPTED
     with the broker order id. Only a reservation whose submission started can receive
-    a result, and an acceptance never settles the bet.
+    a result, and an acceptance never settles the bet. A pending reservation whose
+    submission provably never started is closed with close_not_submitted(): it
+    becomes NOT_SUBMITTED and its cycle ABANDONED, without any bet result.
 
     With a store, every change is saved before it takes effect, so a reservation is
     already saved when it is returned. If saving fails, StorageError is raised and
-    nothing changes. A failure while saving a submission start or an acceptance also
-    stops every new submission until the coordinator is closed and reopened.
+    nothing changes. A failure while saving a submission start, an acceptance or a
+    NOT_SUBMITTED closure also stops every new submission until the coordinator is
+    closed and reopened.
 
     A coordinator with a store restores the saved state, including the submission
     state and order id of every reservation, and starts paused: results and
@@ -157,8 +168,9 @@ class Coordinator:
             self._check_submissions_allowed()
             if self._recovery_pending():
                 raise CoordinatorError(
-                    "the cycle restored from before the restart is still open; "
-                    "record its pending result or call abandon_cycle() first"
+                    "the cycle restored from before the restart is still open; end it"
+                    " first with the result of its pending reservation,"
+                    " close_not_submitted() or abandon_cycle()"
                 )
             if not self._status().can_start_cycle:
                 raise CoordinatorError(
@@ -204,8 +216,9 @@ class Coordinator:
 
         Only a RESERVED reservation handed out by this coordinator can start, and only
         once: a repeated or simultaneous call raises CoordinatorError, and so does a
-        call while paused, during recovery, after a submission failure or for a
-        restored reservation. With a store, SUBMITTING is saved before the reservation
+        call while paused, during recovery, after a submission failure, for a restored
+        reservation or for one closed as NOT_SUBMITTED. With a store, SUBMITTING is
+        saved before the reservation
         is returned. If saving fails, StorageError is raised, the reservation stays
         pending and RESERVED, and every new submission is stopped until the
         coordinator is reopened.
@@ -246,10 +259,11 @@ class Coordinator:
         the link is for checking and history, so it never settles the bet, changes a
         result, moves the cycle or causes a submission. Returns True when the link is
         recorded and False when the same acceptance was already recorded. A different
-        order id, an order id that belongs to another reservation or a reservation
-        still RESERVED raises CoordinatorError. With a store, the link is saved before
-        it takes effect. If saving fails, StorageError is raised, nothing changes and
-        every new submission is stopped until the coordinator is reopened.
+        order id, an order id that belongs to another reservation, a reservation still
+        RESERVED or one closed as NOT_SUBMITTED raises CoordinatorError. With a store,
+        the link is saved before it takes effect. If saving fails, StorageError is
+        raised, nothing changes and every new submission is stopped until the
+        coordinator is reopened.
         """
         _check_reservation_id(reservation_id)
         if not isinstance(broker_order_id, str) or not broker_order_id.strip():
@@ -260,6 +274,11 @@ class Coordinator:
             if submission is None:
                 raise UnknownReservationError(f"unknown reservation id {reservation_id!r}")
             state, saved_order_id = submission
+            if state == NOT_SUBMITTED:
+                raise CoordinatorError(
+                    f"reservation {reservation_id} was closed as {NOT_SUBMITTED}: it was"
+                    " never submitted, so no broker order can belong to it"
+                )
             if state == ACCEPTED:
                 if saved_order_id == broker_order_id:
                     return False  # the same acceptance again
@@ -288,14 +307,80 @@ class Coordinator:
             self._order_owners[broker_order_id] = reservation_id
             return changed
 
+    def close_not_submitted(self, reservation_id):
+        """Close the pending reservation as NOT_SUBMITTED and end its cycle as ABANDONED.
+
+        Use it only when the submission provably never started: the reservation must
+        be the pending one, RESERVED, without a result and without a broker order id.
+        It works while paused and during recovery, also for a restored reservation.
+        SUBMITTING, ACCEPTED, UNVERIFIED and an UNKNOWN result raise CoordinatorError,
+        because a timeout, a network error or a missing order id never prove that an
+        order was not sent. After a submission failure a new closure also raises
+        CoordinatorError until the coordinator is closed and reopened, so that the
+        saved state is checked first.
+
+        NOT_SUBMITTED is not a bet result: no attempt receives a result, the attempt
+        does not move and the cycle releases no gale. With a store, the closure is
+        saved before the memory changes. If saving fails, StorageError is raised, the
+        reservation and the cycle stay as they were and every new submission is
+        stopped until the coordinator is reopened. Returns True when the reservation is
+        closed, and False when it was already closed, also after a restart; then
+        nothing changes.
+        """
+        _check_reservation_id(reservation_id)
+        with self._lock:
+            self._check_open()
+            submission = self._submissions.get(reservation_id)
+            if submission is None:
+                raise UnknownReservationError(f"unknown reservation id {reservation_id!r}")
+            state, order_id = submission
+            if state == NOT_SUBMITTED:
+                return False  # already closed: nothing changes
+            self._pending_reservation(reservation_id)  # only the pending one can close
+            if state != RESERVED:
+                raise CoordinatorError(
+                    f"reservation {reservation_id} is {state}: only a {RESERVED}"
+                    " reservation, whose submission never started, can be closed as"
+                    f" {NOT_SUBMITTED}"
+                )
+            if order_id is not None:
+                raise CoordinatorError(
+                    f"reservation {reservation_id} is linked to order {order_id}, so it"
+                    f" cannot be closed as {NOT_SUBMITTED}"
+                )
+            if self._cycle.is_blocked:
+                raise CoordinatorError(
+                    f"reservation {reservation_id} has an {UNKNOWN} result: it may have"
+                    f" been submitted, so it cannot be closed as {NOT_SUBMITTED}"
+                )
+            if self._submission_failure is not None:
+                raise CoordinatorError(
+                    f"reservation {reservation_id} cannot be closed as {NOT_SUBMITTED}"
+                    f" after a storage failure ({self._submission_failure}); close and"
+                    " reopen the coordinator to check the saved state first"
+                )
+            cycle = copy.deepcopy(self._cycle)  # becomes current only once saved
+            cycle.abandon()  # without a bet result: the attempt does not move
+            changed = True
+            if self._store is not None:
+                try:
+                    changed = self._store.save_not_submitted(reservation_id)
+                except StorageError as error:
+                    self._stop_submissions(error)
+                    raise
+            self._cycle = cycle
+            self._pending = None
+            self._submissions[reservation_id] = (NOT_SUBMITTED, None)
+            return changed
+
     def record_result(self, reservation_id, result):
         """Record the result of a reservation. Returns True if the state changed.
 
         Only the pending reservation can change the cycle, and only once its
-        submission started: a reservation still RESERVED raises CoordinatorError.
-        UNKNOWN keeps it pending until a definitive result arrives for the same id;
-        repeating the result of a resolved reservation returns False and changes
-        nothing.
+        submission started: a reservation still RESERVED raises CoordinatorError, and
+        so does one closed as NOT_SUBMITTED. UNKNOWN keeps it pending until a
+        definitive result arrives for the same id; repeating the result of a resolved
+        reservation returns False and changes nothing.
         """
         _check_reservation_id(reservation_id)
         if result not in RESULTS:
@@ -320,6 +405,12 @@ class Coordinator:
                 return changed
             recorded = self._resolved.get(reservation_id)
             if recorded is None:
+                submission = self._submissions.get(reservation_id)
+                if submission is not None and submission[0] == NOT_SUBMITTED:
+                    raise CoordinatorError(
+                        f"reservation {reservation_id} was closed as {NOT_SUBMITTED}: it"
+                        " was never submitted, so it cannot have a result"
+                    )
                 raise UnknownReservationError(f"unknown reservation id {reservation_id!r}")
             if result in (recorded, UNKNOWN):
                 return False  # duplicate or late result: never advances again
@@ -330,17 +421,30 @@ class Coordinator:
     def abandon_cycle(self):
         """End the open cycle without a bet result. Allowed while paused.
 
-        Refused while a reservation is pending, including after UNKNOWN. No attempt
-        receives a result: the cycle outcome becomes ABANDONED. With a store, the
-        abandonment is saved before it takes effect.
+        Refused while a reservation is pending, including after UNKNOWN; a pending
+        reservation that was never submitted is closed with close_not_submitted(),
+        which also abandons the cycle. No attempt receives a result: the cycle outcome
+        becomes ABANDONED. With a store, the abandonment is saved before it takes
+        effect.
         """
         with self._lock:
             self._check_open()
             if self._cycle is None or not self._cycle.is_active:
                 raise CoordinatorError("there is no open cycle to abandon")
-            if self._pending is not None:
+            pending = self._pending
+            if pending is not None:
+                never_submitted = (
+                    self._submissions[pending.reservation_id][0] == RESERVED
+                    and not self._cycle.is_blocked
+                )
+                if never_submitted:
+                    raise CoordinatorError(
+                        f"reservation {pending.reservation_id} is still pending and was"
+                        " never submitted; close_not_submitted() closes it and abandons"
+                        " the cycle"
+                    )
                 raise CoordinatorError(
-                    f"reservation {self._pending.reservation_id} is still pending; "
+                    f"reservation {pending.reservation_id} is still pending; "
                     "record its definitive result before abandoning the cycle"
                 )
             cycle = copy.deepcopy(self._cycle)  # becomes current only once saved
@@ -375,8 +479,14 @@ class Coordinator:
         pending = self._pending
         if pending is not None and pending.reservation_id == reservation_id:
             return pending
-        if reservation_id not in self._submissions:
+        submission = self._submissions.get(reservation_id)
+        if submission is None:
             raise UnknownReservationError(f"unknown reservation id {reservation_id!r}")
+        if submission[0] == NOT_SUBMITTED:
+            raise CoordinatorError(
+                f"reservation {reservation_id} was closed as {NOT_SUBMITTED}: it can never"
+                " be submitted"
+            )
         raise CoordinatorError(f"reservation {reservation_id} is not pending")
 
     def _status(self):
@@ -408,9 +518,9 @@ class Coordinator:
 
     def _restore(self, cycles, reservations, submissions):
         try:
-            self._replay(cycles, reservations)
             if set(submissions) != {row[0] for row in reservations}:
                 raise ValueError("the submissions do not match the reservations")
+            self._replay(cycles, reservations, submissions)
         except ValueError as error:
             raise StorageError(f"inconsistent saved state: {error}") from error
         self._submissions = dict(submissions)
@@ -421,8 +531,14 @@ class Coordinator:
         }
         self._restored = frozenset(submissions)
 
-    def _replay(self, cycles, reservations):
-        """Rebuild the saved state by replaying every saved result through Cycle."""
+    def _replay(self, cycles, reservations, submissions):
+        """Rebuild the saved state by replaying every saved result through Cycle.
+
+        A NOT_SUBMITTED reservation is never pending. It ended its cycle, so it must be
+        the last reservation of the cycle, at the attempt the cycle was waiting for,
+        without a result or an order id, and the cycle must be ABANDONED. The
+        abandonment is replayed once, without any bet result.
+        """
         saved = {}
         for reservation_id, cycle_id, attempt, stake_cents, result in reservations:
             saved.setdefault(cycle_id, []).append((reservation_id, attempt, stake_cents, result))
@@ -430,8 +546,33 @@ class Coordinator:
             if self._cycle is not None and self._cycle.is_active:
                 raise ValueError(f"cycle {self._cycle_id} is still active")
             cycle = Cycle(asset, direction)
+            closure = None  # the NOT_SUBMITTED reservation that ended this cycle
             for reservation_id, attempt, stake_cents, result in saved.pop(cycle_id, ()):
-                if result is None or result == UNKNOWN:  # still pending
+                if closure is not None:
+                    raise ValueError(
+                        f"reservation {reservation_id} comes after {closure}, which closed"
+                        f" cycle {cycle_id} as {NOT_SUBMITTED}"
+                    )
+                state, order_id = submissions[reservation_id]
+                if state == NOT_SUBMITTED:
+                    if result is not None or order_id is not None:
+                        raise ValueError(
+                            f"reservation {reservation_id} is {NOT_SUBMITTED} with result"
+                            f" {result!r} and order id {order_id!r}"
+                        )
+                    if outcome != ABANDONED:
+                        raise ValueError(
+                            f"reservation {reservation_id} is {NOT_SUBMITTED}, so cycle"
+                            f" {cycle_id} must be {ABANDONED}, not {outcome or 'open'}"
+                        )
+                    if self._pending is not None or attempt != cycle.attempt:
+                        raise ValueError(
+                            f"reservation {reservation_id} is {NOT_SUBMITTED} at attempt"
+                            f" {attempt}, but cycle {cycle_id} was waiting for attempt"
+                            f" {cycle.attempt}"
+                        )
+                    closure = reservation_id
+                elif result is None or result == UNKNOWN:  # still pending
                     if self._pending is not None or attempt != cycle.attempt:
                         raise ValueError(f"reservation {reservation_id} cannot be pending")
                     entry = Entry(asset, direction, attempt, stake_cents)
@@ -444,7 +585,7 @@ class Coordinator:
             if outcome == ABANDONED:
                 if self._pending is not None:
                     raise ValueError(f"cycle {cycle_id} was abandoned with a reservation pending")
-                cycle.abandon()
+                cycle.abandon()  # once, with or without a closure, never as a bet result
             if cycle.outcome != outcome:
                 raise ValueError(f"cycle {cycle_id} outcome {outcome} does not match its results")
             self._cycle, self._cycle_id = cycle, cycle_id

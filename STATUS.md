@@ -31,7 +31,7 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
    - Os bancos de execução (`*.db`, `*.sqlite`, `*.sqlite3` e arquivos auxiliares) ficam fora do Git pelo `.gitignore`. Os testes usam bancos em pastas temporárias.
 6. **Recuperação após reinício:** `pocketautonomo/coordinator.py`, com testes em `tests/test_storage.py`
    - Um ciclo restaurado em aberto conta como decisão vencida: não libera nenhuma entrada nova, nem depois de `resume()`. Enquanto ele estiver aberto, `status().recovery_pending` fica `True` e nenhum ciclo novo começa.
-   - A recuperação termina quando o ciclo antigo se encerra: pelo resultado definitivo da reserva pendente (aceito mesmo com o coordenador pausado) ou por `abandon_cycle()`. Um LOSS que ainda deixa outra tentativa mantém a recuperação bloqueada; a 4ª perda encerra o ciclo sem 5ª entrada.
+   - A recuperação termina quando o ciclo antigo se encerra: pelo resultado definitivo da reserva pendente (aceito mesmo com o coordenador pausado), por `close_not_submitted()` (item 11) ou por `abandon_cycle()`. Um LOSS que ainda deixa outra tentativa mantém a recuperação bloqueada; a 4ª perda encerra o ciclo sem 5ª entrada.
    - `abandon_cycle()` encerra o ciclo aberto sem registrar resultado de aposta: o `outcome` do ciclo vira ABANDONED e nenhuma tentativa recebe resultado. O abandono é gravado antes de mudar o estado em memória e continua valendo depois de reiniciar.
    - O abandono é recusado com `CoordinatorError` enquanto houver reserva pendente, inclusive com UNKNOWN. Também vale fora da recuperação, para um ciclo aberto sem reserva pendente.
 7. **Exclusividade entre processos:** `pocketautonomo/storage.py`, com testes em `tests/test_exclusivity.py`
@@ -79,14 +79,22 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
     - Pendente agora é: resultado NULL ou UNKNOWN e estado diferente de NOT_SUBMITTED. A mesma condição vale em `save_result`, `save_abandonment` e `save_not_submitted`.
     - Para uma reserva NOT_SUBMITTED, `save_result`, `save_submission_start` e `save_acceptance` geram `StorageError`.
     - `load()` manteve o formato: a reserva encerrada aparece sem resultado e o ciclo como ABANDONED. `load_submissions()` mostra NOT_SUBMITTED.
-    - **A integração de NOT_SUBMITTED ao Coordinator ainda está pendente.** O `coordinator.py` não mudou: não chama `save_not_submitted` e não reconhece NOT_SUBMITTED na restauração. Por isso, um banco com um encerramento é recusado ao abrir o Coordinator, embora o `SqliteStore` sozinho abra normalmente:
-      `StorageError: inconsistent saved state: cycle 1 was abandoned with a reservation pending`
+    - O Coordinator usa essa gravação em `close_not_submitted` (item 11).
+11. **Encerramento NOT_SUBMITTED no coordenador:** `pocketautonomo/coordinator.py`, com testes em `tests/test_coordinator_not_submitted.py`
+    - `close_not_submitted(reservation_id)` roda sob o lock. Um novo encerramento só vale para a reserva pendente em RESERVED, sem resultado e sem id de ordem. Funciona com o coordenador pausado, em recuperação e para reserva restaurada.
+    - Com banco, grava com `save_not_submitted` antes de alterar a memória. Depois do commit, a reserva vira NOT_SUBMITTED, a pendência sai e o ciclo vira ABANDONED. Nenhum resultado de aposta é registrado, a tentativa não avança e o ciclo não libera gale. Sem banco, o comportamento é o mesmo.
+    - São recusados com `CoordinatorError`: SUBMITTING, ACCEPTED, UNVERIFIED, reserva com UNKNOWN e reserva que não é a pendente. Id desconhecido gera `UnknownReservationError`.
+    - Com `submission_failure` ativo, um novo encerramento é recusado até fechar e reabrir o coordenador, para conferir o estado gravado. O encerramento não limpa esse bloqueio.
+    - Se a gravação do encerramento falhar, a reserva e o ciclo ficam como estavam em memória, `submission_failure` registra a causa e nenhum envio novo é permitido, nem o dessa reserva.
+    - Repetir um encerramento concluído retorna `False` e não muda nada, nem o ciclo atual, inclusive depois de reiniciar. Resultado, aceitação e início de envio para a reserva NOT_SUBMITTED são recusados com `CoordinatorError`.
+    - **Restauração:** a reserva NOT_SUBMITTED não é pendente. Ela precisa estar sem resultado e sem id de ordem, na tentativa que o ciclo esperava, e ser a última do ciclo; o ciclo precisa estar ABANDONED. O encerramento do ciclo é reproduzido uma única vez, sem resultado. Qualquer divergência gera `StorageError`. Resultados e vínculos anteriores continuam valendo, e o coordenador continua abrindo pausado.
+    - Com uma reserva pendente nunca enviada, `abandon_cycle()` continua recusado, mas a mensagem agora indica `close_not_submitted()`.
 
 ## Testes
 
     python3 -m unittest discover -s tests -v
 
-Último resultado: 121 testes, todos passando, no Python 3.9.25. A suíte também passa no 3.10, 3.12, 3.13 e 3.14, todos com SQLite 3.40.0. Tudo foi executado em Linux; o caminho do Windows (`msvcrt.locking`) ainda não foi executado.
+Último resultado: 131 testes, todos passando, no Python 3.9.25. A suíte também passa no 3.10, 3.12, 3.13 e 3.14, todos com SQLite 3.40.0. Tudo foi executado em Linux; o caminho do Windows (`msvcrt.locking`) ainda não foi executado.
 
 ## Decisões em vigor
 
@@ -96,7 +104,7 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
 - Id de reserva desconhecido gera `UnknownReservationError`. Iniciar um ciclo fora de hora gera `CoordinatorError`.
 - Saldo insuficiente não encerra o ciclo; a entrada fica disponível de novo quando o saldo cobrir o valor.
 - Com banco, o coordenador sempre abre pausado, inclusive na primeira execução com o banco vazio.
-- A pausa bloqueia `start_cycle`, `reserve_next_entry` e `begin_submission`, mas não `record_result`, `confirm_acceptance` nem `abandon_cycle`.
+- A pausa bloqueia `start_cycle`, `reserve_next_entry` e `begin_submission`, mas não `record_result`, `confirm_acceptance`, `close_not_submitted` nem `abandon_cycle`.
 - ABANDONED não é resultado de aposta: só `abandon_cycle()` o produz e `record_result` o recusa com `ValueError`.
 - Todo ciclo restaurado em aberto é tratado como vencido, por mais curto que tenha sido o reinício.
 - O coordenador é dono do banco que recebe: `close()` fecha o banco e uma restauração recusada também o fecha, liberando a trava.
@@ -105,19 +113,14 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
 - Aceitação tardia, depois do resultado definitivo, é permitida para reserva SUBMITTING ou UNVERIFIED e serve só para conferência e histórico. O id da ordem continua único.
 - Uma migração já publicada nunca é editada; mudanças de esquema entram como nova migração.
 - Só o primeiro erro de gravação de envio fica em `submission_failure`; erros seguintes não o substituem.
-- NOT_SUBMITTED não é resultado de aposta: só `save_not_submitted` o grava, e a reserva encerrada nunca recebe resultado, início de envio nem aceitação.
+- NOT_SUBMITTED não é resultado de aposta: só `close_not_submitted`, por meio de `save_not_submitted`, o grava, e a reserva encerrada nunca recebe resultado, início de envio nem aceitação.
+- `close_not_submitted` não funciona com `submission_failure` ativo, e uma falha ao gravar o encerramento também para novos envios: nos dois casos, é preciso fechar e reabrir para conferir o estado gravado.
 - Só RESERVED prova que o envio não começou. Timeout, erro de rede ou falta de id de ordem não provam nada: SUBMITTING, ACCEPTED, UNVERIFIED e UNKNOWN nunca viram NOT_SUBMITTED.
 
 ## Em aberto para as próximas etapas
 
-- **Executor de ordens: pendente.** Nada chama `begin_submission` ou `confirm_acceptance` fora dos testes.
+- **Executor de ordens: pendente.** Nada chama `begin_submission`, `confirm_acceptance` ou `close_not_submitted` fora dos testes.
 - **Conexão com a Pocket Option: pendente.** Nenhuma ordem é enviada nem consultada.
-- **Integração de NOT_SUBMITTED ao Coordinator: pendente.** A gravação já existe (item 10), mas o Coordinator ainda não a usa.
-  - Até lá, uma reserva pendente RESERVED continua travando o Coordinator: não recebe resultado, não pode ser abandonada e, se restaurada, não inicia envio. Isso acontece quando o processo para entre a reserva e o início do envio, quando o executor decide não enviar ou quando a gravação do início falha.
-  - Um banco que já tenha um encerramento NOT_SUBMITTED não abre no Coordinator.
-  - Falta `close_not_submitted(reservation_id)` sob o lock, gravando com `save_not_submitted` antes de alterar a memória. Deve funcionar pausado, em recuperação e para reserva restaurada, e ser recusado com `submission_failure` ativo até fechar e reabrir.
-  - Falta a restauração tratar NOT_SUBMITTED como não pendente e validar sua consistência com o ciclo ABANDONED.
-  - Falta recusar em memória resultado, aceitação e início de envio para a reserva encerrada.
 - Consulta de pendências pelo id da ordem e o que fazer com UNVERIFIED ou SUBMITTING sem id.
 - UNKNOWN não tem prazo: o bloqueio dura até chegar um resultado definitivo.
 - Rodar a suíte no Windows para confirmar o caminho `msvcrt.locking` (CI em Linux e Windows).

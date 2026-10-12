@@ -161,6 +161,9 @@ class ExclusivityTest(unittest.TestCase):
             "confirm_acceptance": lambda: coordinator.confirm_acceptance(
                 reservation.reservation_id, "ORD-1"
             ),
+            "close_not_submitted": lambda: coordinator.close_not_submitted(
+                reservation.reservation_id
+            ),
             "abandon_cycle": coordinator.abandon_cycle,
         }
         for name, operation in operations.items():
