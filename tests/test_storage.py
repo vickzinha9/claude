@@ -403,7 +403,8 @@ class IntegrityTest(StorageTestCase):
         tamperings = (
             "UPDATE cycles SET outcome = 'WIN'",
             "UPDATE cycles SET outcome = 'ABANDONED'",
-            "INSERT INTO reservations VALUES ('extra', 1, 2, 1000, NULL)",
+            "INSERT INTO reservations (reservation_id, cycle_id, attempt, stake_cents)"
+            " VALUES ('extra', 1, 2, 1000)",
             "UPDATE reservations SET result = 'TIMEOUT'",
             "INSERT INTO cycles VALUES (2, 'EURUSD_otc', 'CALL', NULL)",
         )

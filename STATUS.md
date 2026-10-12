@@ -1,6 +1,6 @@
 # Status
 
-Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O estado do coordenador pode ser salvo em SQLite, e só um coordenador por vez opera cada banco; sem banco, tudo fica em memória. Ainda não há conexão com a corretora.
+Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O estado do coordenador pode ser salvo em SQLite, e só um coordenador por vez opera cada banco; sem banco, tudo fica em memória. **Ainda não existe executor de ordens nem conexão com a corretora:** nenhuma ordem é enviada.
 
 ## Concluído
 
@@ -41,12 +41,27 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
    - `connect_read_only(caminho)` abre uma conexão independente só de leitura, que funciona com o coordenador rodando; o SQLite recusa escrita por ela.
    - `Coordinator.close()` fecha o coordenador e o banco e libera a trava; também funciona com `with`. Fechar de novo não faz nada. Depois de fechado, qualquer operação gera `CoordinatorError` e o `SqliteStore` fechado gera `StorageError`.
    - Os testes usam dois processos reais: o segundo é recusado enquanto o primeiro está aberto, abre depois que o primeiro fecha e também depois que o primeiro é encerrado com `kill`. Nos testes de reinício, a instância anterior é fechada antes de abrir outra.
+8. **Estados de envio (só persistência):** `pocketautonomo/submission.py` e `pocketautonomo/storage.py`, com testes em `tests/test_submission_storage.py`
+   - Estados: RESERVED, SUBMITTING, ACCEPTED e UNVERIFIED. As reservas ganharam as colunas `submission_state` e `broker_order_id`.
+   - **Migração:** a versão do esquema fica em `PRAGMA user_version`; os bancos anteriores estão na versão 0. Ao abrir, o banco é levado à versão 1 numa única transação, só adicionando colunas e um índice, sem reescrever dados.
+     - Toda reserva que já existia vira UNVERIFIED, sem id de ordem: pode ter sido enviada, então nunca pode iniciar um envio.
+     - Se qualquer passo falhar, nada fica gravado e a abertura gera `StorageError`.
+     - Um banco com versão de esquema desconhecida é recusado sem alteração.
+   - `save_reservation` grava a nova reserva como RESERVED, sem id de ordem. `load()` manteve o formato.
+   - `load_submissions()` devolve `{reservation_id: (submission_state, broker_order_id)}` e recusa linhas inconsistentes com `StorageError`, como um estado desconhecido ou ACCEPTED sem id.
+   - `save_submission_start(reservation_id)` muda RESERVED → SUBMITTING, só para reserva sem resultado; UNKNOWN conta como resultado. O commit acontece antes do retorno. Uma segunda chamada é recusada com `StorageError`, inclusive depois de reiniciar.
+   - `save_acceptance(reservation_id, broker_order_id)` muda SUBMITTING ou UNVERIFIED → ACCEPTED numa reserva pendente (sem resultado ou com UNKNOWN). O id da ordem é gravado antes de retornar `True`.
+     - Repetir a mesma aceitação retorna `False` e não muda nada, inclusive depois de reiniciar.
+     - São recusados com `StorageError`: id diferente do já gravado, id que já pertence a outra reserva, reserva RESERVED e reserva com resultado definitivo.
+   - O id da ordem precisa ser texto não vazio. O código recusa outros valores com `ValueError`. No banco, um índice único impede o mesmo id em duas reservas e uma restrição recusa texto vazio, só com espaços ou que não seja texto.
+   - Toda gravação abre a transação com `BEGIN IMMEDIATE`, então a verificação e a escrita acontecem na mesma transação. Qualquer erro, inclusive no commit, desfaz tudo.
+   - Uma falha ao gravar a aceitação deixa a reserva em SUBMITTING, que nunca permite novo envio.
 
 ## Testes
 
     python3 -m unittest discover -s tests -v
 
-Último resultado: 85 testes, todos passando, no Python 3.9.25. A suíte também passa no 3.10, 3.12, 3.13 e 3.14. Tudo foi executado em Linux; o caminho do Windows (`msvcrt.locking`) ainda não foi executado.
+Último resultado: 101 testes, todos passando, no Python 3.9.25. A suíte também passa no 3.10, 3.12, 3.13 e 3.14, todos com SQLite 3.40.0. Um banco escrito pelo código de `5f363a2` foi migrado sem perder dados. Tudo foi executado em Linux; o caminho do Windows (`msvcrt.locking`) ainda não foi executado.
 
 ## Decisões em vigor
 
@@ -61,11 +76,20 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
 - Todo ciclo restaurado em aberto é tratado como vencido, por mais curto que tenha sido o reinício.
 - O coordenador é dono do banco que recebe: `close()` fecha o banco e uma restauração recusada também o fecha, liberando a trava.
 - A trava impede um segundo coordenador, mas não impede que outro programa escreva direto no SQLite. Para consultas, use `connect_read_only`.
+- Na coluna `submission_state`, o valor padrão é UNVERIFIED. Uma inserção que não informe o estado, por exemplo de uma versão anterior do programa, gera uma reserva que nunca pode iniciar envio.
+- Uma aceitação que chega depois do resultado definitivo é recusada. Só a repetição de uma aceitação já gravada retorna `False`.
+- Uma migração já publicada nunca é editada; mudanças de esquema entram como nova migração.
 
 ## Em aberto para as próximas etapas
 
-- Rodar a suíte no Windows para confirmar o caminho `msvcrt.locking`.
-- Executor de ordens e conexão com a corretora.
-- A reserva ainda não guarda o id da ordem na corretora, que vai ser necessário para conferir pendências depois de reiniciar.
-- Uma reserva pendente só se resolve com resultado definitivo. Falta definir o que registrar quando a ordem comprovadamente nem chegou a ser enviada (falha local antes do envio).
+- **Executor de ordens: pendente.** Nada chama `save_submission_start` ou `save_acceptance` ainda.
+- **Conexão com a Pocket Option: pendente.** Nenhuma ordem é enviada nem consultada.
+- Integração com o coordenador (próxima tarefa):
+  - `begin_submission` e `confirm_acceptance` sob o lock do coordenador;
+  - estado de envio e id da ordem no `status()`;
+  - uso de `load_submissions()` ao restaurar.
+- Hoje `record_result` aceita resultado para reserva em qualquer estado de envio, inclusive RESERVED. A integração precisa fazer essa verificação.
+- Consulta de pendências pelo id da ordem e o que fazer com UNVERIFIED ou SUBMITTING sem id.
+- Encerramento de reserva comprovadamente não enviada (NOT_SUBMITTED).
 - UNKNOWN não tem prazo: o bloqueio dura até chegar um resultado definitivo.
+- Rodar a suíte no Windows para confirmar o caminho `msvcrt.locking` (CI em Linux e Windows).
