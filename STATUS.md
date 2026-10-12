@@ -1,6 +1,6 @@
 # Status
 
-Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O estado do coordenador, inclusive o estado de envio de cada reserva, pode ser salvo em SQLite, e só um coordenador por vez opera cada banco; sem banco, tudo fica em memória. **Ainda não existe executor de ordens nem conexão com a corretora:** nenhuma ordem é enviada.
+Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O estado do coordenador, inclusive o estado de envio de cada reserva, pode ser salvo em SQLite, e só um coordenador por vez opera cada banco; sem banco, tudo fica em memória. O executor já faz o envio inicial de uma ordem, testado só com uma corretora falsa. **Ainda não existe conexão com a corretora:** nenhuma ordem real é enviada.
 
 ## Concluído
 
@@ -89,12 +89,21 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
     - Repetir um encerramento concluído retorna `False` e não muda nada, nem o ciclo atual, inclusive depois de reiniciar. Resultado, aceitação e início de envio para a reserva NOT_SUBMITTED são recusados com `CoordinatorError`.
     - **Restauração:** a reserva NOT_SUBMITTED não é pendente. Ela precisa estar sem resultado e sem id de ordem, na tentativa que o ciclo esperava, e ser a última do ciclo; o ciclo precisa estar ABANDONED. O encerramento do ciclo é reproduzido uma única vez, sem resultado. Qualquer divergência gera `StorageError`. Resultados e vínculos anteriores continuam valendo, e o coordenador continua abrindo pausado.
     - Com uma reserva pendente nunca enviada, `abandon_cycle()` continua recusado, mas a mensagem agora indica `close_not_submitted()`.
+12. **Executor de ordens (só o envio inicial):** `pocketautonomo/broker.py` e `pocketautonomo/executor.py`, com testes em `tests/test_executor.py`
+    - `broker.py` é o contrato mínimo com a corretora: `OrderRequest` (reservation_id, asset, direction, stake_cents), `SubmissionResponse` (aceitação com `broker_order_id` ou rejeição explícita, sem id) e `Broker.submit_order(request)`. Timeout, erro de rede ou resposta pouco clara devem gerar exceção, nunca uma rejeição.
+    - `OrderExecutor(coordinator, broker).submit(reservation_id)` chama `begin_submission` antes da corretora, então SUBMITTING já está gravado quando a ordem sai. Se o início for recusado ou falhar, a corretora não é chamada e a reserva fica como estava, sem encerramento automático.
+    - A ordem leva exatamente o ativo, a direção, o valor em centavos e o id da reserva devolvida pelo coordenador. Chamadas repetidas ou simultâneas para a mesma reserva geram no máximo um envio, porque `begin_submission` só aceita RESERVED uma vez.
+    - Aceitação com id válido chama `confirm_acceptance`, e a aposta continua pendente até o resultado. Rejeição explícita registra REJECTED e encerra o ciclo.
+    - Exceção da corretora (timeout, erro de rede ou outra) ou resposta inválida: a reserva continua pendente e o executor registra UNKNOWN quando consegue. Ele nunca reenvia, registra LOSS ou encerra como NOT_SUBMITTED. Se gravar UNKNOWN também falhar, a pendência continua e o relatório traz os dois erros.
+    - Se uma resposta explícita chegar mas sua gravação falhar, o relatório traz a resposta, inclusive o id da ordem realmente recebido, e o erro, sem dizer que ela foi gravada. Nada mais é gravado; o coordenador mantém a pendência e os bloqueios que já existiam.
+    - `submit` não gera exceção nesses casos: devolve um `SubmissionReport` com `outcome` NOT_STARTED, ACCEPTANCE_RECORDED, REJECTION_RECORDED ou UNCERTAIN, o pedido enviado, a resposta válida recebida, `broker_order_id`, `unknown_recorded` e os erros.
+    - Os testes usam uma corretora falsa definida no próprio arquivo de testes, com ids `FAKE-...`; nenhuma ordem chega a uma corretora real. Erro de rede, resposta inválida e falha ao gravar a rejeição não têm teste na suíte: foram conferidos só por um script avulso nesta entrega.
 
 ## Testes
 
     python3 -m unittest discover -s tests -v
 
-Último resultado: 131 testes, todos passando, no Python 3.9.25. A suíte também passa no 3.10, 3.12, 3.13 e 3.14, todos com SQLite 3.40.0. Tudo foi executado em Linux; o caminho do Windows (`msvcrt.locking`) ainda não foi executado.
+Último resultado: 137 testes, todos passando, no Python 3.9.25. A suíte também passa no 3.10, 3.12, 3.13 e 3.14, todos com SQLite 3.40.0. Tudo foi executado em Linux; o caminho do Windows (`msvcrt.locking`) ainda não foi executado.
 
 ## Decisões em vigor
 
@@ -116,11 +125,14 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
 - NOT_SUBMITTED não é resultado de aposta: só `close_not_submitted`, por meio de `save_not_submitted`, o grava, e a reserva encerrada nunca recebe resultado, início de envio nem aceitação.
 - `close_not_submitted` não funciona com `submission_failure` ativo, e uma falha ao gravar o encerramento também para novos envios: nos dois casos, é preciso fechar e reabrir para conferir o estado gravado.
 - Só RESERVED prova que o envio não começou. Timeout, erro de rede ou falta de id de ordem não provam nada: SUBMITTING, ACCEPTED, UNVERIFIED e UNKNOWN nunca viram NOT_SUBMITTED.
+- O executor registra UNKNOWN só quando a resposta da corretora é desconhecida (exceção ou resposta inválida). Quando a resposta é explícita mas não pode ser gravada, ele a devolve no relatório, sem registrar outro resultado.
+- O executor nunca repete um envio nem chama `close_not_submitted`.
 
 ## Em aberto para as próximas etapas
 
-- **Executor de ordens: pendente.** Nada chama `begin_submission`, `confirm_acceptance` ou `close_not_submitted` fora dos testes.
-- **Conexão com a Pocket Option: pendente.** Nenhuma ordem é enviada nem consultada.
+- **Executor de ordens: só o envio inicial existe.** Faltam `reconcile_pending` (consulta só pela ordem vinculada à reserva, conferência do id devolvido e registro do resultado), a corretora simulada completa, horários, payout e a estratégia CALL/PUT. Até lá, uma reserva aceita ou em UNKNOWN fica pendente até alguém registrar o resultado.
+- O id de uma aceitação que não pôde ser gravada só existe no `SubmissionReport`. Quem chama `submit` precisa guardá-lo ou registrá-lo em log até a recuperação; senão, a reserva fica SUBMITTING sem id.
+- **Conexão com a Pocket Option: pendente.** Nenhuma ordem real é enviada nem consultada.
 - Consulta de pendências pelo id da ordem e o que fazer com UNVERIFIED ou SUBMITTING sem id.
 - UNKNOWN não tem prazo: o bloqueio dura até chegar um resultado definitivo.
 - Rodar a suíte no Windows para confirmar o caminho `msvcrt.locking` (CI em Linux e Windows).
