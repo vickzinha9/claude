@@ -5,19 +5,23 @@ and nothing here reaches a real broker.
 """
 
 import os
+import sqlite3
 import tempfile
+import threading
 import unittest
 from contextlib import closing
 
 from pocketautonomo.broker import Broker, OrderRequest, OrderStatus, SubmissionResponse
 from pocketautonomo.coordinator import Coordinator
-from pocketautonomo.cycle import CALL, LOSS, UNKNOWN, WIN, Entry
+from pocketautonomo.cycle import CALL, LOSS, PUT, UNKNOWN, WIN, Entry
 from pocketautonomo.executor import (
     ACCEPTANCE_RECORDED,
     NO_ORDER_ID,
     NO_PENDING,
     ORDER_OPEN,
     PENDING,
+    RECORD_FAILED,
+    RESULT_ALREADY_RECORDED,
     RESULT_RECORDED,
     OrderExecutor,
     ReconciliationReport,
@@ -57,6 +61,12 @@ def settled(state):
     return lambda order_id: OrderStatus(order_id, state)
 
 
+def settled_by_order(results):
+    """An answer that reports order FAKE-ORD-<n> with the n-th of results."""
+    states = {f"FAKE-ORD-{n}": result for n, result in enumerate(results, start=1)}
+    return lambda order_id: OrderStatus(order_id, states[order_id])
+
+
 def time_out(order_id):
     raise TimeoutError("fake timeout: no answer about the order")
 
@@ -75,11 +85,11 @@ class ReconciliationTest(unittest.TestCase):
         self.addCleanup(coordinator.close)
         return coordinator
 
-    def running(self):
-        """A resumed coordinator with an open CALL cycle."""
+    def running(self, direction=CALL):
+        """A resumed coordinator with an open cycle, CALL unless told otherwise."""
         coordinator = self.open()
         coordinator.resume()
-        coordinator.start_cycle(ASSET, CALL)
+        coordinator.start_cycle(ASSET, direction)
         return coordinator
 
     def submitted(self, broker):
@@ -114,6 +124,21 @@ class ReconciliationTest(unittest.TestCase):
                     "SELECT * FROM reservations ORDER BY cycle_id, attempt"
                 ).fetchall(),
             )
+
+    def fail_updates(self):
+        """Make every UPDATE on reservations fail inside SQLite; return the undo function."""
+        path = self.path
+
+        def execute(sql):
+            with closing(sqlite3.connect(path)) as connection:
+                connection.execute(sql)
+                connection.commit()
+
+        execute(
+            "CREATE TRIGGER fail_update BEFORE UPDATE ON reservations"
+            " BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END"
+        )
+        return lambda: execute("DROP TRIGGER fail_update")
 
     def test_loss_advances_once(self):
         broker = FakeBroker(settled(LOSS))
@@ -240,6 +265,123 @@ class ReconciliationTest(unittest.TestCase):
                 self.assertEqual(coordinator.status(), before)  # still pending, unchanged
                 self.assertEqual(self.rows(), rows)
                 self.assertEqual(len(broker.requests), 1)  # nothing sent again
+
+    def test_concurrent_reconciliation_records_once(self):
+        both_looked_up = threading.Barrier(2)
+
+        def loss_once_both_looked_up(order_id):
+            # Neither lookup answers before both callers captured the same pending.
+            both_looked_up.wait(timeout=5)
+            return OrderStatus(order_id, LOSS)
+
+        broker = FakeBroker(loss_once_both_looked_up)
+        coordinator, executor, reservation = self.submitted(broker)
+        reservation_id = reservation.reservation_id
+        self.assertEqual(self.saved(reservation_id), (ACCEPTED, ORDER_ID, None))
+        reports, errors = [], []
+
+        def reconcile():
+            try:
+                reports.append(executor.reconcile_pending())
+            except Exception as error:  # handed back to the test thread
+                errors.append(error)
+
+        threads = [threading.Thread(target=reconcile, daemon=True) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+            self.assertFalse(thread.is_alive(), "a thread did not finish")
+        self.assertEqual(errors, [])
+
+        self.assertCountEqual(
+            [report.outcome for report in reports], [RESULT_RECORDED, RESULT_ALREADY_RECORDED]
+        )
+        self.assertEqual(
+            {(report.reservation_id, report.broker_order_id, report.result, report.error)
+             for report in reports},
+            {(reservation_id, ORDER_ID, LOSS, None)},
+        )
+        self.assertEqual(broker.lookups, [ORDER_ID, ORDER_ID])
+        status = coordinator.status()
+        self.assertEqual((status.attempt, status.pending, status.is_active), (2, None, True))
+        self.assertEqual(self.saved(reservation_id), (ACCEPTED, ORDER_ID, LOSS))
+        self.assertEqual(broker.requests, [OrderRequest(reservation_id, ASSET, CALL, 500)])
+
+    def test_failed_result_write_keeps_pending(self):
+        broker = FakeBroker(settled(LOSS))
+        coordinator, executor, reservation = self.submitted(broker)
+        reservation_id = reservation.reservation_id
+        before, rows = coordinator.status(), self.rows()
+        undo = self.fail_updates()  # SQLite now refuses every change to the reservations
+
+        report = executor.reconcile_pending()
+        self.assertEqual(
+            (report.outcome, report.reservation_id, report.broker_order_id, report.result),
+            (RECORD_FAILED, reservation_id, ORDER_ID, LOSS),
+        )
+        self.assertIn(f"recording the result {LOSS} of order {ORDER_ID} failed", report.error)
+        self.assertIn("simulated write failure", report.error)
+        self.assertEqual(coordinator.status(), before)  # still pending, unchanged
+        self.assertEqual(self.rows(), rows)
+        self.assertEqual(self.saved(reservation_id), (ACCEPTED, ORDER_ID, None))
+
+        undo()
+        retry = executor.reconcile_pending()
+        self.assertEqual(
+            retry, ReconciliationReport(RESULT_RECORDED, reservation_id, ORDER_ID, LOSS)
+        )
+        self.assertEqual(self.saved(reservation_id), (ACCEPTED, ORDER_ID, LOSS))
+        self.assertEqual(coordinator.status().attempt, 2)  # recorded once: not attempt 3
+        following = coordinator.reserve_next_entry(BALANCE)
+        self.assertEqual(following.entry, Entry(ASSET, CALL, 2, 1000))
+        self.assertEqual(broker.lookups, [ORDER_ID, ORDER_ID])  # looked up again to retry
+        self.assertEqual(broker.requests, [OrderRequest(reservation_id, ASSET, CALL, 500)])
+
+    def test_progression_stops_at_four_losses_or_win(self):
+        scenarios = (
+            ("four losses", CALL, (LOSS, LOSS, LOSS, LOSS), LOSS),
+            ("loss, loss, win", PUT, (LOSS, LOSS, WIN), WIN),
+        )
+        for number, (scenario, direction, results, outcome) in enumerate(scenarios):
+            with self.subTest(scenario=scenario):
+                self.path = os.path.join(self.directory, f"scenario{number}.db")
+                order_ids = [f"FAKE-ORD-{n}" for n in range(1, len(results) + 1)]
+                broker = FakeBroker(settled_by_order(results))
+                coordinator = self.running(direction)
+                executor = OrderExecutor(coordinator, broker)
+                expected_requests, expected_rows = [], []
+                steps = zip((500, 1000, 2000, 4000), order_ids, results)
+                for attempt, (stake, order_id, result) in enumerate(steps, start=1):
+                    reservation = coordinator.reserve_next_entry(BALANCE)
+                    self.assertEqual(reservation.entry, Entry(ASSET, direction, attempt, stake))
+                    reservation_id = reservation.reservation_id
+                    sent = executor.submit(reservation_id)
+                    self.assertEqual(
+                        (sent.outcome, sent.broker_order_id), (ACCEPTANCE_RECORDED, order_id)
+                    )
+                    self.assertEqual(coordinator.status().broker_order_id, order_id)  # linked
+                    self.assertEqual(
+                        executor.reconcile_pending(),
+                        ReconciliationReport(RESULT_RECORDED, reservation_id, order_id, result),
+                    )
+                    expected_requests.append(OrderRequest(reservation_id, ASSET, direction, stake))
+                    expected_rows.append(
+                        (reservation_id, 1, attempt, stake, result, ACCEPTED, order_id)
+                    )
+
+                status = coordinator.status()
+                self.assertEqual(
+                    (status.is_active, status.outcome, status.attempt, status.pending),
+                    (False, outcome, len(results), None),
+                )
+                self.assertIsNone(coordinator.reserve_next_entry(BALANCE))  # no further entry
+                self.assertEqual(executor.reconcile_pending(), ReconciliationReport(NO_PENDING))
+                self.assertEqual(broker.requests, expected_requests)  # each sent once
+                self.assertEqual(broker.lookups, order_ids)  # each linked order looked up once
+                cycles, saved = self.rows()
+                self.assertEqual(cycles, [(1, ASSET, direction, outcome)])
+                self.assertEqual(saved, expected_rows)  # linked ids and results committed
 
 
 if __name__ == "__main__":

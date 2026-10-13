@@ -111,16 +111,19 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
       - `test_loss_advances_once`: LOSS confirmado é gravado e avança uma única tentativa, para 1000 centavos; a segunda consulta devolve `NO_PENDING`, sem nova consulta nem novo envio;
       - `test_win_after_restart_ends_cycle`: depois de fechar e reabrir o banco, ainda pausado, a consulta usa o id restaurado, grava WIN e encerra o ciclo no banco, sem reenvio;
       - `test_without_order_id_does_not_query`: reservas RESERVED e SUBMITTING sem id dão `NO_ORDER_ID`, sem chamar a corretora e sem alterar nada;
-      - `test_unsettled_or_invalid_answer_keeps_pending`: OPEN, UNKNOWN, timeout, id diferente, resposta que não é `OrderStatus` e estado desconhecido dão `PENDING`, sem alteração nem envio, com o erro no relatório quando cabe.
+      - `test_unsettled_or_invalid_answer_keeps_pending`: OPEN, UNKNOWN, timeout, id diferente, resposta que não é `OrderStatus` e estado desconhecido dão `PENDING`, sem alteração nem envio, com o erro no relatório quando cabe;
+      - `test_concurrent_reconciliation_records_once`: duas threads consultam a mesma ordem, e uma barreira dentro da consulta falsa garante que as duas capturem a mesma pendência antes de receber LOSS. Uma dá `RESULT_RECORDED` e a outra `RESULT_ALREADY_RECORDED`; a tentativa avança só para 2, o LOSS fica gravado e houve um único envio;
+      - `test_failed_result_write_keeps_pending`: com o SQLite recusando a escrita, LOSS dá `RECORD_FAILED`, com o resultado e o erro no relatório, sem alterar o coordenador nem o banco. Sem a falha, a nova consulta grava o LOSS uma vez e libera a tentativa de 1000 centavos, sem reenvio;
+      - `test_progression_stops_at_four_losses_or_win`: com um banco por cenário, quatro LOSS enviam 500, 1000, 2000 e 4000 centavos, com o mesmo ativo e a mesma direção, e encerram o ciclo sem quinta ordem; LOSS, LOSS e WIN enviam 500, 1000 e 2000 e encerram na vitória, sem entrada de 4000. Um cenário usa CALL e o outro PUT. Cada reserva é enviada uma vez, e os ids vinculados e os resultados ficam gravados.
     - **Só verificação avulsa, fora da suíte:**
       - em `918f7ca`, um script conferiu que `submit_order` é o único método abstrato, que o `get_order` padrão levanta `NotImplementedError` e que `OrderStatus` não aceita alteração;
-      - em `89fda85`, um script rodou cada caminho de `reconcile_pending` uma vez, em memória. Continuam sem teste na suíte: `RESULT_ALREADY_RECORDED`, `RECORD_FAILED` (resultado conflitante já registrado) e a consulta pelo `get_order` padrão (`PENDING` com `NotImplementedError`).
+      - em `89fda85`, um script rodou cada caminho de `reconcile_pending` uma vez, em memória. Continuam sem teste na suíte: `RECORD_FAILED` causado por um resultado conflitante já registrado e a consulta pelo `get_order` padrão (`PENDING` com `NotImplementedError`).
 
 ## Testes
 
     python3 -m unittest discover -s tests -v
 
-Último resultado: 141 testes, todos passando, no Python 3.9.25. No 3.10, 3.12, 3.13 e 3.14, a última execução foi em `75d66ac`, com 137 testes, todos com SQLite 3.40.0; as mudanças seguintes só rodaram no 3.9.25. Tudo foi executado em Linux; o caminho do Windows (`msvcrt.locking`) ainda não foi executado.
+Último resultado: 144 testes, todos passando, no Python 3.9.25. No 3.10, 3.12, 3.13 e 3.14, a última execução foi em `75d66ac`, com 137 testes, todos com SQLite 3.40.0; as mudanças seguintes só rodaram no 3.9.25. Tudo foi executado em Linux; o caminho do Windows (`msvcrt.locking`) ainda não foi executado.
 
 ## Decisões em vigor
 
@@ -147,10 +150,11 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
 - Na consulta (`reconcile_pending`), os estados reconhecidos são `OPEN` (constante `ORDER_OPEN`, em `executor.py`), `UNKNOWN` e os de `cycle.DEFINITIVE_RESULTS`, com comparação exata. Uma resposta que não seja `OrderStatus`, que fale de outra ordem ou que tenha estado desconhecido nunca é usada, mesmo trazendo um resultado definitivo.
 - UNKNOWN informado pela corretora na consulta não é registrado no coordenador: a pendência fica como estava.
 - Com o coordenador fechado, `reconcile_pending` não devolve relatório: o `CoordinatorError` de `status()` sobe.
+- Uma falha ao gravar o resultado consultado mantém a reserva pendente e não ativa `submission_failure`. Como a pendência impede nova entrada, nada é enviado até uma nova consulta gravar o resultado.
 
 ## Em aberto para as próximas etapas
 
-- **Executor de ordens:** o envio e a consulta do resultado existem, mas nada os chama fora dos testes. Próxima etapa: testes de consultas simultâneas, de falha ao gravar o resultado e do ciclo integrado com 500, 1000, 2000 e 4000 centavos. Depois: a corretora simulada completa, o armazenamento durável dos relatórios, horários, payout e a estratégia CALL/PUT.
+- **Executor de ordens:** o envio e a consulta do resultado existem e têm testes, mas nada os chama fora dos testes. Faltam a corretora simulada completa, o armazenamento durável dos relatórios, horários, payout e a estratégia CALL/PUT.
 - O id de uma aceitação que não pôde ser gravada só existe no `SubmissionReport`. Quem chama `submit` precisa guardá-lo ou registrá-lo em log até a recuperação; senão, a reserva fica SUBMITTING sem id.
 - **Conexão com a Pocket Option: pendente.** Nenhuma ordem real é enviada nem consultada.
 - Reservas UNVERIFIED ou SUBMITTING sem id ficam em `NO_ORDER_ID`, porque a consulta só usa o id vinculado. Falta decidir como recuperá-las.
