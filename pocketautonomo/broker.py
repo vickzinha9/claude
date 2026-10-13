@@ -4,8 +4,10 @@ OrderExecutor sends one OrderRequest per reservation through Broker.submit_order
 expects a SubmissionResponse with an explicit answer. No real broker adapter exists in
 this package yet.
 
-Broker.get_order() returns the OrderStatus of one order. Nothing in this package calls it
-yet.
+OrderExecutor.reconcile_pending() calls Broker.get_order() with the order id linked to
+the pending reservation and expects the OrderStatus of exactly that order: OPEN while it
+runs, UNKNOWN when its result is unknown, or one of the results in
+cycle.DEFINITIVE_RESULTS once it is settled.
 """
 
 import abc

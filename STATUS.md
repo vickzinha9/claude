@@ -1,6 +1,6 @@
 # Status
 
-Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O estado do coordenador, inclusive o estado de envio de cada reserva, pode ser salvo em SQLite, e só um coordenador por vez opera cada banco; sem banco, tudo fica em memória. O executor já faz o envio inicial de uma ordem, testado só com uma corretora falsa. **Ainda não existe conexão com a corretora:** nenhuma ordem real é enviada.
+Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O estado do coordenador, inclusive o estado de envio de cada reserva, pode ser salvo em SQLite, e só um coordenador por vez opera cada banco; sem banco, tudo fica em memória. O executor envia a ordem de uma reserva e consulta o resultado da ordem pendente, testado só com corretoras falsas. **Ainda não existe conexão com a corretora:** nenhuma ordem real é enviada nem consultada.
 
 ## Concluído
 
@@ -97,13 +97,30 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
     - Exceção da corretora (timeout, erro de rede ou outra) ou resposta inválida: a reserva continua pendente e o executor registra UNKNOWN quando consegue. Ele nunca reenvia, registra LOSS ou encerra como NOT_SUBMITTED. Se gravar UNKNOWN também falhar, a pendência continua e o relatório traz os dois erros.
     - Se uma resposta explícita chegar mas sua gravação falhar, o relatório traz a resposta, inclusive o id da ordem realmente recebido, e o erro, sem dizer que ela foi gravada. Nada mais é gravado; o coordenador mantém a pendência e os bloqueios que já existiam.
     - `submit` não gera exceção nesses casos: devolve um `SubmissionReport` com `outcome` NOT_STARTED, ACCEPTANCE_RECORDED, REJECTION_RECORDED ou UNCERTAIN, o pedido enviado, a resposta válida recebida, `broker_order_id`, `unknown_recorded` e os erros.
-    - Os testes usam uma corretora falsa definida no próprio arquivo de testes, com ids `FAKE-...`; nenhuma ordem chega a uma corretora real. Erro de rede, resposta inválida e falha ao gravar a rejeição não têm teste na suíte: foram conferidos só por um script avulso nesta entrega.
+    - Os testes usam uma corretora falsa definida no próprio arquivo de testes, com ids `FAKE-...`; nenhuma ordem chega a uma corretora real. Erro de rede, resposta inválida e falha ao gravar a rejeição não têm teste na suíte: foram conferidos só por um script avulso, em `75d66ac`.
+13. **Consulta do resultado:** `pocketautonomo/broker.py` e `pocketautonomo/executor.py`, com testes em `tests/test_reconciliation.py`
+    - O contrato ganhou `OrderStatus` (`broker_order_id`, `state`), congelado, e `Broker.get_order(broker_order_id)`. O `get_order` padrão levanta `NotImplementedError` sem ser abstrato, então uma corretora que só envia ordens continua instanciável.
+    - `OrderExecutor.reconcile_pending()` lê `status()` uma vez e consulta, com `get_order`, só a ordem vinculada à reserva pendente. Nunca procura ordem por valor, horário ou aproximação e nunca envia nada. Funciona com o coordenador pausado, inclusive depois de reiniciar; pausa e recuperação seguem as regras do coordenador.
+    - Devolve um `ReconciliationReport` congelado (`outcome`, `reservation_id`, `broker_order_id`, `result`, `error`):
+      - `NO_PENDING`: não há reserva pendente;
+      - `NO_ORDER_ID`: a reserva pendente não tem id vinculado; nada é consultado, e `error` informa o estado de envio;
+      - `PENDING`: sem resultado definitivo e sem alteração. `error` fica vazio para `OPEN` e `UNKNOWN` e descreve os outros casos: consulta que falhou, resposta que não é `OrderStatus`, id diferente ou estado desconhecido;
+      - `RESULT_RECORDED`: `record_result` aplicou o resultado definitivo. `RESULT_ALREADY_RECORDED`: o mesmo resultado já estava registrado;
+      - `RECORD_FAILED`: `record_result` falhou; `result` traz o resultado recebido e `error`, o motivo.
+    - **Testes na suíte:** `tests/test_reconciliation.py`, com uma corretora falsa de ids `FAKE-...`:
+      - `test_loss_advances_once`: LOSS confirmado é gravado e avança uma única tentativa, para 1000 centavos; a segunda consulta devolve `NO_PENDING`, sem nova consulta nem novo envio;
+      - `test_win_after_restart_ends_cycle`: depois de fechar e reabrir o banco, ainda pausado, a consulta usa o id restaurado, grava WIN e encerra o ciclo no banco, sem reenvio;
+      - `test_without_order_id_does_not_query`: reservas RESERVED e SUBMITTING sem id dão `NO_ORDER_ID`, sem chamar a corretora e sem alterar nada;
+      - `test_unsettled_or_invalid_answer_keeps_pending`: OPEN, UNKNOWN, timeout, id diferente, resposta que não é `OrderStatus` e estado desconhecido dão `PENDING`, sem alteração nem envio, com o erro no relatório quando cabe.
+    - **Só verificação avulsa, fora da suíte:**
+      - em `918f7ca`, um script conferiu que `submit_order` é o único método abstrato, que o `get_order` padrão levanta `NotImplementedError` e que `OrderStatus` não aceita alteração;
+      - em `89fda85`, um script rodou cada caminho de `reconcile_pending` uma vez, em memória. Continuam sem teste na suíte: `RESULT_ALREADY_RECORDED`, `RECORD_FAILED` (resultado conflitante já registrado) e a consulta pelo `get_order` padrão (`PENDING` com `NotImplementedError`).
 
 ## Testes
 
     python3 -m unittest discover -s tests -v
 
-Último resultado: 137 testes, todos passando, no Python 3.9.25. A suíte também passa no 3.10, 3.12, 3.13 e 3.14, todos com SQLite 3.40.0. Tudo foi executado em Linux; o caminho do Windows (`msvcrt.locking`) ainda não foi executado.
+Último resultado: 141 testes, todos passando, no Python 3.9.25. No 3.10, 3.12, 3.13 e 3.14, a última execução foi em `75d66ac`, com 137 testes, todos com SQLite 3.40.0; as mudanças seguintes só rodaram no 3.9.25. Tudo foi executado em Linux; o caminho do Windows (`msvcrt.locking`) ainda não foi executado.
 
 ## Decisões em vigor
 
@@ -125,14 +142,17 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
 - NOT_SUBMITTED não é resultado de aposta: só `close_not_submitted`, por meio de `save_not_submitted`, o grava, e a reserva encerrada nunca recebe resultado, início de envio nem aceitação.
 - `close_not_submitted` não funciona com `submission_failure` ativo, e uma falha ao gravar o encerramento também para novos envios: nos dois casos, é preciso fechar e reabrir para conferir o estado gravado.
 - Só RESERVED prova que o envio não começou. Timeout, erro de rede ou falta de id de ordem não provam nada: SUBMITTING, ACCEPTED, UNVERIFIED e UNKNOWN nunca viram NOT_SUBMITTED.
-- O executor registra UNKNOWN só quando a resposta da corretora é desconhecida (exceção ou resposta inválida). Quando a resposta é explícita mas não pode ser gravada, ele a devolve no relatório, sem registrar outro resultado.
+- No envio (`submit`), o executor registra UNKNOWN só quando a resposta da corretora é desconhecida (exceção ou resposta inválida). Quando a resposta é explícita mas não pode ser gravada, ele a devolve no relatório, sem registrar outro resultado.
 - O executor nunca repete um envio nem chama `close_not_submitted`.
+- Na consulta (`reconcile_pending`), os estados reconhecidos são `OPEN` (constante `ORDER_OPEN`, em `executor.py`), `UNKNOWN` e os de `cycle.DEFINITIVE_RESULTS`, com comparação exata. Uma resposta que não seja `OrderStatus`, que fale de outra ordem ou que tenha estado desconhecido nunca é usada, mesmo trazendo um resultado definitivo.
+- UNKNOWN informado pela corretora na consulta não é registrado no coordenador: a pendência fica como estava.
+- Com o coordenador fechado, `reconcile_pending` não devolve relatório: o `CoordinatorError` de `status()` sobe.
 
 ## Em aberto para as próximas etapas
 
-- **Executor de ordens: só o envio inicial existe.** Faltam `reconcile_pending` (consulta só pela ordem vinculada à reserva, conferência do id devolvido e registro do resultado), a corretora simulada completa, horários, payout e a estratégia CALL/PUT. Até lá, uma reserva aceita ou em UNKNOWN fica pendente até alguém registrar o resultado.
+- **Executor de ordens:** o envio e a consulta do resultado existem, mas nada os chama fora dos testes. Próxima etapa: testes de consultas simultâneas, de falha ao gravar o resultado e do ciclo integrado com 500, 1000, 2000 e 4000 centavos. Depois: a corretora simulada completa, o armazenamento durável dos relatórios, horários, payout e a estratégia CALL/PUT.
 - O id de uma aceitação que não pôde ser gravada só existe no `SubmissionReport`. Quem chama `submit` precisa guardá-lo ou registrá-lo em log até a recuperação; senão, a reserva fica SUBMITTING sem id.
 - **Conexão com a Pocket Option: pendente.** Nenhuma ordem real é enviada nem consultada.
-- Consulta de pendências pelo id da ordem e o que fazer com UNVERIFIED ou SUBMITTING sem id.
+- Reservas UNVERIFIED ou SUBMITTING sem id ficam em `NO_ORDER_ID`, porque a consulta só usa o id vinculado. Falta decidir como recuperá-las.
 - UNKNOWN não tem prazo: o bloqueio dura até chegar um resultado definitivo.
 - Rodar a suíte no Windows para confirmar o caminho `msvcrt.locking` (CI em Linux e Windows).
