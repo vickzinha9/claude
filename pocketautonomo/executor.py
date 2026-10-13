@@ -1,7 +1,8 @@
-"""Sends a reserved entry to a broker, at most once per reservation.
+"""Sends reserved entries to a broker and looks up the results of their orders.
 
 The coordinator controls every transition: the executor only calls its methods and the
-broker. Results of accepted bets are not fetched here yet.
+broker. An entry is sent at most once per reservation, and a result is looked up only by
+the order id linked to the pending reservation; looking it up never sends anything.
 """
 
 from dataclasses import dataclass
@@ -11,15 +12,31 @@ from pocketautonomo.broker import (
     ORDER_ACCEPTED,
     ORDER_REJECTED,
     OrderRequest,
+    OrderStatus,
     SubmissionResponse,
 )
-from pocketautonomo.cycle import REJECTED, UNKNOWN
+from pocketautonomo.cycle import DEFINITIVE_RESULTS, REJECTED, UNKNOWN
 
 # Outcomes of OrderExecutor.submit(); SubmissionReport describes each one.
 NOT_STARTED = "NOT_STARTED"
 ACCEPTANCE_RECORDED = "ACCEPTANCE_RECORDED"
 REJECTION_RECORDED = "REJECTION_RECORDED"
 UNCERTAIN = "UNCERTAIN"
+
+# Outcomes of OrderExecutor.reconcile_pending(), described by ReconciliationReport.
+NO_PENDING = "NO_PENDING"
+NO_ORDER_ID = "NO_ORDER_ID"
+PENDING = "PENDING"
+RESULT_RECORDED = "RESULT_RECORDED"
+RESULT_ALREADY_RECORDED = "RESULT_ALREADY_RECORDED"
+RECORD_FAILED = "RECORD_FAILED"
+
+# The OrderStatus state of an order that is still running. reconcile_pending() also
+# recognizes UNKNOWN, for an order whose result the broker does not know, and the
+# results in cycle.DEFINITIVE_RESULTS; any other state is unknown.
+ORDER_OPEN = "OPEN"
+_UNSETTLED_STATES = (ORDER_OPEN, UNKNOWN)
+_KNOWN_ORDER_STATES = _UNSETTLED_STATES + DEFINITIVE_RESULTS
 
 
 @dataclass(frozen=True)
@@ -64,6 +81,39 @@ class SubmissionReport:
         return None
 
 
+@dataclass(frozen=True)
+class ReconciliationReport:
+    """What one OrderExecutor.reconcile_pending() call did.
+
+    outcome is one of:
+
+    - NO_PENDING: there was no pending reservation, so nothing was looked up.
+    - NO_ORDER_ID: the pending reservation has no linked broker order id, so nothing was
+      looked up and it was left pending; error tells its submission state.
+    - PENDING: the lookup gave no definitive result, and this call changed nothing.
+      error is None when the broker reported the order as OPEN or its result as
+      UNKNOWN; otherwise it describes the failed lookup, the invalid answer, the answer
+      about another order or the unknown state.
+    - RESULT_RECORDED: the broker reported a definitive result and record_result()
+      applied it.
+    - RESULT_ALREADY_RECORDED: the broker reported the definitive result that was
+      already recorded for the reservation, so nothing changed.
+    - RECORD_FAILED: the broker reported a definitive result, but record_result()
+      raised, so this call recorded nothing; error tells why.
+
+    reservation_id is the pending reservation read at the start, None when there was
+    none, and broker_order_id is the order id linked to it, the only one looked up.
+    result is the definitive result the broker reported, also when recording it failed,
+    and None in every other case.
+    """
+
+    outcome: str
+    reservation_id: Optional[str] = None
+    broker_order_id: Optional[str] = None
+    result: Optional[str] = None
+    error: Optional[str] = None
+
+
 class OrderExecutor:
     """Sends the reservations of a coordinator to a broker.
 
@@ -88,6 +138,11 @@ class OrderExecutor:
     answer, including the order id actually received, and the error, and nothing else
     is recorded: the coordinator keeps the reservation pending and its existing stops.
     submit() returns a SubmissionReport instead of raising in all these cases.
+
+    reconcile_pending() looks up the result of the pending reservation's order, only by
+    the order id linked to the reservation, and records a definitive result with
+    record_result(). It never sends an order, it also works while the coordinator is
+    paused, and the coordinator keeps applying its rules of pause and recovery.
     """
 
     def __init__(self, coordinator, broker):
@@ -113,6 +168,72 @@ class OrderExecutor:
         if response.status == ORDER_ACCEPTED:
             return self._record_acceptance(request, response)
         return self._record_rejection(request, response)
+
+    def reconcile_pending(self):
+        """Look up the result of the pending reservation's order; return a report.
+
+        One status() snapshot gives the pending reservation and the order id linked to
+        it. Only that order is looked up, with broker.get_order(), never an order found
+        by its value, its time or anything else, and nothing is ever sent:
+
+        - without a pending reservation the outcome is NO_PENDING, and without a linked
+          order id it is NO_ORDER_ID; nothing is looked up in either case;
+        - the answer must be an OrderStatus about exactly that order, in a known state.
+          A failed lookup, an invalid answer, an answer about another order and an
+          unknown state all give PENDING with the error, without changing the
+          coordinator;
+        - an OPEN order or an UNKNOWN result gives PENDING, and nothing is recorded;
+        - a definitive result is recorded with record_result() for the reservation read
+          at the start. True gives RESULT_RECORDED and False RESULT_ALREADY_RECORDED; an
+          exception gives RECORD_FAILED, with the result received and the error.
+
+        It also works while the coordinator is paused, for example after a restart, and
+        the coordinator keeps applying its rules of pause and recovery. A closed
+        coordinator raises CoordinatorError from status().
+        """
+        status = self._coordinator.status()  # one snapshot: the reservation and its link
+        pending = status.pending
+        if pending is None:
+            return ReconciliationReport(NO_PENDING)
+        reservation_id = pending.reservation_id
+        order_id = status.broker_order_id
+        if order_id is None:
+            return ReconciliationReport(
+                NO_ORDER_ID,
+                reservation_id,
+                error=(
+                    f"reservation {reservation_id} is {status.submission_state} without a"
+                    " linked broker order id, and its result is looked up only by that id"
+                ),
+            )
+        try:
+            answer = self._broker.get_order(order_id)
+        except Exception as error:  # timeout, network error or anything unexpected
+            return ReconciliationReport(
+                PENDING,
+                reservation_id,
+                order_id,
+                error=f"looking up order {order_id} failed: {_describe(error)}",
+            )
+        problem = _check_order_status(answer, order_id)
+        if problem is not None:
+            return ReconciliationReport(PENDING, reservation_id, order_id, error=problem)
+        if answer.state in _UNSETTLED_STATES:  # still open, or its result is unknown
+            return ReconciliationReport(PENDING, reservation_id, order_id)
+        result = answer.state
+        try:
+            applied = self._coordinator.record_result(reservation_id, result)
+        except Exception as error:  # the result is known, but it was not recorded
+            return ReconciliationReport(
+                RECORD_FAILED,
+                reservation_id,
+                order_id,
+                result,
+                f"recording the result {result} of order {order_id} failed:"
+                f" {_describe(error)}",
+            )
+        outcome = RESULT_RECORDED if applied else RESULT_ALREADY_RECORDED
+        return ReconciliationReport(outcome, reservation_id, order_id, result)
 
     def _record_acceptance(self, request, response):
         order_id = response.broker_order_id
@@ -174,3 +295,20 @@ def _is_explicit(response):
     if response.status == ORDER_REJECTED:
         return response.broker_order_id is None
     return False
+
+
+def _check_order_status(answer, order_id):
+    """Why answer is not an OrderStatus of exactly order order_id in a known state.
+
+    Returns None when it is one.
+    """
+    if not isinstance(answer, OrderStatus):
+        return f"invalid broker answer for order {order_id}: {answer!r}"
+    if not isinstance(answer.broker_order_id, str) or answer.broker_order_id != order_id:
+        return (
+            f"the broker answered about order {answer.broker_order_id!r} instead of"
+            f" order {order_id!r}"
+        )
+    if not isinstance(answer.state, str) or answer.state not in _KNOWN_ORDER_STATES:
+        return f"unknown state {answer.state!r} of order {order_id}"
+    return None
