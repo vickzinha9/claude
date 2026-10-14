@@ -213,13 +213,20 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
       - confere que dois arquivos de `runtime/` não mudaram.
 
       Ele nunca acessa a Pocket Option.
+    - **Resultado observado** na execução [38545427600](https://github.com/vickzinha9/claude/actions/runs/38545427600), no commit `3ffa0b1`, com `success` nos três jobs:
+      - `windows-browser`: o `preparar_windows.cmd` escolheu `py -3.12` (Python 3.12.10, 64 bits) e criou `.venv`. Ele instalou `playwright-1.64.0`, `greenlet-3.5.6` e `pyee-14.0.0` e baixou o Chrome for Testing 156.0.8078.4, o Chrome Headless Shell e o FFmpeg. As conferências passaram, em 33 s;
+      - na segunda vez, `.venv` foi reutilizada em 3 s;
+      - os 2 testes com Chromium real passaram em 5,1 s, sem ser pulados;
+      - `observar_windows.cmd --help` terminou com código 0, e o link recusado, com código 2;
+      - os arquivos de `runtime/` continuaram iguais;
+      - `tests`: 191 testes no Linux (Python 3.12.15) e no Windows (Python 3.12.10), 189 OK e os 2 com Chromium pulados. Os 25 de `tests/test_observe.py` e os 4 de `tests/test_setup_observer.py` passaram nos dois sistemas, e os exemplos da simulação terminaram com código 0.
     - **No seu computador, nada disso foi testado.**
 
 ## Testes
 
     python3 -m unittest discover -s tests -v
 
-Último resultado local, em Linux: 191 testes. Com o Playwright 1.64.0, no Python 3.12.14, os 191 passaram. Sem o Playwright, nos Python 3.9.25, 3.10.20, 3.11.15, 3.12.14, 3.13.13 e 3.14.4, passaram 189, e os 2 de `tests/test_observe_playwright.py` foram pulados. No GitHub Actions, a última execução registrada é a 38534987597 (commit `4d5a9d0`), com 181 testes: 179 passaram e 2 foram pulados, no Linux (Python 3.12.15) e no Windows (Python 3.12.10).
+Último resultado local, em Linux: 191 testes. Com o Playwright 1.64.0, no Python 3.12.14, os 191 passaram. Sem o Playwright, nos Python 3.9.25, 3.10.20, 3.11.15, 3.12.14, 3.13.13 e 3.14.4, passaram 189, e os 2 de `tests/test_observe_playwright.py` foram pulados. No GitHub Actions, na execução 38545427600 (commit `3ffa0b1`), os 191 testes rodaram no Linux (Python 3.12.15) e no Windows (Python 3.12.10): 189 passaram e 2 foram pulados. Os 2 pulados passaram no job `windows-browser`, com o Playwright instalado pelo `preparar_windows.cmd` (item 18).
 
 ## Decisões em vigor
 

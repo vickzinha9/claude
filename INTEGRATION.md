@@ -81,7 +81,7 @@ Há bibliotecas de terceiros que imitam o WebSocket do site por engenharia rever
 | Item | Com dados simulados ou na página local de teste | Na plataforma real, no seu computador |
 |---|---|---|
 | Só aceitar URLs https de pocketoption.com, inclusive o link digitado no `--configure` | testes em `tests/test_observe.py` | não se aplica |
-| Lançadores do Windows | CI `windows-latest`: `preparar_windows.cmd` duas vezes, criando e reutilizando `.venv` com o Playwright e o Chromium; `observar_windows.cmd --help` e com um link recusado, código 2; `runtime/` igual no fim. No Linux remoto, a preparação rodou de verdade, criando e reutilizando `.venv` | **não executado** |
+| Lançadores do Windows | CI `windows-latest`, [execução 38545427600](https://github.com/vickzinha9/claude/actions/runs/38545427600): `preparar_windows.cmd` duas vezes, criando e reutilizando `.venv` com o Playwright e o Chromium; `observar_windows.cmd --help` e com um link recusado, código 2; `runtime/` igual no fim. No Linux remoto, a preparação rodou de verdade, criando e reutilizando `.venv` | **não executado** |
 | Abrir o navegador visível com o perfil em `runtime/` | Playwright falso: `headless=False` e perfil `runtime/browser-profile`. A janela visível não abriu em nenhum teste: o Linux remoto não tem tela, e o CI usa o Chromium sem janela | **não executado** |
 | Perfil preservado entre execuções | Chromium real, sem janela, em página local, no Linux remoto e no CI Windows: um dado gravado na primeira sessão apareceu na segunda | **não executado** |
 | Login manual | não se aplica | **não executado**: depende de você |

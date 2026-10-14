@@ -132,14 +132,14 @@ python -m pocketautonomo.local_simulation --cycles 2 --results "LOSS,LOSS,LOSS,L
 
 No Linux os comandos rodam no bash; no Windows, no PowerShell 7. A saída usa UTF-8 (`PYTHONIOENCODING=utf-8`).
 
-Última execução verificada: [run 38534987597](https://github.com/vickzinha9/claude/actions/runs/38534987597), de 14/10/2026, no commit `4d5a9d0`, com os dois sistemas aprovados:
+Última execução verificada: [run 38545427600](https://github.com/vickzinha9/claude/actions/runs/38545427600), de 14/10/2026, no commit `3ffa0b1`, com os três jobs aprovados. No job `tests`:
 
 | Sistema | Ambiente | Testes | `--cycles 3` LOSS,LOSS,WIN | `--cycles 2` quatro LOSS |
 |---|---|---|---|---|
-| Linux | ubuntu-24.04, Python 3.12.15, SQLite 3.45.1 | 181: 179 OK e 2 pulados | código 0, 9 ordens | código 0, 8 ordens |
-| Windows | Windows Server 2025, Python 3.12.10, SQLite 3.49.1 | 181: 179 OK e 2 pulados | código 0, 9 ordens | código 0, 8 ordens |
+| Linux | ubuntu-24.04, Python 3.12.15, SQLite 3.45.1 | 191: 189 OK e 2 pulados | código 0, 9 ordens | código 0, 8 ordens |
+| Windows | Windows Server 2025, Python 3.12.10, SQLite 3.49.1 | 191: 189 OK e 2 pulados | código 0, 9 ordens | código 0, 8 ordens |
 
-Os 2 testes pulados são os do coletor com Chromium de verdade, porque o CI não instala o Playwright. A primeira execução, [run 38522223843](https://github.com/vickzinha9/claude/actions/runs/38522223843), no commit `ecc9d12`, teve 160 testes OK nos dois sistemas.
+Os 2 testes pulados ali são os do coletor com Chromium de verdade, porque o job `tests` não instala o Playwright; o job `windows-browser`, descrito abaixo, roda os dois. A primeira execução, [run 38522223843](https://github.com/vickzinha9/claude/actions/runs/38522223843), no commit `ecc9d12`, teve 160 testes OK nos dois sistemas.
 
 Nos dois sistemas, os acentos da saída apareceram corretos no log. Os testes de exclusividade do banco também passaram, inclusive no Windows, onde a trava usa `msvcrt.locking`.
 
@@ -150,6 +150,14 @@ O job `windows-browser` roda só em `windows-latest` e testa o coletor numa **p�
 3. roda, com o Python de `.venv`, os dois testes de `tests/test_observe_playwright.py`, que usam o Chromium de verdade, sem janela. Com `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1`, eles falham em vez de ser pulados;
 4. roda `observar_windows.cmd --help` e `observar_windows.cmd --url http://example.org/`, que precisa terminar com código 2. Nenhum dos dois abre o navegador;
 5. confere que os dois arquivos de `runtime/` não mudaram.
+
+Na execução 38545427600, todos os passos passaram:
+
+- o `preparar_windows.cmd` escolheu `py -3.12`, o Python 3.12.10 de 64 bits. Ele criou `.venv` e instalou o `playwright-1.64.0`, com `greenlet-3.5.6` e `pyee-14.0.0`, e baixou o Chrome for Testing 156.0.8078.4, o Chrome Headless Shell e o FFmpeg. Depois, conferiu a instalação: 33 s no total;
+- na segunda vez, ele reutilizou `.venv` em 3 s;
+- os 2 testes com Chromium de verdade passaram em 5,1 s;
+- `observar_windows.cmd --help` terminou com código 0, e o link recusado, com código 2;
+- os arquivos de `runtime/` continuaram iguais.
 
 ### Windows: testado em CI, não no seu computador
 
