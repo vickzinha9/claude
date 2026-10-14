@@ -1,0 +1,76 @@
+# Runs the test suite and the two finite local simulation examples on Linux and Windows.
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: ${{ matrix.os }} / Python 3.12
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false # always report both systems
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      PYTHONIOENCODING: utf-8 # UTF-8 output, also when Windows writes to the log pipe
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Show the platform, Python, SQLite and output encoding
+        run: python -c "import platform, sqlite3, sys; print(platform.platform()); print(sys.version); print('SQLite', sqlite3.sqlite_version); print('stdout encoding', sys.stdout.encoding)"
+
+      - name: Run the test suite
+        run: python -m unittest discover -s tests -v
+
+      # One command per step, so the step fails with the program's exit code. Linux uses
+      # bash and Windows uses PowerShell, the shells shown in the README.
+      - name: "Example: --cycles 3 --results LOSS,LOSS,WIN (bash)"
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          code=0
+          python -m pocketautonomo.local_simulation --cycles 3 --results "LOSS,LOSS,WIN" || code=$?
+          echo "exit code: $code"
+          exit "$code"
+
+      - name: "Example: --cycles 3 --results LOSS,LOSS,WIN (PowerShell)"
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -m pocketautonomo.local_simulation --cycles 3 --results "LOSS,LOSS,WIN"
+          $code = $LASTEXITCODE
+          Write-Output "exit code: $code"
+          exit $code
+
+      - name: "Example: --cycles 2 --results LOSS,LOSS,LOSS,LOSS (bash)"
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          code=0
+          python -m pocketautonomo.local_simulation --cycles 2 --results "LOSS,LOSS,LOSS,LOSS" || code=$?
+          echo "exit code: $code"
+          exit "$code"
+
+      - name: "Example: --cycles 2 --results LOSS,LOSS,LOSS,LOSS (PowerShell)"
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -m pocketautonomo.local_simulation --cycles 2 --results "LOSS,LOSS,LOSS,LOSS"
+          $code = $LASTEXITCODE
+          Write-Output "exit code: $code"
+          exit $code
