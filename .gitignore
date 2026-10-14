@@ -6,4 +6,7 @@
 *.sqlite3
 *.sqlite3-*
 
+# Databases and lock files of local runs (python3 -m pocketautonomo.local_simulation)
+runtime/
+
 __pycache__/
