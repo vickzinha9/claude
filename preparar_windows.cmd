@@ -5,6 +5,10 @@ rem 1. Procura um Python 3.10 ou mais novo, de 64 bits: py -3.12, py -3 e python
 rem 2. Com esse Python, roda "python -m pocketautonomo.setup_observer", que cria ou reutiliza
 rem    .venv, instala a versao do Playwright definida em pocketautonomo\observe.py
 rem    (PLAYWRIGHT_REQUIREMENT) e o Chromium dele, e testa a instalacao.
+rem Um candidato so e aceito se o teste dele terminar com codigo exatamente 0: um codigo
+rem negativo, como o -1610612730 que o py devolve sem o Python pedido, tambem e falha.
+rem Os candidatos e o Python escolhido rodam com "call", para que um py.cmd ou python.bat no
+rem PATH (como os atalhos do pyenv-win) devolva o controle a este arquivo.
 rem Cada etapa para com uma mensagem clara se falhar. Nada em runtime\ (perfil do navegador,
 rem seletores e CSV) e lido ou alterado, e uma .venv existente nunca e apagada.
 rem Funciona com dois cliques ou pelo terminal, de qualquer pasta: ele entra na pasta onde
@@ -21,13 +25,14 @@ if not defined PYTHON_CMD call :experimentar python
 if not defined PYTHON_CMD goto :sem_python
 
 echo Python escolhido: %PYTHON_CMD%
-%PYTHON_CMD% -m pocketautonomo.setup_observer
+call %PYTHON_CMD% -m pocketautonomo.setup_observer
 set "CODIGO=%ERRORLEVEL%"
 goto :fim
 
 :experimentar
-%* -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) and sys.maxsize > 2**32 else 1)" >nul 2>&1
-if not errorlevel 1 set "PYTHON_CMD=%*"
+call %* -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) and sys.maxsize > 2**32 else 1)" <nul >nul 2>&1
+if "%ERRORLEVEL%"=="0" set "PYTHON_CMD=%*"
+if not "%ERRORLEVEL%"=="0" echo %*: nao serve (codigo %ERRORLEVEL%).
 exit /b 0
 
 :sem_python

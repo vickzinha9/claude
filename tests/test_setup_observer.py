@@ -1,14 +1,18 @@
 """Tests of the collector's preparation, pocketautonomo.setup_observer, and of the launchers.
 
 FakeRun stands in for subprocess.run, so no virtual environment is created, nothing is
-installed and no browser opens here. The two .cmd launchers are checked as text: cmd.exe
-runs them only in the Windows browser job of the CI.
+installed and no browser opens here. The two .cmd launchers are checked as text everywhere.
+On Windows, PreparerOnWindowsTest also runs preparar_windows.cmd with cmd.exe, in a copy of
+the project whose setup_observer is a fake, with a fake py first on the PATH: it chooses a
+Python and installs nothing.
 """
 
 import contextlib
 import io
+import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -209,11 +213,117 @@ class LaunchersTest(unittest.TestCase):
         prepare = self.commands("preparar_windows.cmd")
         for candidate in ("py -3.12", "py -3", "python"):
             self.assertIn(f"call :experimentar {candidate}", " ".join(prepare))
-        self.assertIn("%PYTHON_CMD% -m pocketautonomo.setup_observer", prepare)
+        self.assertIn("call %PYTHON_CMD% -m pocketautonomo.setup_observer", prepare)
         self.assertIn("sys.version_info >= (3, 10) and sys.maxsize > 2**32", " ".join(prepare))
+        # A candidate is accepted only with exit code exactly 0: "if not errorlevel 1" also
+        # accepted negative codes, such as the -1610612730 of py without Python 3.12.
+        self.assertIn('if "%ERRORLEVEL%"=="0" set "PYTHON_CMD=%*"', prepare)
+        self.assertNotIn("errorlevel 1", " ".join(prepare).lower())
+        [probe] = [line for line in prepare if line.startswith("call %* -c ")]
+        self.assertTrue(probe.endswith("<nul >nul 2>&1"), probe)  # no prompt can wait for input
         observe = self.commands("observar_windows.cmd")
         self.assertIn('".venv\\Scripts\\python.exe" -m pocketautonomo.observe --configure --count 3 %*', observe)
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# The exit code that py, from the Python install manager, gave on the user's Windows for
+# "py -3.12" without Python 3.12 (0xA0000006 as an unsigned number).
+PY_WITHOUT_VERSION = -1610612730
+
+FAKE_SETUP = """\
+import sys
+print("SETUP FALSO: %d.%d de %d bits" % (sys.version_info[0], sys.version_info[1], 64 if sys.maxsize > 2**32 else 32))
+"""
+
+# py.cmd runs this script with the real Python. The versions in FAKE_PY_SEM fail with the
+# code of py without the requested Python; the others run the rest of the command line.
+FAKE_PY = """\
+import os, subprocess, sys
+version = sys.argv[1] if len(sys.argv) > 1 else ""
+if version in os.environ.get("FAKE_PY_SEM", "").split(","):
+    sys.exit(%d)
+if version in ("-3.12", "-3"):
+    sys.exit(subprocess.call([sys.executable] + sys.argv[2:]))
+sys.exit(103)
+""" % PY_WITHOUT_VERSION
+
+
+@unittest.skipUnless(os.name == "nt", "cmd.exe só existe no Windows")
+class PreparerOnWindowsTest(unittest.TestCase):
+    """preparar_windows.cmd with cmd.exe: which Python it chooses, with a fake py.
+
+    The project is a copy holding only the launcher and a fake setup_observer, which prints
+    the Python that ran it and installs nothing.
+    """
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        base = Path(directory.name)
+        self.project = base / "projeto"
+        (self.project / "pocketautonomo").mkdir(parents=True)
+        shutil.copy(ROOT / "preparar_windows.cmd", self.project)
+        (self.project / "pocketautonomo" / "setup_observer.py").write_text(FAKE_SETUP, encoding="ascii")
+        self.fake_bin = base / "py-falso"
+        self.fake_bin.mkdir()
+        (self.fake_bin / "fake_py.py").write_text(FAKE_PY, encoding="ascii")
+        (self.fake_bin / "py.cmd").write_bytes(
+            f'@"{sys.executable}" "%~dp0fake_py.py" %*\r\n'.encode("ascii")
+        )
+        self.elsewhere = base  # the launcher must enter its own folder from here
+
+    def run_preparer(self, missing, python_on_path):
+        system_root = os.environ.get("SystemRoot", r"C:\Windows")
+        path = [str(self.fake_bin)]
+        if python_on_path:
+            path.append(str(Path(sys.executable).parent))
+        path += [os.path.join(system_root, "System32"), system_root]
+        hidden = ("PATH", "PYTHONPATH", "PYTHONHOME")
+        env = {key: value for key, value in os.environ.items() if key.upper() not in hidden}
+        env.update(PATH=os.pathsep.join(path), FAKE_PY_SEM=",".join(missing), POCKETAUTONOMO_SEM_PAUSA="1")
+        result = subprocess.run(
+            ["cmd", "/d", "/c", "call", str(self.project / "preparar_windows.cmd")],
+            cwd=self.elsewhere,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            encoding="ascii",
+            errors="replace",
+            timeout=120,
+        )  # text mode: the CRLF of cmd.exe becomes \n
+        return result.returncode, result.stdout + result.stderr
+
+    def test_a_negative_code_is_a_failure_and_the_next_candidate_is_tried(self):
+        code, out = self.run_preparer(["-3.12"], python_on_path=False)
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"py -3.12: nao serve (codigo {PY_WITHOUT_VERSION}).", out)
+        self.assertNotIn("Python escolhido: py -3.12", out)
+        self.assertIn("Python escolhido: py -3\n", out)
+        self.assertIn("SETUP FALSO: ", out)  # it ran, from the project folder
+        self.assertIn("tudo pronto", out)
+
+    def test_python_is_the_last_candidate(self):
+        code, out = self.run_preparer(["-3.12", "-3"], python_on_path=True)
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"py -3.12: nao serve (codigo {PY_WITHOUT_VERSION}).", out)
+        self.assertIn(f"py -3: nao serve (codigo {PY_WITHOUT_VERSION}).", out)
+        self.assertIn("Python escolhido: python\n", out)
+        self.assertIn("SETUP FALSO: ", out)
+
+    def test_without_any_candidate_nothing_runs(self):
+        code, out = self.run_preparer(["-3.12", "-3"], python_on_path=False)
+        self.assertEqual(code, 1, out)
+        self.assertIn("python: nao serve (codigo ", out)  # not on the PATH
+        self.assertIn("[ERRO] Nenhum Python 3.10 ou mais novo, de 64 bits, foi encontrado.", out)
+        self.assertNotIn("Python escolhido", out)
+        self.assertNotIn("SETUP FALSO", out)
+        self.assertIn("preparar_windows.cmd falhou com codigo 1.", out)
+
+    def test_py_312_is_still_the_first_choice(self):
+        code, out = self.run_preparer([], python_on_path=True)
+        self.assertEqual(code, 0, out)
+        self.assertIn("Python escolhido: py -3.12\n", out)
+        self.assertNotIn("nao serve", out)

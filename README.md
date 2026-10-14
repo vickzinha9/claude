@@ -2,7 +2,7 @@
 
 Núcleo em desenvolvimento para controlar ciclos de entradas com progressão fixa de 500, 1000, 2000 e 4000 centavos (R$ 5, R$ 10, R$ 20 e R$ 40), com no máximo quatro tentativas por ciclo.
 
-> **Nenhuma ordem real é enviada.** A simulação local usa uma corretora em memória, e os resultados dela são escolhidos por você em `--results`: o programa não analisa o mercado, não prevê resultados e não calcula lucratividade. O [coletor somente leitura](#coletor-somente-leitura-da-pocket-option) só lê ativo, preço e payout da tela da Pocket Option, com seletores que você mesmo confere. A leitura na plataforma real ainda não foi comprovada (veja o [INTEGRATION.md](INTEGRATION.md)). Não há estratégia nem executor real.
+> **Nenhuma ordem real é enviada.** A simulação local usa uma corretora em memória, e os resultados dela são escolhidos por você em `--results`: o programa não analisa o mercado, não prevê resultados e não calcula lucratividade. O [coletor somente leitura](#coletor-somente-leitura-da-pocket-option) só lê ativo, cotação do ativo e payout da tela da Pocket Option, com seletores que você mesmo confere. A leitura na plataforma real ainda não foi comprovada (veja o [INTEGRATION.md](INTEGRATION.md)). Não há estratégia nem executor real.
 
 ## Requisitos
 
@@ -171,13 +171,13 @@ O CI roda numa máquina virtual do GitHub, com o `python` instalado pelo `setup-
 
 ## Coletor somente leitura da Pocket Option
 
-`python -m pocketautonomo.observe` abre a tela de operações num Chromium visível, espera você fazer o login e lê ativo, preço e payout com os seletores que você conferiu. **Não envia ordens, não clica em CALL/PUT e não faz operações financeiras.** A pesquisa, o método, o que foi comprovado e os passos de validação estão no [INTEGRATION.md](INTEGRATION.md).
+`python -m pocketautonomo.observe` abre a tela de operações num Chromium visível, espera você fazer o login e lê ativo, cotação do ativo e payout com os seletores que você conferiu. A cotação do ativo é o preço do ativo no gráfico, como `1.08534`; não é o valor da aposta, o campo **Amount** da Pocket Option. Nos arquivos, a cotação continua na chave `price`. **Não envia ordens, não clica em CALL/PUT e não faz operações financeiras.** A pesquisa, o método, o que foi comprovado e os passos de validação estão no [INTEGRATION.md](INTEGRATION.md).
 
 ### Windows: os dois lançadores
 
 Na raiz do projeto, a pasta `claude`, ficam dois arquivos. Abra-os nesta ordem, com dois cliques no Explorador de Arquivos ou pelo terminal (`.\preparar_windows.cmd` no PowerShell). Os dois entram sozinhos na pasta onde estão e esperam uma tecla no fim, para a janela não fechar antes de você ler.
 
-1. **`preparar_windows.cmd`** procura um Python 3.10 ou mais novo, de 64 bits, nesta ordem: `py -3.12`, `py -3` e `python`. Com ele, roda `python -m pocketautonomo.setup_observer`, que:
+1. **`preparar_windows.cmd`** procura um Python 3.10 ou mais novo, de 64 bits, nesta ordem: `py -3.12`, `py -3` e `python`. Um candidato só é aceito se o teste dele terminar com código exatamente 0. Um código negativo, como o `-1610612730` que o `py` devolve quando falta o Python pedido, também é falha: o lançador mostra `py -3.12: nao serve (codigo -1610612730).` e tenta o próximo. Com o Python escolhido, ele roda `python -m pocketautonomo.setup_observer`, que:
    - cria `.venv` ou reutiliza a que já existe, se o Python dela servir;
    - instala o `playwright==1.64.0`, a versão fixada em `pocketautonomo/observe.py`, e o Chromium dele;
    - confere que `.venv` importa essa versão e que o Chromium abre, sem janela, uma página em branco.
@@ -193,9 +193,9 @@ Se você apertar Ctrl+C, o `cmd` pergunta se quer finalizar o arquivo em lotes (
 
 1. sem `--url`, o programa pede o link no terminal e o confere com a mesma regra de `--url`. O link recusado não é repetido na tela;
 2. abre o navegador para o seu login e espera Enter;
-3. pede o seletor do ativo, do preço e do payout. Você cola o seletor como o DevTools copiou, sem escapar barras nem aspas. Enter mantém o seletor já gravado, e `-` deixa o campo sem seletor;
+3. pede o seletor do ativo, da cotação do ativo e do payout. Você cola o seletor como o DevTools copiou, sem escapar barras nem aspas. Enter mantém o seletor já gravado, e `-` deixa o campo sem seletor;
 4. lê cada seletor na hora e mostra a prévia: o valor encontrado ou `INDISPONÍVEL (motivo)`. Enter aceita o seletor; colar outro troca;
-5. mostra um resumo dos três campos, lidos juntos. Digite `ativo`, `preço` ou `payout` para corrigir um campo, ou Enter para gravar;
+5. mostra um resumo dos três campos, lidos juntos. Digite `ativo`, `cotação` ou `payout` para corrigir um campo, ou Enter para gravar;
 6. grava `runtime/observe-selectors.json` com o módulo `json`, que faz os escapes, e faz as observações. Antes de você gravar, nada muda no arquivo; um arquivo inválido é guardado como cópia (`observe-selectors.invalido-...json`).
 
 **Texto encontrado não valida o campo.** O programa não sabe se o elemento escolhido é o certo: compare cada prévia e cada observação com o que a tela mostra.

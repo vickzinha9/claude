@@ -60,7 +60,15 @@ SELECTORS_FILE_NAME = "observe-selectors.json"
 PLAYWRIGHT_REQUIREMENT = "playwright==1.64.0"
 
 FIELDS = ("asset", "price", "payout")
-LABELS = {"asset": "ativo", "price": "preço", "payout": "payout"}
+# The files keep the keys asset, price and payout; only the texts shown changed. "price" is
+# the quote of the asset, never the amount of a bet (Amount).
+LABELS = {"asset": "ativo", "price": "cotação do ativo", "payout": "payout"}
+OF_LABELS = {"asset": "do ativo", "price": "da cotação do ativo", "payout": "do payout"}
+QUOTE_NOTE = (
+    "A cotação do ativo é o preço do ativo no gráfico, que muda a cada instante, como"
+    " 1.08534. Não é o valor da aposta: esse é o campo Amount da Pocket Option, o dinheiro"
+    " aplicado numa operação."
+)
 CSV_COLUMNS = (
     "captured_at_utc",
     "page",
@@ -95,9 +103,10 @@ SELECTORS_TEMPLATE = {
     "_leia_me": (
         "Gravado pelo modo --configure (no Windows, observar_windows.cmd), que pede os"
         " seletores no terminal e mostra a prévia de cada um. Se editar à mão, use em asset"
-        " (ativo), price (preço) e payout seletores conferidos na tela de operações, como"
-        " explica o INTEGRATION.md, e deixe \"\" no campo sem seletor: ele fica"
-        " indisponível. Chaves que começam com _ são ignoradas."
+        " (ativo), price (cotação do ativo, não o valor da aposta, Amount) e payout"
+        " seletores conferidos na tela de operações, como explica o INTEGRATION.md, e deixe"
+        " \"\" no campo sem seletor: ele fica indisponível. Chaves que começam com _ são"
+        " ignoradas."
     ),
     "asset": "",
     "price": "",
@@ -107,6 +116,10 @@ SELECTORS_TEMPLATE = {
 FIELD_ANSWERS = {
     "ativo": "asset",
     "asset": "asset",
+    "cotação": "price",
+    "cotacao": "price",
+    "cotação do ativo": "price",
+    "cotacao do ativo": "price",
     "preço": "price",
     "preco": "price",
     "price": "price",
@@ -253,8 +266,8 @@ def build_parser():
         prog="python -m pocketautonomo.observe",
         description=(
             "Coletor SOMENTE LEITURA da tela de operações da Pocket Option: abre o navegador"
-            " para você fazer o login e lê ativo, preço e payout pelos seletores que você"
-            " conferiu. Não envia ordens, não clica em CALL/PUT e não faz operações."
+            " para você fazer o login e lê ativo, cotação do ativo e payout pelos seletores"
+            " que você conferiu. Não envia ordens, não clica em CALL/PUT e não faz operações."
         ),
     )
     parser.add_argument(
@@ -452,7 +465,7 @@ def parse_price(text):
     value = text.strip()
     if PRICE_PATTERN.fullmatch(value):
         return value, None
-    return None, f"texto não reconhecido como preço: {preview(text)}"
+    return None, f"texto não reconhecido como cotação do ativo: {preview(text)}"
 
 
 def parse_payout(text):
@@ -678,14 +691,17 @@ def configure_selectors(session, path, read_line, now):
         answer = ask(
             read_line,
             "Enter grava os seletores e começa as observações; para corrigir um campo, digite"
-            " ativo, preço ou payout: ",
+            " ativo, cotação ou payout: ",
             CONFIGURATION_MOMENT,
         )
         if not answer.strip():
             break
         field = FIELD_ANSWERS.get(answer.strip().lower())
         if field is None:
-            say(f"Resposta não reconhecida: {preview(answer.strip())}. Use ativo, preço ou payout.")
+            say(
+                f"Resposta não reconhecida: {preview(answer.strip())}. Use ativo, cotação ou"
+                " payout."
+            )
             continue
         selectors[field] = ask_selector(session, field, selectors[field], read_line, now)
     if not any(selectors.values()):
@@ -709,23 +725,25 @@ def current_selectors(path):
 
 def ask_selector(session, field, current, read_line, now):
     """The selector you accept for field after seeing its preview, or None for none."""
-    label = LABELS[field]
+    label, of_label = LABELS[field], OF_LABELS[field]
+    if field == "price":
+        say(QUOTE_NOTE)
     if current:
         say(f"{label.capitalize()}: seletor atual {current}")
-        prompt = f"Seletor de {label} (Enter mantém o atual; - deixa sem seletor): "
+        prompt = f"Seletor {of_label} (Enter mantém o atual; - deixa sem seletor): "
     else:
         say(f"{label.capitalize()}: ainda sem seletor.")
-        prompt = f"Seletor de {label} (Enter deixa sem seletor): "
+        prompt = f"Seletor {of_label} (Enter deixa sem seletor): "
     selector = ask(read_line, prompt, CONFIGURATION_MOMENT).strip() or current
     while selector and selector != "-":
         reading = preview_reading(session, field, selector, now)
-        line = f"  Prévia de {label}, lida agora: {shown_value(field, reading)}"
+        line = f"  Prévia {of_label}, lida agora: {shown_value(field, reading)}"
         if reading.available:
             line += ". Confira se é o que a tela mostra."
         say(line)
         answer = ask(
             read_line,
-            f"Enter aceita este seletor de {label}; cole outro para trocar; - deixa sem"
+            f"Enter aceita este seletor {of_label}; cole outro para trocar; - deixa sem"
             " seletor: ",
             CONFIGURATION_MOMENT,
         ).strip()

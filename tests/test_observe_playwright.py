@@ -136,8 +136,8 @@ class RealChromiumTest(unittest.TestCase):
         after = datetime.now(timezone.utc)
         self.assertEqual((code, err.getvalue()), (0, ""), out.getvalue())
         self.assertEqual(list(answers), [])
-        self.assertIn("Prévia de preço, lida agora: INDISPONÍVEL (o seletor encontrou 2 elementos", out.getvalue())
-        self.assertIn("Prévia de ativo, lida agora: ATIVO DE TESTE. Confira se é o que a tela mostra.", out.getvalue())
+        self.assertIn("Prévia da cotação do ativo, lida agora: INDISPONÍVEL (o seletor encontrou 2 elementos", out.getvalue())
+        self.assertIn("Prévia do ativo, lida agora: ATIVO DE TESTE. Confira se é o que a tela mostra.", out.getvalue())
         saved = json.loads((self.runtime / observe.SELECTORS_FILE_NAME).read_text(encoding="utf-8"))
         self.assertEqual(
             {field: saved[field] for field in observe.FIELDS},

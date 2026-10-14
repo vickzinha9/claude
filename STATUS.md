@@ -220,7 +220,31 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
       - `observar_windows.cmd --help` terminou com código 0, e o link recusado, com código 2;
       - os arquivos de `runtime/` continuaram iguais;
       - `tests`: 191 testes no Linux (Python 3.12.15) e no Windows (Python 3.12.10), 189 OK e os 2 com Chromium pulados. Os 25 de `tests/test_observe.py` e os 4 de `tests/test_setup_observer.py` passaram nos dois sistemas, e os exemplos da simulação terminaram com código 0.
-    - **No seu computador, nada disso foi testado.**
+    - **No seu computador, nada disso foi testado** até a validação do item 19.
+19. **Validação no seu Windows e correções do lançador e dos rótulos**
+    - **Resultado da sua validação**, informado por você em 14/10/2026:
+      - a página depois do login foi `https://pocketoption.com/en/cabinet/`;
+      - ativo: `span.current-symbol` leu `GBP/USD OTC`, que correspondia à tela;
+      - payout: `div.value__val-start` leu 38% na prévia e 36% na primeira observação;
+      - cotação: indisponível. O DevTools mostra `canvas.layer.plot` no marcador de preço da borda direita do gráfico;
+      - a primeira observação foi gravada em `runtime/observations-20261014-183027-a88046eb.csv`;
+      - a instalação só funcionou depois de `py install 3.12`.
+
+      **A coleta não está comprovada:** falta a cotação, e os três campos precisam corresponder à plataforma.
+    - **Lançador:** sem o Python 3.12, `py -3.12` devolveu `-1610612730`, e mesmo assim o `preparar_windows.cmd` anunciou "Python escolhido: py -3.12". O teste `if not errorlevel 1` vale para qualquer código menor que 1, inclusive os negativos. Agora:
+      - o candidato só é aceito com `if "%ERRORLEVEL%"=="0"`;
+      - um candidato recusado aparece como `py -3.12: nao serve (codigo -1610612730).`, e o próximo é testado;
+      - os candidatos e o Python escolhido rodam com `call`, para que um `py.cmd` ou um `python.bat` no PATH, como os atalhos do pyenv-win, devolva o controle ao lançador;
+      - o teste de cada candidato recebe a entrada de `nul`, para que nenhuma pergunta fique esperando resposta.
+    - **Rótulos:** "preço" virou "cotação do ativo" nas mensagens. Antes do seletor da cotação, o terminal explica que ela é o preço do ativo no gráfico, e não o valor da aposta, o campo Amount. Na correção do resumo, valem `cotação`, `cotacao` e as respostas antigas (`preço`, `preco` e `price`). Os arquivos não mudaram: a chave `price` do `observe-selectors.json` e as colunas `price` e `price_status` do CSV continuam iguais.
+    - **Testes:**
+      - `tests/test_setup_observer.py` ganhou `PreparerOnWindowsTest`, com 4 testes que só rodam no Windows. Cada um roda o `preparar_windows.cmd` de verdade, pelo `cmd.exe`, numa cópia do projeto com um `setup_observer` falso e um `py` falso no início do PATH:
+        - `py -3.12` devolve `-1610612730`, e o `py -3` é escolhido;
+        - os dois `py` falham, e o `python` é escolhido;
+        - nenhum candidato serve: `[ERRO]` e código 1, sem rodar a preparação;
+        - com o 3.12 presente, ele continua sendo a primeira escolha.
+      - O teste de texto dos lançadores confere a linha `if "%ERRORLEVEL%"=="0" set "PYTHON_CMD=%*"`, a ausência de `errorlevel 1` e a entrada `<nul`.
+      - `tests/test_observe.py` ganhou um teste da correção pelo nome novo, `Cotação`, que confere a chave `price` gravada e as colunas `price` do CSV.
 
 ## Testes
 

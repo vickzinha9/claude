@@ -2,7 +2,7 @@
 
 Pesquisa e testes feitos em 14/10/2026, no branch `feature/progression-core`. No mesmo dia entraram os lançadores do Windows, o modo `--configure` e a espera pelo Playwright.
 
-> **Nenhuma conexão real foi comprovada.** Nada foi lido da plataforma real até agora. A origem dos três campos (ativo, preço e payout) continua sem comprovação. Todos os testes usaram objetos falsos ou uma página local de teste, inclusive os do CI no Windows.
+> **Nenhuma conexão real foi comprovada.** Nada foi lido da plataforma real até agora. A origem dos três campos (ativo, cotação do ativo e payout) continua sem comprovação. Todos os testes usaram objetos falsos ou uma página local de teste, inclusive os do CI no Windows.
 
 ## Resumo
 
@@ -33,7 +33,7 @@ O conteúdo das fontes foi parafraseado; as citações literais estão entre asp
 | Preço | cotação única (Plost) exibida no terminal | preços bid/ask do servidor MT5 |
 | Payout | percentual por instrumento, exibido no terminal | não existe payout de CALL/PUT |
 | Interface oficial para programas | nenhuma documentada | pacote `MetaTrader5`, que depende do terminal MT5 instalado no Windows e conectado |
-| Serve para este projeto? | sim: é onde aparecem o ativo, o preço e o payout das operações CALL/PUT | não: mostra outro produto, sem payout |
+| Serve para este projeto? | sim: é onde aparecem o ativo, a cotação e o payout das operações CALL/PUT | não: mostra outro produto, sem payout |
 
 ## 3. Bibliotecas não oficiais (descartadas)
 
@@ -67,13 +67,13 @@ Há bibliotecas de terceiros que imitam o WebSocket do site por engenharia rever
 | `captured_at_utc` | horário da captura, por exemplo `2026-10-14T12:00:00.000+00:00` |
 | `page` | `https://host/caminho` da página lida, sem parâmetros nem fragmento |
 | `asset`, `asset_status` | ativo como exibido, com espaços normalizados; `ok: <seletor>` ou `indisponível: <motivo>` |
-| `price`, `price_status` | preço exatamente como exibido; mesmo formato de status |
+| `price`, `price_status` | cotação do ativo exatamente como exibida; mesmo formato de status. A coluna manteve o nome `price`, e a cotação não é o valor da aposta (Amount) |
 | `payout_percent`, `payout_status` | só o número do percentual (`+92%` vira `92`); mesmo formato de status |
 
 **Formatos aceitos:**
 
 - **Ativo:** uma linha com letras, até 60 caracteres, sem começar com `=`, `+`, `-` ou `@`, que uma planilha leria como fórmula.
-- **Preço:** só dígitos, separados por `.` ou `,`. O valor fica como texto, porque o formato numérico da plataforma não foi verificado.
+- **Cotação do ativo:** só dígitos, separados por `.` ou `,`. O valor fica como texto, porque o formato numérico da plataforma não foi verificado.
 - **Payout:** de 1 a 3 dígitos, com decimais opcionais, seguidos de `%`; aceita `+` na frente.
 
 ## 5. O que foi comprovado
@@ -86,7 +86,7 @@ Há bibliotecas de terceiros que imitam o WebSocket do site por engenharia rever
 | Perfil preservado entre execuções | Chromium real, sem janela, em página local, no Linux remoto e no CI Windows: um dado gravado na primeira sessão apareceu na segunda | **não executado** |
 | Login manual | não se aplica | **não executado**: depende de você |
 | `--configure`: link, prévias, correção e gravação | objetos falsos: link recusado e aceito, prévias com valor e `INDISPONÍVEL`, correção, reutilização, seletores com barras e aspas gravados intactos, arquivo inválido guardado como cópia, nada gravado ao cancelar. Chromium real em página local: o fluxo inteiro, até as 3 observações | **não executado** |
-| Ativo, preço e payout | objetos falsos e Chromium real em página local de teste | **não comprovados**: nenhum seletor foi conferido na tela real |
+| Ativo, cotação do ativo e payout | objetos falsos e Chromium real em página local de teste | **não comprovados**: nenhum seletor foi conferido na tela real |
 | Nenhum clique | teste no código-fonte e página local com botões CALL e PUT que contam cliques: zero cliques | não se aplica |
 | Espera do Playwright entre leituras | objetos falsos; Playwright falso com `wait_for_timeout(5000)`; Chromium real com duas esperas de 1 s; navegador encerrado durante a espera: a leitura terminou com código 0 e o CSV ficou | **não executado** |
 | Horário de captura, CSV e campos indisponíveis | testes | **não executado** |
@@ -112,13 +112,13 @@ Os lançadores estão descritos no [README](README.md#windows-os-dois-lançadore
 1. Na pasta `claude`, abra `preparar_windows.cmd` com dois cliques. Ele deve terminar com "Pronto:" e "tudo pronto". Se aparecer `FALHA:` ou `[ERRO]`, siga o que a mensagem diz e abra de novo.
 2. Abra `observar_windows.cmd`. Quando ele pedir, cole o link da sua tela de operações e pressione Enter.
 3. Faça o login na janela do navegador e vá até a tela de operações. Só então pressione Enter no terminal.
-4. Para cada campo que o terminal pedir (ativo, preço e payout):
+4. Para cada campo que o terminal pedir (ativo, cotação do ativo e payout):
    - na janela do navegador, abra o DevTools com F12 (ou Ctrl+Shift+I) e ligue o modo de inspeção com Ctrl+Shift+C;
    - clique no elemento. No modo de inspeção, o clique só seleciona o elemento; fora dele, o clique é de verdade. Não use a inspeção sobre os botões CALL e PUT;
    - no painel Elements, clique com o botão direito no elemento destacado e escolha Copy > Copy selector (em português, Copiar > Copiar seletor);
    - cole no terminal, como veio, e pressione Enter;
    - compare a prévia com a tela. Se ela bater, pressione Enter. Se aparecer `INDISPONÍVEL` ou outro valor, cole outro seletor.
-5. No resumo, compare os três valores com a tela. Digite `ativo`, `preço` ou `payout` para corrigir um campo, ou pressione Enter para gravar e começar as 3 observações, uma a cada 5 segundos.
+5. No resumo, compare os três valores com a tela. Digite `ativo`, `cotação` ou `payout` para corrigir um campo, ou pressione Enter para gravar e começar as 3 observações, uma a cada 5 segundos.
 6. Compare cada linha `OBSERVAÇÃO` com o que a tela mostrava naquele momento. O CSV fica em `runtime\observations-...csv`.
 7. Me envie a saída do terminal, os seletores que funcionaram e se os valores bateram com a tela. Confira antes se não há dado pessoal nela. Só então os campos podem ser considerados comprovados.
 

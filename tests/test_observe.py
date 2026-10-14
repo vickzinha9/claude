@@ -434,7 +434,7 @@ class ObserveOnceTest(ObserveTestCase):
             (observe.ElementText(2), "o seletor encontrou 2 elementos; precisa encontrar exatamente 1"),
             (observe.ElementText(1), "o elemento encontrado não está visível"),
             (observe.ReadError("Error: seletor inválido"), "a leitura do seletor falhou: Error: seletor inválido"),
-            (shown("Preço"), "texto não reconhecido como preço: 'Preço'"),
+            (shown("Preço"), "texto não reconhecido como cotação do ativo: 'Preço'"),
         )
         for answer, reason in failures:
             with self.subTest(reason=reason):
@@ -482,7 +482,7 @@ class MainTest(ObserveTestCase):
         self.assertRegex(self.csv_files()[0].name, r"^observations-\d{8}-\d{6}-[0-9a-f]{8}\.csv$")
         self.assertIn(
             f"OBSERVAÇÃO 1 | 2026-10-14T12:00:00.000+00:00 | {URL} | ativo EUR/USD OTC"
-            " | preço 1.08534 | payout 92% | gravada no CSV",
+            " | cotação do ativo 1.08534 | payout 92% | gravada no CSV",
             run.out,
         )
         self.assertIn("Concluído: 3 observações, 3 válidas gravadas.", run.out)
@@ -499,7 +499,7 @@ class MainTest(ObserveTestCase):
         )
         run = self.run_main("--count", "3", "--interval", "1", session=session)
         self.assertEqual((run.code, run.err), (0, ""))
-        self.assertIn("Campos com seletor: ativo, preço | sem seletor, ficam indisponíveis: payout", run.out)
+        self.assertIn("Campos com seletor: ativo, cotação do ativo | sem seletor, ficam indisponíveis: payout", run.out)
         rows = self.csv_rows()
         self.assertEqual(len(rows), 2)  # the third observation had no available field
         self.assertEqual(
@@ -511,7 +511,7 @@ class MainTest(ObserveTestCase):
             ],
         )
         self.assertIn(
-            "ativo EUR/USD OTC | preço INDISPONÍVEL (o seletor não encontrou nenhum elemento)"
+            "ativo EUR/USD OTC | cotação do ativo INDISPONÍVEL (o seletor não encontrou nenhum elemento)"
             " | payout INDISPONÍVEL (sem seletor em observe-selectors.json) | gravada no CSV",
             run.out,
         )
@@ -649,9 +649,9 @@ class ConfigureTest(ObserveTestCase):
             + ["#ativo", "#preco", "#payout"] * 2,  # second summary, then the observation
         )
         self.assertIn("Link recusado (a URL precisa começar com https://;", run.out)
-        self.assertIn("Prévia de ativo, lida agora: EUR/USD OTC. Confira se é o que a tela mostra.", run.out)
+        self.assertIn("Prévia do ativo, lida agora: EUR/USD OTC. Confira se é o que a tela mostra.", run.out)
         self.assertIn(
-            "Prévia de preço, lida agora: INDISPONÍVEL (o seletor encontrou 2 elementos;"
+            "Prévia da cotação do ativo, lida agora: INDISPONÍVEL (o seletor encontrou 2 elementos;"
             " precisa encontrar exatamente 1)",
             run.out,
         )
@@ -659,6 +659,9 @@ class ConfigureTest(ObserveTestCase):
         self.assertIn("  payout: INDISPONÍVEL (sem seletor em observe-selectors.json)", run.out)
         self.assertIn("  payout: 92% (seletor #payout)", run.out)
         self.assertEqual(run.out.count(observe.COMPARE_WITH_SCREEN), 2)  # after each summary
+        self.assertEqual(run.out.count(observe.QUOTE_NOTE), 1)  # before the quote's selector
+        self.assertIn("Não é o valor da aposta: esse é o campo Amount", observe.QUOTE_NOTE)
+        self.assertIn("Cotação do ativo: ainda sem seletor.", run.out)
         self.assertIn(f"Seletores gravados em {self.selectors_path}.", run.out)
         self.assertEqual(len(self.csv_rows()), 1)
         self.assertNotIn("SEGREDO", run.out + run.err)
@@ -686,6 +689,34 @@ class ConfigureTest(ObserveTestCase):
         self.assertEqual(saved["_leia_me"], observe.SELECTORS_TEMPLATE["_leia_me"])
         self.assertIn(r'"payout": "#pay\\:out > span[title=\"Payout \\\"atual\\\"\"]"', self.selectors_path.read_text(encoding="utf-8"))
         self.assertEqual(self.csv_rows()[0][2:], ["EUR/USD OTC", f"ok: {asset}", "1.08534", f"ok: {price}", "92", f"ok: {payout}"])
+
+    def test_the_quote_keeps_the_price_key_and_answers_to_its_new_name(self):
+        self.write_selectors(asset="#ativo", price="#preco-antigo", payout="#payout")
+        session = FakeSession(
+            {
+                "#ativo": shown("EUR/USD OTC"),
+                "#preco-antigo": shown("1.0"),
+                "#cotacao": shown("1.08534"),
+                "#payout": shown("92%"),
+            }
+        )
+        answers = [
+            "",  # Enter after the login
+            "", "",  # asset kept
+            "", "",  # quote kept for now
+            "", "",  # payout kept
+            "Cotação",  # summary: correct the quote by its new name
+            "#cotacao", "",
+            "",  # save
+        ]
+        run = self.run_main("--configure", "--count", "1", session=session, answers=answers)
+        self.assertEqual((run.code, run.err), (0, ""))
+        self.assertEqual(self.answers.pending, [])
+        saved = self.saved_selectors()
+        self.assertEqual({field: saved[field] for field in observe.FIELDS}, {"asset": "#ativo", "price": "#cotacao", "payout": "#payout"})
+        self.assertEqual(self.csv_rows()[0][4:6], ["1.08534", "ok: #cotacao"])  # the CSV keeps the price columns
+        for answer in ("cotação", "cotacao", "cotação do ativo", "preço", "preco", "price"):
+            self.assertEqual(observe.FIELD_ANSWERS[answer], "price")
 
     def test_keeps_an_invalid_file_as_a_copy(self):
         self.runtime.mkdir(parents=True)
