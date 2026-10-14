@@ -1,6 +1,6 @@
 # Status
 
-Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O estado do coordenador, inclusive o estado de envio de cada reserva, pode ser salvo em SQLite, e só um coordenador por vez opera cada banco; sem banco, tudo fica em memória. O executor envia a ordem de uma reserva e consulta o resultado da ordem pendente, testado só com corretoras falsas. **Ainda não existe conexão com a corretora:** nenhuma ordem real é enviada nem consultada.
+Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O estado do coordenador, inclusive o estado de envio de cada reserva, pode ser salvo em SQLite, e só um coordenador por vez opera cada banco; sem banco, tudo fica em memória. O executor envia a ordem de uma reserva e consulta o resultado da ordem pendente, testado com corretoras falsas e com a corretora simulada em memória (item 14). **Ainda não existem conexão com a corretora nem programa de linha de comando:** nenhuma ordem real é enviada nem consultada.
 
 ## Concluído
 
@@ -118,12 +118,26 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
     - **Só verificação avulsa, fora da suíte:**
       - em `918f7ca`, um script conferiu que `submit_order` é o único método abstrato, que o `get_order` padrão levanta `NotImplementedError` e que `OrderStatus` não aceita alteração;
       - em `89fda85`, um script rodou cada caminho de `reconcile_pending` uma vez, em memória. Continuam sem teste na suíte: `RECORD_FAILED` causado por um resultado conflitante já registrado e a consulta pelo `get_order` padrão (`PENDING` com `NotImplementedError`).
+14. **Corretora simulada:** `pocketautonomo/simulated_broker.py`, com testes em `tests/test_simulated_broker.py`
+    - `SimulatedBroker` herda de `Broker` e existe só para execuções locais e testes: nenhuma ordem chega a uma corretora real. Os resultados são informados explicitamente por quem conduz a simulação, como um roteiro de teste; ela não usa dados de mercado nem prevê nada.
+    - `submit_order` gera o id `SIM-<uuid4>`, guarda a solicitação recebida, registra a ordem como OPEN e devolve `SubmissionResponse.accepted(id)`. Ela nunca rejeita uma ordem nem demora a responder.
+    - `get_order` devolve `OrderStatus` com exatamente o id consultado e o estado guardado; id desconhecido gera `KeyError`.
+    - `settle_order(id, resultado)` aceita só WIN ou LOSS; outro valor gera `ValueError`, e id desconhecido gera `KeyError`. A primeira liquidação muda OPEN para o resultado e devolve `True`; repetir o mesmo resultado devolve `False`; um resultado diferente gera `ValueError` e mantém o anterior.
+    - `requests` devolve uma tupla com as solicitações recebidas, na ordem de envio; uma tupla já devolvida não muda depois.
+    - Um `threading.Lock` protege as ordens e as solicitações guardadas. Não há teste de uso simultâneo da corretora simulada.
+    - **Só em memória:** ordens, resultados e solicitações ficam no próprio objeto e se perdem quando ele deixa de existir ou o processo termina. Depois de reabrir o banco, o coordenador continua vinculando as reservas aos ids `SIM-...`, mas uma nova `SimulatedBroker` não os conhece: a consulta gera `KeyError`, que `reconcile_pending` trata como consulta que falhou (`PENDING`), e a reserva continua pendente.
+    - **Testes na suíte** (`tests/test_simulated_broker.py`):
+      - `test_submit_accepts_with_distinct_ids_and_open_orders`: aceitação, ids `SIM-<uuid4>` distintos, estado inicial OPEN e histórico de solicitações na ordem de envio;
+      - `test_get_order_answers_about_exactly_the_requested_id`: a consulta responde só pelo id exato, e ids parecidos geram `KeyError`;
+      - `test_settle_win_or_loss_once_and_refuse_a_different_result`: WIN e LOSS liquidam uma vez, a repetição devolve `False` e um resultado diferente é recusado, mantendo o primeiro;
+      - `test_unknown_id_and_invalid_result_are_refused`: id desconhecido, inclusive de outra instância, gera `KeyError`; DRAW, CANCELLED, REJECTED, UNKNOWN, OPEN e outros valores geram `ValueError`, e a ordem continua OPEN;
+      - `test_simulated_win_ends_the_cycle_through_the_engine`: com `Coordinator`, `SqliteStore` e `OrderExecutor`, a reserva de 500 centavos é enviada, a consulta com a ordem ainda OPEN mantém a pendência e, depois de liquidar WIN, a consulta grava o resultado e encerra o ciclo, sem gale e com um único envio. O banco guarda o id `SIM-...` e o WIN.
 
 ## Testes
 
     python3 -m unittest discover -s tests -v
 
-Último resultado: 144 testes, todos passando, no Python 3.9.25. No 3.10, 3.12, 3.13 e 3.14, a última execução foi em `75d66ac`, com 137 testes, todos com SQLite 3.40.0; as mudanças seguintes só rodaram no 3.9.25. Tudo foi executado em Linux; o caminho do Windows (`msvcrt.locking`) ainda não foi executado.
+Último resultado: 149 testes, todos passando, no Python 3.9.25. No 3.10, 3.12, 3.13 e 3.14, a última execução foi em `75d66ac`, com 137 testes, todos com SQLite 3.40.0; as mudanças seguintes só rodaram no 3.9.25. Tudo foi executado em Linux; o caminho do Windows (`msvcrt.locking`) ainda não foi executado.
 
 ## Decisões em vigor
 
@@ -151,10 +165,12 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
 - UNKNOWN informado pela corretora na consulta não é registrado no coordenador: a pendência fica como estava.
 - Com o coordenador fechado, `reconcile_pending` não devolve relatório: o `CoordinatorError` de `status()` sobe.
 - Uma falha ao gravar o resultado consultado mantém a reserva pendente e não ativa `submission_failure`. Como a pendência impede nova entrada, nada é enviado até uma nova consulta gravar o resultado.
+- A corretora simulada liquida só com WIN ou LOSS, informados por quem conduz a simulação. O estado OPEN que ela usa é o `ORDER_OPEN` de `executor.py`, o mesmo que `reconcile_pending` reconhece.
 
 ## Em aberto para as próximas etapas
 
-- **Executor de ordens:** o envio e a consulta do resultado existem e têm testes, mas nada os chama fora dos testes. Faltam a corretora simulada completa, o armazenamento durável dos relatórios, horários, payout e a estratégia CALL/PUT.
+- **Executor de ordens:** o envio e a consulta do resultado existem e têm testes, inclusive com a corretora simulada, mas nada os chama fora dos testes. Faltam o armazenamento durável dos relatórios, horários, payout e a estratégia CALL/PUT.
+- **Programa de linha de comando: pendente.** Ainda não há comando para rodar ciclos simulados no terminal; a corretora simulada só é usada pelos testes.
 - O id de uma aceitação que não pôde ser gravada só existe no `SubmissionReport`. Quem chama `submit` precisa guardá-lo ou registrá-lo em log até a recuperação; senão, a reserva fica SUBMITTING sem id.
 - **Conexão com a Pocket Option: pendente.** Nenhuma ordem real é enviada nem consultada.
 - Reservas UNVERIFIED ou SUBMITTING sem id ficam em `NO_ORDER_ID`, porque a consulta só usa o id vinculado. Falta decidir como recuperá-las.
