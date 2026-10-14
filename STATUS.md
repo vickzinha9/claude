@@ -177,13 +177,14 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
     - **Verificação avulsa, fora da suíte, só em Linux:**
       - SIGINT real enviado ao grupo de processos, com Chromium sem janela na página local: código 130, as 5 observações feitas ficaram no CSV e nenhum processo do Chromium sobrou;
       - a janela visível não abre no Linux remoto, que não tem servidor X: `TargetClosedError`, código 1.
+    - **CI:** a execução [38534987597](https://github.com/vickzinha9/claude/actions/runs/38534987597), no commit `4d5a9d0`, terminou com `success` nos dois sistemas, sem mudar o workflow. Os 19 testes de `tests/test_observe.py` passaram no Linux e no Windows, inclusive o que roda `python -m`; os 2 com Chromium foram pulados, porque o CI não instala o Playwright.
     - **Plataforma real: nada comprovado.** Faltam o link da tela de operações, o login e os seletores conferidos na tela real.
 
 ## Testes
 
     python3 -m unittest discover -s tests -v
 
-Último resultado local, em Linux: 181 testes. Com o Playwright 1.64.0, no Python 3.12.14, os 181 passaram. Sem o Playwright, nos Python 3.9.25, 3.10.20, 3.11.15, 3.12.14, 3.13.13 e 3.14.4, passaram 179, e os 2 de `tests/test_observe_playwright.py` foram pulados. No GitHub Actions, a última execução registrada é a do item 16, com 160 testes.
+Último resultado local, em Linux: 181 testes. Com o Playwright 1.64.0, no Python 3.12.14, os 181 passaram. Sem o Playwright, nos Python 3.9.25, 3.10.20, 3.11.15, 3.12.14, 3.13.13 e 3.14.4, passaram 179, e os 2 de `tests/test_observe_playwright.py` foram pulados. No GitHub Actions, na execução 38534987597 (commit `4d5a9d0`), os 181 testes rodaram no Linux (Python 3.12.15) e no Windows (Python 3.12.10): 179 passaram e 2 foram pulados nos dois sistemas.
 
 ## Decisões em vigor
 

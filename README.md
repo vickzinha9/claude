@@ -132,12 +132,14 @@ python -m pocketautonomo.local_simulation --cycles 2 --results "LOSS,LOSS,LOSS,L
 
 No Linux os comandos rodam no bash; no Windows, no PowerShell 7. A saída usa UTF-8 (`PYTHONIOENCODING=utf-8`).
 
-Execução verificada: [run 38522223843](https://github.com/vickzinha9/claude/actions/runs/38522223843), de 14/10/2026, no commit `ecc9d12`, com os dois sistemas aprovados:
+Última execução verificada: [run 38534987597](https://github.com/vickzinha9/claude/actions/runs/38534987597), de 14/10/2026, no commit `4d5a9d0`, com os dois sistemas aprovados:
 
 | Sistema | Ambiente | Testes | `--cycles 3` LOSS,LOSS,WIN | `--cycles 2` quatro LOSS |
 |---|---|---|---|---|
-| Linux | ubuntu-24.04, Python 3.12.15, SQLite 3.45.1 | 160, OK | código 0, 9 ordens | código 0, 8 ordens |
-| Windows | Windows Server 2025, Python 3.12.10, SQLite 3.49.1 | 160, OK | código 0, 9 ordens | código 0, 8 ordens |
+| Linux | ubuntu-24.04, Python 3.12.15, SQLite 3.45.1 | 181: 179 OK e 2 pulados | código 0, 9 ordens | código 0, 8 ordens |
+| Windows | Windows Server 2025, Python 3.12.10, SQLite 3.49.1 | 181: 179 OK e 2 pulados | código 0, 9 ordens | código 0, 8 ordens |
+
+Os 2 testes pulados são os do coletor com Chromium de verdade, porque o CI não instala o Playwright. A primeira execução, [run 38522223843](https://github.com/vickzinha9/claude/actions/runs/38522223843), no commit `ecc9d12`, teve 160 testes OK nos dois sistemas.
 
 Nos dois sistemas, os acentos da saída apareceram corretos no log. Os testes de exclusividade do banco também passaram, inclusive no Windows, onde a trava usa `msvcrt.locking`.
 
@@ -148,7 +150,8 @@ O CI roda numa máquina virtual do GitHub, com o `python` instalado pelo `setup-
 - o lançador `py -3` e o Python 3.9;
 - o console interativo e um Ctrl+C de verdade;
 - o modo `--forever`, que só termina com Ctrl+C;
-- a saída redirecionada para arquivo sem `PYTHONIOENCODING=utf-8`.
+- a saída redirecionada para arquivo sem `PYTHONIOENCODING=utf-8`;
+- o coletor com o Playwright: instalação, janela visível, login e Ctrl+C.
 
 ## Coletor somente leitura da Pocket Option
 
