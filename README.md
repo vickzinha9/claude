@@ -6,7 +6,7 @@ Núcleo em desenvolvimento para controlar ciclos de entradas com progressão fix
 
 ## Requisitos
 
-- Python 3.9 ou mais novo. O projeto usa só a biblioteca padrão; não há nada para instalar com `pip`.
+- Python 3.9 ou mais novo. O projeto usa só a biblioteca padrão; não há nada para instalar com `pip`. Versões já testadas: 3.9.25 localmente, em Linux, e 3.12 no GitHub Actions, em Linux e Windows (veja a seção Integração contínua, abaixo).
 - Git, para baixar o código.
 
 ## Instalação
@@ -35,6 +35,8 @@ Rode todos os comandos abaixo na raiz do repositório, a pasta `claude`. No Wind
 |---|---|
 | Linux | `python3 -m unittest discover -s tests -v` |
 | Windows | `py -3 -m unittest discover -s tests -v` |
+
+No GitHub, o workflow [`.github/workflows/tests.yml`](.github/workflows/tests.yml) roda essa suíte e os dois exemplos finitos abaixo em Linux e Windows a cada push e pull request. As execuções ficam na [aba Actions](https://github.com/vickzinha9/claude/actions/workflows/tests.yml).
 
 ## Simulação local
 
@@ -115,9 +117,35 @@ Banco preservado: runtime/simulation-20261014-054555-b9105cb7.db
 - Uma resposta incerta ou uma falha de gravação também param a execução com `PARADA: ...`, preservando o banco.
 - A saída aparece só no terminal; não há arquivo de log. O histórico fica no banco.
 
-## Windows: documentado, não testado
+## Integração contínua (GitHub Actions)
 
-Os comandos para Windows acima estão documentados, mas **ainda não foram executados em Windows**. Os testes e as execuções desta versão rodaram só em Linux, com Python 3.9.25. A trava do banco no Windows, feita com `msvcrt.locking`, também nunca rodou.
+O workflow `.github/workflows/tests.yml` roda a cada push, a cada pull request e sob demanda (`workflow_dispatch`), em `ubuntu-latest` e `windows-latest`, com Python 3.12 instalado pelo `actions/setup-python`. Em cada sistema ele executa, com `python`:
+
+```text
+python -m unittest discover -s tests -v
+python -m pocketautonomo.local_simulation --cycles 3 --results "LOSS,LOSS,WIN"
+python -m pocketautonomo.local_simulation --cycles 2 --results "LOSS,LOSS,LOSS,LOSS"
+```
+
+No Linux os comandos rodam no bash; no Windows, no PowerShell 7. A saída usa UTF-8 (`PYTHONIOENCODING=utf-8`).
+
+Execução verificada: [run 38522223843](https://github.com/vickzinha9/claude/actions/runs/38522223843), de 14/10/2026, no commit `ecc9d12`, com os dois sistemas aprovados:
+
+| Sistema | Ambiente | Testes | `--cycles 3` LOSS,LOSS,WIN | `--cycles 2` quatro LOSS |
+|---|---|---|---|---|
+| Linux | ubuntu-24.04, Python 3.12.15, SQLite 3.45.1 | 160, OK | código 0, 9 ordens | código 0, 8 ordens |
+| Windows | Windows Server 2025, Python 3.12.10, SQLite 3.49.1 | 160, OK | código 0, 9 ordens | código 0, 8 ordens |
+
+Nos dois sistemas, os acentos da saída apareceram corretos no log. Os testes de exclusividade do banco também passaram, inclusive no Windows, onde a trava usa `msvcrt.locking`.
+
+### Windows: testado em CI, não no seu computador
+
+O CI roda numa máquina virtual do GitHub, com o `python` instalado pelo `setup-python`, sem interação e com a saída gravada em log. **Nada disso foi testado no seu computador.** No Windows, continuam sem teste:
+
+- o lançador `py -3` e o Python 3.9;
+- o console interativo e um Ctrl+C de verdade;
+- o modo `--forever`, que só termina com Ctrl+C;
+- a saída redirecionada para arquivo sem `PYTHONIOENCODING=utf-8`.
 
 ## Situação
 

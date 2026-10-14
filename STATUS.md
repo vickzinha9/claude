@@ -1,6 +1,6 @@
 # Status
 
-Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O estado do coordenador, inclusive o estado de envio de cada reserva, pode ser salvo em SQLite, e só um coordenador por vez opera cada banco; sem banco, tudo fica em memória. O executor envia a ordem de uma reserva e consulta o resultado da ordem pendente, testado com corretoras falsas e com a corretora simulada em memória (item 14). O programa `python3 -m pocketautonomo.local_simulation` roda ciclos completos com essa corretora simulada (item 15). **Ainda não existe conexão com a corretora:** nenhuma ordem real é enviada nem consultada.
+Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O estado do coordenador, inclusive o estado de envio de cada reserva, pode ser salvo em SQLite, e só um coordenador por vez opera cada banco; sem banco, tudo fica em memória. O executor envia a ordem de uma reserva e consulta o resultado da ordem pendente, testado com corretoras falsas e com a corretora simulada em memória (item 14). O programa `python3 -m pocketautonomo.local_simulation` roda ciclos completos com essa corretora simulada (item 15). O GitHub Actions roda a suíte e os exemplos finitos em Linux e Windows (item 16). **Ainda não existe conexão com a corretora:** nenhuma ordem real é enviada nem consultada.
 
 ## Concluído
 
@@ -153,12 +153,21 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
     - **Verificação avulsa, fora da suíte, só em Linux:**
       - os dois exemplos finitos, com os comandos exatos do pedido: 9 ordens com três WIN e 8 ordens com duas quartas LOSS, código 0 nos dois;
       - `--forever --results "LOSS,LOSS,WIN" --poll-interval 0.25` interrompido com SIGINT real depois de 3 s: código 130, 11 ordens, a pendência ACCEPTED preservada, a trava liberada e 0,05 s de CPU em 3 s de execução. Reabrir esse banco foi recusado com código 1, sem alteração.
+16. **Integração contínua:** `.github/workflows/tests.yml`
+    - Roda em push, pull request e `workflow_dispatch`, numa matriz `ubuntu-latest` e `windows-latest`. O código vem de `actions/checkout@v7`, sem guardar credenciais, e o Python 3.12, de `actions/setup-python@v7`. A permissão é só de leitura (`contents: read`), cada job tem limite de 10 minutos e `fail-fast: false` deixa os dois sistemas sempre terminarem.
+    - Em cada sistema roda, com `python`, a suíte e os dois exemplos finitos da simulação: no Linux pelo bash e no Windows pelo PowerShell 7. Cada exemplo fica num passo próprio, imprime `exit code: N` e falha com o código do programa. A saída usa `PYTHONIOENCODING=utf-8`.
+    - **Resultado observado** na execução [38522223843](https://github.com/vickzinha9/claude/actions/runs/38522223843), disparada pelo push do commit `ecc9d12` em 14/10/2026, com conclusão `success` nos dois jobs:
+      - Linux: imagem ubuntu-24.04, Python 3.12.15, SQLite 3.45.1, bash. 160 testes OK em 1,3 s; os dois exemplos com código 0 (9 ordens com três WIN e 8 ordens com duas quartas LOSS).
+      - Windows: imagem windows-2025 (Windows Server 2025), Python 3.12.10, SQLite 3.49.1, PowerShell 7. 160 testes OK em 23,9 s, inclusive os três de exclusividade, que usam `msvcrt.locking`; os dois exemplos com código 0, com as mesmas 9 e 8 ordens.
+      - Nos dois logs: nenhuma falha, nenhum aviso e os acentos corretos (`SIMULAÇÃO`, `direção`). Os valores enviados foram 500/1000/2000 três vezes e 500/1000/2000/4000 duas vezes, cada ordem com um id `SIM-...` diferente.
+      - O GitHub avisou que o rótulo `ubuntu-latest` passa para o Ubuntu 26 a partir de 19/10/2026.
+    - Nenhuma incompatibilidade apareceu, e não foi preciso mudar código.
 
 ## Testes
 
     python3 -m unittest discover -s tests -v
 
-Último resultado: 160 testes, todos passando, no Python 3.9.25. No 3.10, 3.12, 3.13 e 3.14, a última execução foi em `75d66ac`, com 137 testes, todos com SQLite 3.40.0; as mudanças seguintes só rodaram no 3.9.25. Tudo foi executado em Linux; o caminho do Windows (`msvcrt.locking`) ainda não foi executado.
+Último resultado local: 160 testes, todos passando, no Python 3.9.25 e no 3.12.14, em Linux. No GitHub Actions: 160 testes passando no Linux (Python 3.12.15) e no Windows (Python 3.12.10), item 16. No 3.10, 3.13 e 3.14, a última execução foi em `75d66ac`, com 137 testes.
 
 ## Decisões em vigor
 
@@ -190,6 +199,7 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
 - A simulação local só reaproveita um banco sem ciclo aberto e nunca resolve sozinha uma pendência de execução anterior.
 - Códigos de saída da simulação local: 0 (ciclos pedidos encerrados), 1 (recusa ou parada), 2 (argumentos inválidos) e 130 (Ctrl+C).
 - A pasta `runtime/` é relativa à pasta atual: a simulação deve rodar da raiz do repositório.
+- O CI usa as versões principais mais recentes das ações oficiais em 14/10/2026: `actions/checkout@v7` (última versão v7.0.1) e `actions/setup-python@v7` (última versão v7.0.0), ambas em node24.
 
 ## Em aberto para as próximas etapas
 
@@ -200,4 +210,6 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
 - **Conexão com a Pocket Option: pendente.** Nenhuma ordem real é enviada nem consultada. Dados de mercado, estratégia e executor real também ficam para os pacotes seguintes.
 - Reservas UNVERIFIED ou SUBMITTING sem id ficam em `NO_ORDER_ID`, porque a consulta só usa o id vinculado. Falta decidir como recuperá-las.
 - UNKNOWN não tem prazo: o bloqueio dura até chegar um resultado definitivo.
-- **Windows não testado:** os comandos do README para Windows estão documentados, mas nem a suíte nem a simulação rodaram em Windows, e o caminho `msvcrt.locking` também não (falta CI em Linux e Windows).
+- **Windows no computador do usuário: não testado.** O CI cobre `windows-latest` com PowerShell 7 e `python` (item 16). Faltam o lançador `py -3`, o Python 3.9 no Windows, o console interativo, um Ctrl+C de verdade, o modo `--forever` e a saída redirecionada sem `PYTHONIOENCODING=utf-8`.
+- O CI não roda o modo `--forever` em nenhum sistema; no Linux, ele foi conferido só manualmente (item 15).
+- A partir de 19/10/2026, `ubuntu-latest` passa a usar o Ubuntu 26, uma imagem que este projeto ainda não verificou.
