@@ -2,11 +2,12 @@
 
 Núcleo em desenvolvimento para controlar ciclos de entradas com progressão fixa de 500, 1000, 2000 e 4000 centavos (R$ 5, R$ 10, R$ 20 e R$ 40), com no máximo quatro tentativas por ciclo.
 
-> **Por enquanto, só existe simulação local.** Não há conexão com corretora, dados de mercado nem estratégia, e nenhuma ordem real é enviada. Os resultados da simulação são escolhidos por você em `--results`: o programa não analisa o mercado, não prevê resultados e não calcula lucratividade.
+> **Nenhuma ordem real é enviada.** A simulação local usa uma corretora em memória, e os resultados dela são escolhidos por você em `--results`: o programa não analisa o mercado, não prevê resultados e não calcula lucratividade. O [coletor somente leitura](#coletor-somente-leitura-da-pocket-option) só lê ativo, preço e payout da tela da Pocket Option, com seletores que você mesmo confere. A leitura na plataforma real ainda não foi comprovada (veja o [INTEGRATION.md](INTEGRATION.md)). Não há estratégia nem executor real.
 
 ## Requisitos
 
-- Python 3.9 ou mais novo. O projeto usa só a biblioteca padrão; não há nada para instalar com `pip`. Versões já testadas: 3.9.25 localmente, em Linux, e 3.12 no GitHub Actions, em Linux e Windows (veja a seção Integração contínua, abaixo).
+- Python 3.9 ou mais novo. O motor, a simulação e os testes usam só a biblioteca padrão; não há nada para instalar com `pip`. Versões já testadas: 3.9.25 localmente, em Linux, e 3.12 no GitHub Actions, em Linux e Windows (veja a seção Integração contínua, abaixo).
+- Só para o coletor: Python 3.10 ou mais novo e o Playwright, instalados como explica a seção do coletor.
 - Git, para baixar o código.
 
 ## Instalação
@@ -37,6 +38,8 @@ Rode todos os comandos abaixo na raiz do repositório, a pasta `claude`. No Wind
 | Windows | `py -3 -m unittest discover -s tests -v` |
 
 No GitHub, o workflow [`.github/workflows/tests.yml`](.github/workflows/tests.yml) roda essa suíte e os dois exemplos finitos abaixo em Linux e Windows a cada push e pull request. As execuções ficam na [aba Actions](https://github.com/vickzinha9/claude/actions/workflows/tests.yml).
+
+Os testes do coletor em `tests/test_observe.py` usam objetos falsos no lugar do navegador e não precisam do Playwright. Os dois de `tests/test_observe_playwright.py` abrem um Chromium de verdade, sem janela, numa página local de teste: sem o Playwright, como no CI, eles aparecem como `skipped`.
 
 ## Simulação local
 
@@ -147,6 +150,51 @@ O CI roda numa máquina virtual do GitHub, com o `python` instalado pelo `setup-
 - o modo `--forever`, que só termina com Ctrl+C;
 - a saída redirecionada para arquivo sem `PYTHONIOENCODING=utf-8`.
 
+## Coletor somente leitura da Pocket Option
+
+`python -m pocketautonomo.observe` abre a tela de operações num Chromium visível, espera você fazer o login e lê ativo, preço e payout com os seletores que você conferiu. **Não envia ordens, não clica em CALL/PUT e não faz operações financeiras.** A pesquisa, o método, o que foi comprovado e os passos de validação estão no [INTEGRATION.md](INTEGRATION.md).
+
+### Instalação no Windows
+
+Precisa do Python 3.10 ou mais novo, porque o Playwright 1.64.0 exige isso. No PowerShell, na pasta `claude`:
+
+```powershell
+py -3.12 -m venv .venv
+.venv\Scripts\python -m pip install playwright==1.64.0
+.venv\Scripts\python -m playwright install chromium
+```
+
+- Com outra versão a partir da 3.10, troque `-3.12` por ela, como `-3.13`. Confira as versões instaladas com `py --list`.
+- A pasta `.venv` fica fora do Git. O `playwright install chromium` baixa o Chromium do Playwright para a sua pasta de usuário, fora do repositório.
+- O Playwright 1.64.0 foi testado só no Linux remoto, com Python 3.12.14. **No Windows, a instalação não foi testada.**
+
+### Execução
+
+```powershell
+.venv\Scripts\python -m pocketautonomo.observe --url "<link da sua tela de operações>" --count 3
+```
+
+Rode na pasta `claude`, porque a pasta `runtime/` é relativa à pasta atual. A janela do navegador abre, você faz o login, e o programa espera Enter no terminal antes de ler. Sem `--count`, ele lê até Ctrl+C.
+
+| Opção | Significado |
+|---|---|
+| `--url LINK` | obrigatório: link `https://` de pocketoption.com ou de um subdomínio dele |
+| `--interval S` | segundos entre uma leitura e a próxima (padrão 5, mínimo 1) |
+| `--count N` | quantas observações fazer; sem esta opção, lê até Ctrl+C |
+
+| Arquivo, em `runtime/` | Conteúdo |
+|---|---|
+| `browser-profile/` | perfil do navegador, com a sua sessão; não compartilhe |
+| `observe-selectors.json` | seletores de `asset`, `price` e `payout`, criado vazio na primeira execução |
+| `observations-<data>-<hora>-<sufixo>.csv` | um arquivo novo por execução, com as observações válidas |
+
+| Código | Situação |
+|---|---|
+| 0 | terminou com pelo menos uma observação válida |
+| 1 | falhou, ou terminou sem nenhuma observação válida |
+| 2 | argumento ou configuração inválidos, inclusive seletores vazios e Playwright ausente |
+| 130 | interrompido por Ctrl+C; as linhas já gravadas ficam no CSV |
+
 ## Situação
 
-O [STATUS.md](STATUS.md) descreve o que já funciona, as decisões em vigor e o que falta: a conexão com a corretora, os dados de mercado, a estratégia e o executor real.
+O [STATUS.md](STATUS.md) descreve o que já funciona, as decisões em vigor e o que falta: a validação do coletor na plataforma real, a estratégia e o executor real.

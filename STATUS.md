@@ -1,6 +1,6 @@
 # Status
 
-Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O estado do coordenador, inclusive o estado de envio de cada reserva, pode ser salvo em SQLite, e só um coordenador por vez opera cada banco; sem banco, tudo fica em memória. O executor envia a ordem de uma reserva e consulta o resultado da ordem pendente, testado com corretoras falsas e com a corretora simulada em memória (item 14). O programa `python3 -m pocketautonomo.local_simulation` roda ciclos completos com essa corretora simulada (item 15). O GitHub Actions roda a suíte e os exemplos finitos em Linux e Windows (item 16). **Ainda não existe conexão com a corretora:** nenhuma ordem real é enviada nem consultada.
+Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O estado do coordenador, inclusive o estado de envio de cada reserva, pode ser salvo em SQLite, e só um coordenador por vez opera cada banco; sem banco, tudo fica em memória. O executor envia a ordem de uma reserva e consulta o resultado da ordem pendente, testado com corretoras falsas e com a corretora simulada em memória (item 14). O programa `python3 -m pocketautonomo.local_simulation` roda ciclos completos com essa corretora simulada (item 15). O GitHub Actions roda a suíte e os exemplos finitos em Linux e Windows (item 16). O coletor `python -m pocketautonomo.observe` lê ativo, preço e payout da tela da Pocket Option, somente para leitura, e foi testado só com dados simulados (item 17). **Ainda não existe conexão comprovada com a corretora:** nenhuma ordem real é enviada nem consultada, e nenhum dado foi lido da plataforma real.
 
 ## Concluído
 
@@ -162,12 +162,28 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
       - Nos dois logs: nenhuma falha, nenhum aviso e os acentos corretos (`SIMULAÇÃO`, `direção`). Os valores enviados foram 500/1000/2000 três vezes e 500/1000/2000/4000 duas vezes, cada ordem com um id `SIM-...` diferente.
       - O GitHub avisou que o rótulo `ubuntu-latest` passa para o Ubuntu 26 a partir de 19/10/2026.
     - Nenhuma incompatibilidade apareceu, e não foi preciso mudar código.
+17. **Coletor somente leitura da Pocket Option:** `pocketautonomo/observe.py`, com testes em `tests/test_observe.py` e `tests/test_observe_playwright.py`. A pesquisa, o método e os passos de validação estão no `INTEGRATION.md`.
+    - **Pesquisa em fontes oficiais:** não há interface oficial documentada para programas lerem o terminal web CALL/PUT. Os artigos do blog sobre "trading API" são genéricos e não provam endpoint nenhum. O MT5 é outro produto, de Forex e CFD, sem payout de CALL/PUT. As bibliotecas não oficiais pedem o SSID da sessão e foram descartadas. O robots.txt veda `*/cabinet*`, e os Termos permitem cancelar resultados de operações feitas com software robô não autorizado.
+    - **Método:** Chromium visível pelo Playwright 1.64.0, importado só ao abrir o navegador, com o perfil em `runtime/browser-profile`. O login é manual, confirmado com Enter no terminal. A leitura usa só os seletores de `runtime/observe-selectors.json`, criado vazio na primeira execução; nenhum seletor vem no código.
+    - Opções: `--url` (obrigatório; só https em pocketoption.com ou num subdomínio, sem usuário, senha ou outra porta), `--interval` (padrão 5 s, mínimo 1) e `--count` (sem ele, lê até Ctrl+C).
+    - Cada campo exige exatamente um elemento visível e um texto no formato do campo. Senão, fica `indisponível: <motivo>`, e um campo disponível registra `ok: <seletor>`. Uma página fora de pocketoption.com não é lida.
+    - O horário de captura vem do relógio local, em UTC e com milissegundos. Observações com pelo menos um campo disponível vão, linha a linha, para um CSV novo em `runtime/`. Parâmetros e fragmento da URL nunca aparecem no terminal nem no CSV.
+    - **Só leitura:** além de abrir e fechar o navegador, o adaptador do Playwright usa apenas `goto`, `url`, `is_closed`, `locator`, `count`, `is_visible` e `inner_text`.
+    - Códigos de saída: 0 (pelo menos uma observação válida), 1 (falha ou nenhuma observação válida), 2 (argumento ou configuração inválidos, inclusive seletores vazios e Playwright ausente) e 130 (Ctrl+C).
+    - **Testes na suíte:**
+      - `tests/test_observe.py`, 19 testes, sem Playwright: URLs aceitas e recusadas; URLs exibidas sem segredos; arquivo de seletores; formatos dos campos; leitura só pelos seletores; página fora do domínio; CSV; campos indisponíveis; observação vazia não gravada; nenhum seletor (código 2); Ctrl+C no laço e no login; fim da entrada; janela fechada; argumentos inválidos; e `python -m`.
+      - No mesmo arquivo, o adaptador do Playwright roda sobre um módulo falso: janela visível, perfil em `runtime/`, só chamadas de leitura e navegador fechado no fim. Também há testes da falha ao abrir o Chromium, do Playwright ausente e da análise do código-fonte, que falha com qualquer chamada que aja na página.
+      - `tests/test_observe_playwright.py`, 2 testes com Chromium real, sem janela, numa página local de teste: leitura sem clique nos botões CALL e PUT, perfil preservado entre duas sessões e o coletor de ponta a ponta. Sem o Playwright, como no CI, eles são pulados.
+    - **Verificação avulsa, fora da suíte, só em Linux:**
+      - SIGINT real enviado ao grupo de processos, com Chromium sem janela na página local: código 130, as 5 observações feitas ficaram no CSV e nenhum processo do Chromium sobrou;
+      - a janela visível não abre no Linux remoto, que não tem servidor X: `TargetClosedError`, código 1.
+    - **Plataforma real: nada comprovado.** Faltam o link da tela de operações, o login e os seletores conferidos na tela real.
 
 ## Testes
 
     python3 -m unittest discover -s tests -v
 
-Último resultado local: 160 testes, todos passando, no Python 3.9.25 e no 3.12.14, em Linux. No GitHub Actions: 160 testes passando no Linux (Python 3.12.15) e no Windows (Python 3.12.10), item 16. No 3.10, 3.13 e 3.14, a última execução foi em `75d66ac`, com 137 testes.
+Último resultado local, em Linux: 181 testes. Com o Playwright 1.64.0, no Python 3.12.14, os 181 passaram. Sem o Playwright, nos Python 3.9.25, 3.10.20, 3.11.15, 3.12.14, 3.13.13 e 3.14.4, passaram 179, e os 2 de `tests/test_observe_playwright.py` foram pulados. No GitHub Actions, a última execução registrada é a do item 16, com 160 testes.
 
 ## Decisões em vigor
 
@@ -200,6 +216,11 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
 - Códigos de saída da simulação local: 0 (ciclos pedidos encerrados), 1 (recusa ou parada), 2 (argumentos inválidos) e 130 (Ctrl+C).
 - A pasta `runtime/` é relativa à pasta atual: a simulação deve rodar da raiz do repositório.
 - O CI usa as versões principais mais recentes das ações oficiais em 14/10/2026: `actions/checkout@v7` (última versão v7.0.1) e `actions/setup-python@v7` (última versão v7.0.0), ambas em node24.
+- O coletor só lê: nunca clica, digita, pressiona teclas, executa JavaScript próprio, lê cookies ou armazenamento do site nem escuta a rede. O login é sempre manual.
+- Nenhum seletor vem no código. Um campo sem seletor conferido por você fica indisponível, com o motivo, e nunca recebe valor inventado.
+- O coletor só abre e só lê páginas https de pocketoption.com ou de um subdomínio.
+- O horário de captura vem do relógio local, em UTC; nenhum horário é lido da plataforma.
+- O Playwright é opcional: só o coletor precisa dele, importado ao abrir o navegador. O CI não o instala, e o workflow não mudou.
 
 ## Em aberto para as próximas etapas
 
@@ -207,7 +228,8 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
 - **Pendência deixada pela simulação:** depois de um Ctrl+C ou de uma parada com reserva pendente, o banco fica recusado pela simulação, porque a corretora simulada daquela execução deixou de existir. Não há ferramenta para resolver essa pendência; o caminho é usar um banco novo.
 - A simulação não grava arquivo de log: a saída aparece só no terminal, e o histórico fica no banco.
 - O id de uma aceitação que não pôde ser gravada só existe no `SubmissionReport`. Quem chama `submit` precisa guardá-lo ou registrá-lo em log até a recuperação; senão, a reserva fica SUBMITTING sem id.
-- **Conexão com a Pocket Option: pendente.** Nenhuma ordem real é enviada nem consultada. Dados de mercado, estratégia e executor real também ficam para os pacotes seguintes.
+- **Leitura da Pocket Option: não comprovada.** O coletor (item 17) está pronto para a validação no seu Windows, seguindo os passos do `INTEGRATION.md`. Faltam o link da tela de operações, o login e os seletores conferidos na tela real. Nenhuma ordem real é enviada nem consultada; a estratégia e o executor real ficam para os pacotes seguintes.
+- **Coletor no Windows: não testado.** Faltam a instalação do Playwright, a janela visível, o DevTools, o login e um Ctrl+C de verdade. O CI do Windows roda os testes do coletor sem o Playwright, então pula os 2 que usam o Chromium.
 - Reservas UNVERIFIED ou SUBMITTING sem id ficam em `NO_ORDER_ID`, porque a consulta só usa o id vinculado. Falta decidir como recuperá-las.
 - UNKNOWN não tem prazo: o bloqueio dura até chegar um resultado definitivo.
 - **Windows no computador do usuário: não testado.** O CI cobre `windows-latest` com PowerShell 7 e `python` (item 16). Faltam o lançador `py -3`, o Python 3.9 no Windows, o console interativo, um Ctrl+C de verdade, o modo `--forever` e a saída redirecionada sem `PYTHONIOENCODING=utf-8`.

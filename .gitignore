@@ -6,7 +6,11 @@
 *.sqlite3
 *.sqlite3-*
 
-# Databases and lock files of local runs (python3 -m pocketautonomo.local_simulation)
+# Local runs: simulation databases and locks (pocketautonomo.local_simulation); the
+# collector's browser profile, selectors and CSV files (pocketautonomo.observe)
 runtime/
+
+# Virtual environment for the collector's Playwright (see README)
+.venv/
 
 __pycache__/
