@@ -1,6 +1,6 @@
 # Status
 
-Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O estado do coordenador, inclusive o estado de envio de cada reserva, pode ser salvo em SQLite, e só um coordenador por vez opera cada banco; sem banco, tudo fica em memória. O executor envia a ordem de uma reserva e consulta o resultado da ordem pendente, testado com corretoras falsas e com a corretora simulada em memória (item 14). O programa `python3 -m pocketautonomo.local_simulation` roda ciclos completos com essa corretora simulada (item 15). O GitHub Actions roda a suíte e os exemplos finitos em Linux e Windows (item 16). O coletor `python -m pocketautonomo.observe` lê ativo, preço e payout da tela da Pocket Option, somente para leitura, e foi testado só com dados simulados (item 17). **Ainda não existe conexão comprovada com a corretora:** nenhuma ordem real é enviada nem consultada, e nenhum dado foi lido da plataforma real.
+Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O estado do coordenador, inclusive o estado de envio de cada reserva, pode ser salvo em SQLite, e só um coordenador por vez opera cada banco; sem banco, tudo fica em memória. O executor envia a ordem de uma reserva e consulta o resultado da ordem pendente, testado com corretoras falsas e com a corretora simulada em memória (item 14). O programa `python3 -m pocketautonomo.local_simulation` roda ciclos completos com essa corretora simulada (item 15). O GitHub Actions roda a suíte e os exemplos finitos em Linux e Windows (item 16). O coletor `python -m pocketautonomo.observe` lê ativo, preço e payout da tela da Pocket Option, somente para leitura, e foi testado só com dados simulados e numa página local de teste (item 17). No Windows, `preparar_windows.cmd` instala o coletor, e `observar_windows.cmd` configura os seletores pelo terminal e faz três observações (item 18). **Ainda não existe conexão comprovada com a corretora:** nenhuma ordem real é enviada nem consultada, e nenhum dado foi lido da plataforma real.
 
 ## Concluído
 
@@ -179,12 +179,47 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
       - a janela visível não abre no Linux remoto, que não tem servidor X: `TargetClosedError`, código 1.
     - **CI:** a execução [38534987597](https://github.com/vickzinha9/claude/actions/runs/38534987597), no commit `4d5a9d0`, terminou com `success` nos dois sistemas, sem mudar o workflow. Os 19 testes de `tests/test_observe.py` passaram no Linux e no Windows, inclusive o que roda `python -m`; os 2 com Chromium foram pulados, porque o CI não instala o Playwright.
     - **Plataforma real: nada comprovado.** Faltam o link da tela de operações, o login e os seletores conferidos na tela real.
+    - O item 18 trocou a espera entre leituras e acrescentou o `--configure`.
+18. **Instalação e validação no Windows:** `preparar_windows.cmd`, `observar_windows.cmd` e `pocketautonomo/setup_observer.py`; o modo `--configure` e a espera pelo Playwright em `pocketautonomo/observe.py`; o job `windows-browser` do CI. Os testes estão em `tests/test_setup_observer.py`, `tests/test_observe.py` e `tests/test_observe_playwright.py`.
+    - **`preparar_windows.cmd`** entra na própria pasta, procura um Python 3.10 ou mais novo, de 64 bits (`py -3.12`, `py -3` e `python`, nessa ordem), e roda com ele `python -m pocketautonomo.setup_observer`. O módulo:
+      - cria `.venv` ou reutiliza a existente, se o Python dela servir. Uma `.venv` inutilizável nunca é apagada: a mensagem pede que você a apague;
+      - instala `PLAYWRIGHT_REQUIREMENT`, o `playwright==1.64.0` fixado em `observe.py`, e o Chromium dele;
+      - confere que `.venv` importa essa versão e que o Chromium abre, sem janela, uma página em branco.
+
+      Cada falha para com `FALHA: ...` e código 1. Nada em `runtime/` é lido ou alterado.
+    - **`observar_windows.cmd`** entra na própria pasta e roda `.venv\Scripts\python.exe -m pocketautonomo.observe --configure --count 3`, com os argumentos extras. Sem `.venv`, ele pede que você rode primeiro o `preparar_windows.cmd`.
+    - Os dois lançadores só têm texto ASCII e terminam as linhas em CRLF, garantido pelo `.gitattributes` (`*.cmd text eol=crlf`). Eles esperam uma tecla no fim, exceto com `POCKETAUTONOMO_SEM_PAUSA` definida, e devolvem o código de saída do programa.
+    - **`--configure`:**
+      - sem `--url`, pede o link no terminal e o confere com `official_url`; um link recusado não é repetido;
+      - depois do login, pede os três seletores, cada um com prévia: o valor lido ou `INDISPONÍVEL (motivo)`. Enter mantém o seletor atual, `-` deixa o campo sem seletor e colar outro troca;
+      - mostra um resumo dos três campos, lidos juntos, e aceita correções pelo nome do campo;
+      - só grava na confirmação final, com `json`, e mantém as chaves de comentário (`_...`). Um arquivo inválido vira a cópia `observe-selectors.invalido-<data>-<hora>-<sufixo>.json` antes de ser substituído;
+      - com fim da entrada, Ctrl+C ou janela fechada, nada é gravado. Sem nenhum seletor escolhido, nada é gravado e o código é 2;
+      - lembra, no resumo e no fim, que texto encontrado não valida o campo: só a comparação com a tela valida.
+    - Com `--configure`, `--url` passou a ser opcional; sem `--configure`, continua obrigatório (código 2). Na tela, um campo indisponível aparece como `INDISPONÍVEL (motivo)`; no CSV, continua `indisponível: motivo`.
+    - **Espera:** `run_observations` chama `session.wait`, que no `PlaywrightSession` é `page.wait_for_timeout`, no lugar de `time.sleep`. A documentação do Playwright avisa que `time.sleep` deixa o estado desatualizado. Os testes injetam a espera pela sessão falsa. Se a janela fechar durante a espera, a leitura termina; outra falha da espera para com código 1. A troca não garante latência zero: cada valor continua lido num instante.
+    - **Testes na suíte:**
+      - `tests/test_observe.py`, 25 testes (eram 19). Os novos cobrem o `--configure` (link e prévias com correção; reutilização com barras e aspas; arquivo inválido; nada gravado ao cancelar), a gravação do JSON e a espera do Playwright que falha. Os testes que já existiam passaram a usar a espera da sessão falsa, e o do adaptador confere `wait_for_timeout(5000)` entre duas leituras.
+      - `tests/test_setup_observer.py`, 4 testes. Três cobrem a preparação: criação com a estrutura do Linux e a do Windows, reutilização, e 11 falhas e a criação de `.venv` que falha, cada uma parando antes da etapa seguinte. O quarto confere o texto dos lançadores: CRLF, ASCII, a própria pasta, nenhum comando de apagar ou mover e nenhuma menção a `runtime`.
+      - `tests/test_observe_playwright.py`, 2 testes com Chromium real, sem janela, na página local de teste. O de ponta a ponta agora passa pelo `--configure`, com seletores com aspas e com barra, e pelas duas esperas reais de 1 s. Com `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1`, eles falham em vez de ser pulados quando falta o Playwright.
+    - **Verificação avulsa, no Linux:**
+      - a preparação real, numa cópia temporária do projeto: criou `.venv` em 5 s e a reutilizou em 1 s, com código 0 nas duas vezes e `runtime/` idêntico antes e depois. Com o Python 3.9, ela foi recusada com código 1;
+      - SIGINT durante a espera do Playwright, com Chromium sem janela na página local. Para o grupo de processos, como num terminal: código 130, as 4 linhas lidas ficaram no CSV e nenhum processo sobrou. Só para o Python: código 130 e "Navegador fechado.";
+      - Chromium encerrado durante a espera: a leitura terminou com código 0, e as 3 linhas lidas ficaram no CSV.
+    - **CI:** o job `windows-browser` roda em `windows-latest`:
+      - roda `preparar_windows.cmd` duas vezes, pelo `cmd`;
+      - roda os 2 testes com Chromium real, obrigatórios, na página local de teste;
+      - roda `observar_windows.cmd --help` e `observar_windows.cmd` com um link recusado, que precisa terminar com código 2;
+      - confere que dois arquivos de `runtime/` não mudaram.
+
+      Ele nunca acessa a Pocket Option.
+    - **No seu computador, nada disso foi testado.**
 
 ## Testes
 
     python3 -m unittest discover -s tests -v
 
-Último resultado local, em Linux: 181 testes. Com o Playwright 1.64.0, no Python 3.12.14, os 181 passaram. Sem o Playwright, nos Python 3.9.25, 3.10.20, 3.11.15, 3.12.14, 3.13.13 e 3.14.4, passaram 179, e os 2 de `tests/test_observe_playwright.py` foram pulados. No GitHub Actions, na execução 38534987597 (commit `4d5a9d0`), os 181 testes rodaram no Linux (Python 3.12.15) e no Windows (Python 3.12.10): 179 passaram e 2 foram pulados nos dois sistemas.
+Último resultado local, em Linux: 191 testes. Com o Playwright 1.64.0, no Python 3.12.14, os 191 passaram. Sem o Playwright, nos Python 3.9.25, 3.10.20, 3.11.15, 3.12.14, 3.13.13 e 3.14.4, passaram 189, e os 2 de `tests/test_observe_playwright.py` foram pulados. No GitHub Actions, a última execução registrada é a 38534987597 (commit `4d5a9d0`), com 181 testes: 179 passaram e 2 foram pulados, no Linux (Python 3.12.15) e no Windows (Python 3.12.10).
 
 ## Decisões em vigor
 
@@ -221,7 +256,11 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
 - Nenhum seletor vem no código. Um campo sem seletor conferido por você fica indisponível, com o motivo, e nunca recebe valor inventado.
 - O coletor só abre e só lê páginas https de pocketoption.com ou de um subdomínio.
 - O horário de captura vem do relógio local, em UTC; nenhum horário é lido da plataforma.
-- O Playwright é opcional: só o coletor precisa dele, importado ao abrir o navegador. O CI não o instala, e o workflow não mudou.
+- O Playwright é opcional: só o coletor precisa dele, importado ao abrir o navegador. O job `tests` do CI não o instala; o job `windows-browser` o instala pelo `preparar_windows.cmd`.
+- A versão do Playwright vem só de `PLAYWRIGHT_REQUIREMENT`, em `observe.py`; a preparação e a mensagem de instalação usam essa constante.
+- Entre duas leituras, o coletor espera com o Playwright (`page.wait_for_timeout`), nunca com `time.sleep`.
+- Os lançadores nunca apagam `.venv`, não mexem em `runtime/` e só têm texto ASCII, para não depender da página de código do console.
+- O `--configure` nunca sugere seletores e só grava o arquivo depois da confirmação final.
 
 ## Em aberto para as próximas etapas
 
@@ -229,8 +268,8 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
 - **Pendência deixada pela simulação:** depois de um Ctrl+C ou de uma parada com reserva pendente, o banco fica recusado pela simulação, porque a corretora simulada daquela execução deixou de existir. Não há ferramenta para resolver essa pendência; o caminho é usar um banco novo.
 - A simulação não grava arquivo de log: a saída aparece só no terminal, e o histórico fica no banco.
 - O id de uma aceitação que não pôde ser gravada só existe no `SubmissionReport`. Quem chama `submit` precisa guardá-lo ou registrá-lo em log até a recuperação; senão, a reserva fica SUBMITTING sem id.
-- **Leitura da Pocket Option: não comprovada.** O coletor (item 17) está pronto para a validação no seu Windows, seguindo os passos do `INTEGRATION.md`. Faltam o link da tela de operações, o login e os seletores conferidos na tela real. Nenhuma ordem real é enviada nem consultada; a estratégia e o executor real ficam para os pacotes seguintes.
-- **Coletor no Windows: não testado.** Faltam a instalação do Playwright, a janela visível, o DevTools, o login e um Ctrl+C de verdade. O CI do Windows roda os testes do coletor sem o Playwright, então pula os 2 que usam o Chromium.
+- **Leitura da Pocket Option: não comprovada.** O coletor está pronto para a validação no seu Windows, com `preparar_windows.cmd` e `observar_windows.cmd` (item 18), seguindo os passos do `INTEGRATION.md`. Faltam o link da tela de operações, o login e a comparação dos três campos com a tela. Nenhuma ordem real é enviada nem consultada; a estratégia e o executor real ficam para os pacotes seguintes.
+- **Coletor no seu Windows: não testado.** O CI do Windows roda os lançadores e os 2 testes com Chromium sem janela, numa página local de teste. No seu computador, faltam os lançadores com dois cliques, a janela visível, o DevTools, o login, o `--configure` digitado por você e um Ctrl+C de verdade.
 - Reservas UNVERIFIED ou SUBMITTING sem id ficam em `NO_ORDER_ID`, porque a consulta só usa o id vinculado. Falta decidir como recuperá-las.
 - UNKNOWN não tem prazo: o bloqueio dura até chegar um resultado definitivo.
 - **Windows no computador do usuário: não testado.** O CI cobre `windows-latest` com PowerShell 7 e `python` (item 16). Faltam o lançador `py -3`, o Python 3.9 no Windows, o console interativo, um Ctrl+C de verdade, o modo `--forever` e a saída redirecionada sem `PYTHONIOENCODING=utf-8`.

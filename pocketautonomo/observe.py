@@ -11,17 +11,28 @@ Playwright's locators, it only counts the elements a selector finds and reads th
 
 Pocket Option documents no programming interface for the CALL/PUT web terminal (see
 INTEGRATION.md). The fields are therefore read from the page, and only through selectors
-that you checked on the real screen and wrote in runtime/observe-selectors.json. The
-program creates that file with empty fields on its first run and reads it once, after you
-press Enter. No selector ships with the program, because none was verified against the real
-platform. A field is unavailable, with the reason, when it has no selector, when its
-selector finds no element, more than one element or a hidden one, or when the text does not
-look like that field. A page outside pocketoption.com is never read.
+that you checked on the real screen, kept in runtime/observe-selectors.json. No selector
+ships with the program, because none was verified against the real platform. A field is
+unavailable, with the reason, when it has no selector, when its selector finds no element,
+more than one element or a hidden one, or when the text does not look like that field. A
+page outside pocketoption.com is never read.
+
+Without --configure, the program creates that file with empty fields on its first run, and
+you fill it yourself; it is read once, after you press Enter. With --configure, the program
+asks in the terminal for the link, when --url is missing, and, after your login, for the
+selector of each field. It reads each selector right away and shows the value it found, or
+why the field is unavailable, so that you can correct the selector. Only after you confirm
+does it write the file, with json, so you never escape backslashes or quotes yourself. Text
+found by a selector proves nothing by itself: only you, comparing it with the screen, can
+tell whether the selector reads the right element.
 
 Each observation carries its capture time, taken from this computer's clock in UTC right
 before the reading; no time is read from the platform. Observations with at least one
 available field are written, line by line, to a new CSV file in runtime/; the others are
 only shown in the terminal. The query and the fragment of a URL are never shown or written.
+Between two observations, the program waits with Playwright's page.wait_for_timeout, not
+time.sleep, so that Playwright keeps processing the browser's events; each value is still
+read at one moment and can change right after.
 
 Playwright is imported only when the browser opens, so this module and its tests run
 without it. Exit codes: 0 when the run ended with at least one valid observation, 1 when it
@@ -33,9 +44,9 @@ import argparse
 import csv
 import json
 import math
+import os
 import re
 import sys
-import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -82,14 +93,33 @@ FORMULA_PREFIXES = ("=", "+", "-", "@")  # a spreadsheet could run such a cell a
 
 SELECTORS_TEMPLATE = {
     "_leia_me": (
-        "Preencha asset (ativo), price (preço) e payout com seletores que você conferiu na"
-        " tela de operações, como explica o INTEGRATION.md. Deixe \"\" no campo que não"
-        " conferiu: ele fica indisponível. Chaves que começam com _ são ignoradas."
+        "Gravado pelo modo --configure (no Windows, observar_windows.cmd), que pede os"
+        " seletores no terminal e mostra a prévia de cada um. Se editar à mão, use em asset"
+        " (ativo), price (preço) e payout seletores conferidos na tela de operações, como"
+        " explica o INTEGRATION.md, e deixe \"\" no campo sem seletor: ele fica"
+        " indisponível. Chaves que começam com _ são ignoradas."
     ),
     "asset": "",
     "price": "",
     "payout": "",
 }
+# Answers that pick a field to correct at the end of --configure.
+FIELD_ANSWERS = {
+    "ativo": "asset",
+    "asset": "asset",
+    "preço": "price",
+    "preco": "price",
+    "price": "price",
+    "payout": "payout",
+}
+COMPARE_WITH_SCREEN = (
+    "Compare cada valor com o que a tela mostra agora. Texto encontrado não comprova que o"
+    " elemento é o certo: só essa comparação, feita por você, valida um campo."
+)
+CONFIGURATION_MOMENT = "durante a configuração dos seletores; nada foi gravado"
+WINDOW_CLOSED_IN_CONFIGURATION = (
+    "a janela do navegador foi fechada durante a configuração; nada foi gravado"
+)
 
 
 class ConfigError(Exception):
@@ -128,6 +158,11 @@ class FieldReading:
     def available(self):
         return self.value is not None
 
+    @property
+    def reason(self):
+        """Why the field is unavailable, or None when it is available."""
+        return None if self.available else self.status.split(": ", 1)[1]
+
 
 @dataclass(frozen=True)
 class Observation:
@@ -149,13 +184,15 @@ class Progress:
     csv: object = None  # the CsvLog, created with the first valid observation
 
 
-def main(argv=None, *, open_session=None, read_line=input, sleep=time.sleep, now=None):
+def main(argv=None, *, open_session=None, read_line=input, now=None):
     """Run the collector and return its exit code.
 
-    open_session, read_line, sleep and now exist for tests. They replace, in this order,
-    open_playwright_session, input, time.sleep and the UTC clock.
+    open_session, read_line and now exist for tests. They replace, in this order,
+    open_playwright_session, input and the UTC clock. The wait between two observations is
+    the session's own wait, page.wait_for_timeout in PlaywrightSession, so a fake session
+    brings a fake wait.
     """
-    args = build_parser().parse_args(argv)
+    args = parse_arguments(argv)
     open_session = open_playwright_session if open_session is None else open_session
     now = utc_now if now is None else now
     runtime_dir = RUNTIME_DIR
@@ -165,20 +202,35 @@ def main(argv=None, *, open_session=None, read_line=input, sleep=time.sleep, now
     session = None
     interrupted = False
     try:
-        print_header(args, profile_dir, selectors_path)
-        if create_selectors_file(selectors_path):
+        say(
+            "COLETOR SOMENTE LEITURA do PocketAutonomo: não envia ordens, não clica em CALL/PUT"
+            " e não faz operações financeiras."
+        )
+        url = args.url
+        if args.configure:
+            say(
+                "Modo de configuração: você informa o link, faz o login e escolhe os seletores"
+                " no terminal; depois vêm as observações."
+            )
+            if url is None:
+                url = ask_url(read_line)
+        print_plan(url, args, profile_dir, selectors_path)
+        if not args.configure and create_selectors_file(selectors_path):
             say(
                 f"Criei {selectors_path} com os campos vazios; preencha-o antes de confirmar"
-                " o login."
+                " o login, ou rode com --configure para escolher os seletores no terminal."
             )
         session = open_session(profile_dir)
-        open_page(session, args.url)
-        wait_for_login(read_line, selectors_path)
+        open_page(session, url)
+        wait_for_login(read_line, selectors_path, args.configure)
         if session.is_closed():
             raise ObserverStopped("a janela do navegador foi fechada antes da confirmação do login")
-        selectors = load_selectors(selectors_path)
+        if args.configure:
+            selectors = configure_selectors(session, selectors_path, read_line, now)
+        else:
+            selectors = load_selectors(selectors_path)
         announce_selectors(selectors, selectors_path)
-        run_observations(session, selectors, args, sleep, now, runtime_dir, progress)
+        run_observations(session, selectors, args, now, runtime_dir, progress)
         return finish(progress)
     except ConfigError as error:
         warn(f"CONFIGURAÇÃO: {error}")
@@ -207,9 +259,15 @@ def build_parser():
     )
     parser.add_argument(
         "--url",
-        required=True,
         type=official_url,
-        help=f"link oficial da tela de operações, em https://{ALLOWED_DOMAIN}",
+        help=f"link oficial da tela de operações, em https://{ALLOWED_DOMAIN}; obrigatório"
+        " sem --configure",
+    )
+    parser.add_argument(
+        "--configure",
+        action="store_true",
+        help="pede no terminal o link (sem --url) e os seletores, mostra a prévia de cada"
+        f" um e grava {SELECTORS_FILE_NAME} em runtime/; depois faz as observações",
     )
     parser.add_argument(
         "--interval",
@@ -224,6 +282,14 @@ def build_parser():
         help="quantas observações fazer; sem esta opção, lê até Ctrl+C",
     )
     return parser
+
+
+def parse_arguments(argv):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.url is None and not args.configure:
+        parser.error("informe --url, ou use --configure para colar o link no terminal")
+    return args
 
 
 def official_url(text):
@@ -351,8 +417,8 @@ def announce_selectors(selectors, selectors_path):
     if not configured:
         raise ConfigError(
             f"nenhum seletor preenchido em {selectors_path}, então nenhum campo pode ser lido."
-            " Preencha asset, price e payout com seletores conferidos na tela de operações,"
-            " como explica o INTEGRATION.md, e rode de novo."
+            " Rode com --configure (no Windows, observar_windows.cmd) para escolher os"
+            " seletores no terminal, ou preencha o arquivo como explica o INTEGRATION.md."
         )
     line = f"Campos com seletor: {', '.join(configured)}"
     if missing:
@@ -443,8 +509,13 @@ def read_field(session, field, selector):
     return FieldReading(value, f"{OK}: {selector}")
 
 
-def run_observations(session, selectors, args, sleep, now, runtime_dir, progress):
-    """Observe until args.count observations were made, the window closes or Ctrl+C."""
+def run_observations(session, selectors, args, now, runtime_dir, progress):
+    """Observe until args.count observations were made, the window closes or Ctrl+C.
+
+    Between two observations, session.wait waits args.interval seconds. In PlaywrightSession
+    it is page.wait_for_timeout, which, unlike time.sleep, lets Playwright keep processing
+    the browser's events. Each value is still read at one moment and can change right after.
+    """
     number = 0
     while args.count is None or number < args.count:
         if session.is_closed():
@@ -461,7 +532,7 @@ def run_observations(session, selectors, args, sleep, now, runtime_dir, progress
             progress.valid += 1
         say(observation_line(number, observation))
         if args.count is None or number < args.count:
-            sleep(args.interval)
+            session.wait(args.interval)
 
 
 class CsvLog:
@@ -511,22 +582,20 @@ def observation_line(number, observation):
         observation.page,
     ]
     for field in FIELDS:
-        reading = observation.readings[field]
-        if reading.available:
-            shown = f"{reading.value}%" if field == "payout" else reading.value
-        else:
-            shown = reading.status
-        parts.append(f"{LABELS[field]} {shown}")
+        parts.append(f"{LABELS[field]} {shown_value(field, observation.readings[field])}")
     parts.append("gravada no CSV" if observation.valid else "não gravada: nenhum campo disponível")
     return " | ".join(parts)
 
 
-def print_header(args, profile_dir, selectors_path):
-    say(
-        "COLETOR SOMENTE LEITURA do PocketAutonomo: não envia ordens, não clica em CALL/PUT"
-        " e não faz operações financeiras."
-    )
-    say(f"Página: {display_url(args.url)} (parâmetros e fragmento da URL não são exibidos)")
+def shown_value(field, reading):
+    """How the terminal shows a reading: its value, or INDISPONÍVEL with the reason."""
+    if not reading.available:
+        return f"INDISPONÍVEL ({reading.reason})"
+    return f"{reading.value}%" if field == "payout" else reading.value
+
+
+def print_plan(url, args, profile_dir, selectors_path):
+    say(f"Página: {display_url(url)} (parâmetros e fragmento da URL não são exibidos)")
     say(f"Perfil do navegador: {profile_dir} (fora do Git; guarda a sua sessão, não compartilhe)")
     say(f"Seletores: {selectors_path}")
     plan = "até Ctrl+C" if args.count is None else count(args.count, "observação", "observações")
@@ -547,21 +616,176 @@ def open_page(session, url):
         )
 
 
-def wait_for_login(read_line, selectors_path):
+def ask(read_line, prompt, moment):
+    """One line typed in the terminal. The end of the input stops the run."""
+    try:
+        return read_line(prompt)
+    except EOFError:
+        raise ObserverStopped(f"a entrada do terminal terminou {moment}") from None
+
+
+def ask_url(read_line):
+    """Ask for the link until official_url accepts it; the link is never repeated."""
+    say(f"Cole o link oficial da sua tela de operações, em https://{ALLOWED_DOMAIN}/...")
+    while True:
+        text = ask(read_line, "Link: ", "antes do link da tela de operações")
+        try:
+            return official_url(text)
+        except argparse.ArgumentTypeError as error:
+            say(f"Link recusado ({error}). Cole de novo, ou use Ctrl+C para sair.")
+
+
+def wait_for_login(read_line, selectors_path, configure):
     say(
         "Faça o login você mesmo, na janela do navegador. O programa não lê, não grava e não"
         " mostra senha, cookies ou tokens."
     )
+    if configure:
+        prompt = (
+            "Com a tela de operações visível, pressione Enter aqui para escolher os seletores"
+            " (Ctrl+C cancela). "
+        )
+    else:
+        prompt = (
+            f"Com a tela de operações visível e {selectors_path} preenchido, pressione Enter"
+            " aqui para começar a leitura (Ctrl+C cancela). "
+        )
+    ask(read_line, prompt, "antes da confirmação do login")
+
+
+def configure_selectors(session, path, read_line, now):
+    """Ask for each field's selector, preview it, and write the file once you confirm.
+
+    Enter keeps the current selector, so the ones already saved can be reused. Nothing is
+    written until the final Enter, and json writes the file, escaping what is needed.
+    """
+    selectors, invalid = current_selectors(path)
+    say("")
+    say("CONFIGURAÇÃO DOS SELETORES")
     say(
-        f"Com a tela de operações visível e {selectors_path} preenchido, pressione Enter aqui"
-        " para começar a leitura (Ctrl+C cancela)."
+        "Para cada campo, na janela do navegador: F12 abre o DevTools e Ctrl+Shift+C liga a"
+        " inspeção. Clique no elemento e, no painel Elements, use Copy > Copy selector. Cole"
+        " aqui o seletor como veio, sem escapar barras nem aspas."
     )
+    say(
+        "O programa lê cada seletor na hora e mostra o que encontrou. Não clique nos botões"
+        " CALL e PUT: o programa não clica, mas um clique seu fora da inspeção é de verdade."
+    )
+    for field in FIELDS:
+        selectors[field] = ask_selector(session, field, selectors[field], read_line, now)
+    while True:
+        show_summary(session, selectors, now)
+        answer = ask(
+            read_line,
+            "Enter grava os seletores e começa as observações; para corrigir um campo, digite"
+            " ativo, preço ou payout: ",
+            CONFIGURATION_MOMENT,
+        )
+        if not answer.strip():
+            break
+        field = FIELD_ANSWERS.get(answer.strip().lower())
+        if field is None:
+            say(f"Resposta não reconhecida: {preview(answer.strip())}. Use ativo, preço ou payout.")
+            continue
+        selectors[field] = ask_selector(session, field, selectors[field], read_line, now)
+    if not any(selectors.values()):
+        raise ConfigError(f"nenhum seletor foi escolhido, e {path} não foi alterado")
+    save_selectors(path, selectors, invalid)
+    say(f"Seletores gravados em {path}.")
+    return selectors
+
+
+def current_selectors(path):
+    """The selectors already in path, and whether the file is invalid."""
     try:
-        read_line()
-    except EOFError:
-        raise ObserverStopped(
-            "a entrada do terminal terminou antes da confirmação do login"
-        ) from None
+        return load_selectors(path), False
+    except ConfigError as error:
+        warn(
+            f"AVISO: {error}. Os seletores serão pedidos do zero. O arquivo atual só muda"
+            " quando você gravar os novos, e antes disso ele é guardado como cópia."
+        )
+        return {field: None for field in FIELDS}, True
+
+
+def ask_selector(session, field, current, read_line, now):
+    """The selector you accept for field after seeing its preview, or None for none."""
+    label = LABELS[field]
+    if current:
+        say(f"{label.capitalize()}: seletor atual {current}")
+        prompt = f"Seletor de {label} (Enter mantém o atual; - deixa sem seletor): "
+    else:
+        say(f"{label.capitalize()}: ainda sem seletor.")
+        prompt = f"Seletor de {label} (Enter deixa sem seletor): "
+    selector = ask(read_line, prompt, CONFIGURATION_MOMENT).strip() or current
+    while selector and selector != "-":
+        reading = preview_reading(session, field, selector, now)
+        line = f"  Prévia de {label}, lida agora: {shown_value(field, reading)}"
+        if reading.available:
+            line += ". Confira se é o que a tela mostra."
+        say(line)
+        answer = ask(
+            read_line,
+            f"Enter aceita este seletor de {label}; cole outro para trocar; - deixa sem"
+            " seletor: ",
+            CONFIGURATION_MOMENT,
+        ).strip()
+        if not answer:
+            return selector
+        selector = answer
+    say(f"{label.capitalize()}: sem seletor, o campo fica INDISPONÍVEL.")
+    return None
+
+
+def preview_reading(session, field, selector, now):
+    """One reading of field with selector, under the same rules as an observation."""
+    if session.is_closed():
+        raise ObserverStopped(WINDOW_CLOSED_IN_CONFIGURATION)
+    return observe_once(session, {field: selector}, now).readings[field]
+
+
+def show_summary(session, selectors, now):
+    """Read every field once more, together, and show the values beside their selectors."""
+    if session.is_closed():
+        raise ObserverStopped(WINDOW_CLOSED_IN_CONFIGURATION)
+    observation = observe_once(session, selectors, now)
+    say("")
+    say(
+        f"Resumo, lido agora ({observation.captured_at.isoformat(timespec='milliseconds')}),"
+        f" na página {observation.page}:"
+    )
+    for field in FIELDS:
+        origin = f" (seletor {selectors[field]})" if selectors[field] else ""
+        say(f"  {LABELS[field]}: {shown_value(field, observation.readings[field])}{origin}")
+    say(COMPARE_WITH_SCREEN)
+
+
+def save_selectors(path, selectors, replace_invalid):
+    """Write the selectors to path with json, which escapes backslashes and quotes itself.
+
+    The comment keys of a valid file are kept. An invalid file is first renamed to a copy
+    next to it, so that nothing written in it is lost.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {"_leia_me": SELECTORS_TEMPLATE["_leia_me"]}
+    if replace_invalid and path.exists():
+        suffix = f"{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:8]}"
+        copy = path.with_name(f"observe-selectors.invalido-{suffix}.json")
+        os.replace(path, copy)
+        say(f"O arquivo inválido foi guardado como {copy}.")
+    elif path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8-sig"))
+        except ValueError:  # changed by hand during the configuration
+            existing = {}
+        if isinstance(existing, dict):
+            data.update((key, value) for key, value in existing.items() if key.startswith("_"))
+        data["_leia_me"] = SELECTORS_TEMPLATE["_leia_me"]
+    data.update((field, selectors[field] or "") for field in FIELDS)
+    temporary = path.with_name(path.name + ".tmp")
+    with open(temporary, "w", encoding="utf-8") as file:
+        json.dump(data, file, ensure_ascii=False, indent=2)
+        file.write("\n")
+    os.replace(temporary, path)
 
 
 def finish(progress):
@@ -576,6 +800,10 @@ def finish(progress):
         )
         return EXIT_FAILED
     say(f"CSV: {progress.csv.path}")
+    say(
+        "Compare as observações com a tela: o CSV sozinho não comprova que os seletores"
+        " leem os campos certos."
+    )
     return EXIT_OK
 
 
@@ -638,8 +866,9 @@ class PlaywrightSession:
     """The only code that touches Playwright: it opens one page and reads text from it.
 
     Besides starting and stopping the browser, it calls only goto, url, is_closed, locator,
-    count, is_visible and inner_text. Nothing here clicks, types, presses keys, evaluates
-    JavaScript of its own, reads cookies or storage, or listens to the network.
+    count, is_visible, inner_text and wait_for_timeout. Nothing here clicks, types, presses
+    keys, evaluates JavaScript of its own, reads cookies or storage, or listens to the
+    network.
     """
 
     def __init__(self, sync_playwright, error_type, profile_dir, headless):
@@ -673,6 +902,21 @@ class PlaywrightSession:
 
     def current_url(self):
         return self._page.url
+
+    def wait(self, seconds):
+        """Wait with page.wait_for_timeout instead of time.sleep.
+
+        Playwright's sync API processes the browser's events only while one of its calls
+        runs, so time.sleep would leave its state outdated (Playwright documentation,
+        "time.sleep() leads to outdated state"). Closing the window just ends the wait.
+        """
+        try:
+            self._page.wait_for_timeout(seconds * 1000)
+        except self._error_type as error:
+            if not self._page.is_closed():
+                raise BrowserError(
+                    f"a espera entre as leituras falhou ({describe(error)})"
+                ) from error
 
     def is_closed(self):
         return self._page.is_closed()

@@ -1,10 +1,11 @@
 """Tests of the read-only collector, pocketautonomo.observe.
 
 No test here opens a browser or reaches the network, and none needs Playwright. FakeSession
-stands in for the browser page, and the fake playwright.sync_api module below stands in for
-Playwright. Both have only the read methods the collector may call, so a click, a key
-press, a script or a cookie read would fail with AttributeError. Every selector and value
-below was invented for the tests; none of them came from the real platform.
+stands in for the browser page, with a fake wait, and the fake playwright.sync_api module
+below stands in for Playwright. Both have only the read methods the collector may call, so
+a click, a key press, a script or a cookie read would fail with AttributeError. Answers
+stands in for input(). Every link, selector and value below was invented for the tests;
+none of them came from the real platform.
 """
 
 import argparse
@@ -31,6 +32,7 @@ URL = "https://pocketoption.com/pt/tela-de-teste/"  # invented path, never opene
 SECRET_URL = URL + "?ssid=SEGREDO#SEGREDO"  # the query and the fragment must never show up
 START = datetime(2026, 10, 14, 12, 0, tzinfo=timezone.utc)
 SELECTORS = {"asset": "#ativo-teste", "price": "#preco-teste", "payout": "#payout-teste"}
+NO_SELECTORS = {"asset": None, "price": None, "payout": None}
 
 # Attributes that would act on the page, run code in it or reach secrets or the network.
 FORBIDDEN_ATTRIBUTES = {
@@ -44,8 +46,8 @@ FORBIDDEN_ATTRIBUTES = {
     "touchscreen", "type", "uncheck",
 }
 
-# What one main() call returned and printed, with its FakeSession and FakeSleep.
-Run = collections.namedtuple("Run", "code out err session sleep")
+# What one main() call returned and printed, with its FakeSession.
+Run = collections.namedtuple("Run", "code out err session")
 
 
 def shown(text):
@@ -61,14 +63,17 @@ class FakeSession:
     """Stands in for PlaywrightSession.
 
     elements maps a selector to what read() answers: an ElementText, or an exception to
-    raise. A list gives one answer per read, and its last answer repeats.
+    raise. A list gives one answer per read, and its last answer repeats. wait() records
+    each wait and runs wait_actions[n] on the n-th one.
     """
 
-    def __init__(self, elements=None, url=URL):
+    def __init__(self, elements=None, url=URL, wait_actions=None):
         self.elements = dict(elements or {})
         self.url = url
+        self.wait_actions = wait_actions or {}
         self.opened = []
         self.reads = []
+        self.waits = []
         self.window_closed = False
         self.closes = 0
 
@@ -90,8 +95,35 @@ class FakeSession:
             raise answer
         return answer
 
+    def wait(self, seconds):
+        self.waits.append(seconds)
+        action = self.wait_actions.get(len(self.waits))
+        if action is not None:
+            action()
+
     def close(self):
         self.closes += 1
+
+
+class Answers:
+    """Stands in for input(): gives the answers in order and records every prompt.
+
+    An exception class in the list is raised, and a function is called for its answer.
+    Running out of answers fails the test, because the program asked more than expected.
+    """
+
+    def __init__(self, answers):
+        self.pending = list(answers)
+        self.prompts = []
+
+    def __call__(self, prompt=""):
+        self.prompts.append(prompt)
+        if not self.pending:
+            raise AssertionError(f"pergunta inesperada: {prompt!r}")
+        answer = self.pending.pop(0)
+        if isinstance(answer, type) and issubclass(answer, BaseException):
+            raise answer
+        return answer() if callable(answer) else answer
 
 
 class FakeClock:
@@ -104,20 +136,6 @@ class FakeClock:
         moment = START + timedelta(seconds=5 * self.calls)
         self.calls += 1
         return moment
-
-
-class FakeSleep:
-    """Stands in for time.sleep: records each wait and runs actions[n] on the n-th call."""
-
-    def __init__(self, actions=None):
-        self.calls = []
-        self.actions = actions or {}
-
-    def __call__(self, seconds):
-        self.calls.append(seconds)
-        action = self.actions.get(len(self.calls))
-        if action is not None:
-            action()
 
 
 class FakePlaywrightError(Exception):
@@ -143,13 +161,20 @@ class FakeLocator:
 
 
 class FakePage:
-    """dom maps a selector to the (text, visible) of each element it matches."""
+    """dom maps a selector to the (text, visible) of each element it matches.
 
-    def __init__(self, dom, goto_error=None):
+    goto_error and wait_error make goto and wait_for_timeout fail; closing_wait also closes
+    the page in the failing wait, like a window closed during the wait.
+    """
+
+    def __init__(self, dom, goto_error=None, wait_error=None, closing_wait=False):
         self.dom = dom
         self.url = "about:blank"
         self.calls = []
+        self.closed = False
         self._goto_error = goto_error
+        self._wait_error = wait_error
+        self._closing_wait = closing_wait
 
     def goto(self, url, *, wait_until, timeout):
         self.calls.append(("goto", url, wait_until, timeout))
@@ -158,11 +183,17 @@ class FakePage:
             raise FakePlaywrightError(self._goto_error)
 
     def is_closed(self):
-        return False
+        return self.closed
 
     def locator(self, selector):
         self.calls.append(("locator", selector))
         return FakeLocator(self, selector)
+
+    def wait_for_timeout(self, timeout):
+        self.calls.append(("wait_for_timeout", timeout))
+        if self._wait_error is not None:
+            self.closed = self._closing_wait
+            raise FakePlaywrightError(self._wait_error)
 
 
 class FakeContext:
@@ -202,6 +233,20 @@ def fake_playwright_modules(playwright):
     module.Error = FakePlaywrightError
     module.sync_playwright = lambda: types.SimpleNamespace(start=lambda: playwright)
     return {"playwright": types.ModuleType("playwright"), "playwright.sync_api": module}
+
+
+def reads_of(selectors):
+    """The page calls of reading each selector once through PlaywrightSession."""
+    return [
+        call
+        for selector in selectors
+        for call in (
+            ("locator", selector),
+            ("count", selector),
+            ("is_visible", selector),
+            ("inner_text", selector, 2_000),
+        )
+    ]
 
 
 class UrlTest(unittest.TestCase):
@@ -260,40 +305,39 @@ class ObserveTestCase(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.runtime = Path(directory.name) / "runtime"
+        self.selectors_path = self.runtime / observe.SELECTORS_FILE_NAME
         patcher = mock.patch.object(observe, "RUNTIME_DIR", self.runtime)
         patcher.start()
         self.addCleanup(patcher.stop)
         self.profile_dirs = []
-        self.logins = 0
+        self.answers = Answers([])
 
     def write_selectors(self, **selectors):
         self.runtime.mkdir(parents=True, exist_ok=True)
-        (self.runtime / observe.SELECTORS_FILE_NAME).write_text(json.dumps(selectors), encoding="utf-8")
+        self.selectors_path.write_text(json.dumps(selectors), encoding="utf-8")
 
-    def run_main(self, *args, session=None, read_line=None, sleep=None, url=URL, real_adapter=False):
-        """Run main() with --url url and args, capturing what it prints.
+    def run_main(self, *args, session=None, answers=("",), url=URL, real_adapter=False):
+        """Run main() with --url url, unless url is None, and args, capturing what it prints.
 
-        Unless real_adapter is true, main() gets session, or a new FakeSession, instead of
-        opening Playwright.
+        answers go, in order, to the questions of the program; the default Enter confirms
+        the login. Unless real_adapter is true, main() gets session, or a new FakeSession,
+        instead of opening Playwright.
         """
         session = FakeSession() if session is None else session
-        sleep = FakeSleep() if sleep is None else sleep
+        self.answers = Answers(answers)
 
         def open_session(profile_dir):
             self.profile_dirs.append(profile_dir)
             return session
 
-        def login():
-            self.logins += 1
-            return "" if read_line is None else read_line()
-
-        options = {"read_line": login, "sleep": sleep, "now": FakeClock()}
+        options = {"read_line": self.answers, "now": FakeClock()}
         if not real_adapter:
             options["open_session"] = open_session
+        argv = (["--url", url] if url is not None else []) + list(args)
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = observe.main(["--url", url, *args], **options)
-        return Run(code, out.getvalue(), err.getvalue(), session, sleep)
+            code = observe.main(argv, **options)
+        return Run(code, out.getvalue(), err.getvalue(), session)
 
     def csv_files(self):
         return sorted(self.runtime.glob("observations-*.csv"))
@@ -307,15 +351,18 @@ class ObserveTestCase(unittest.TestCase):
         self.assertEqual(tuple(rows[0]), observe.CSV_COLUMNS)
         return rows[1:]
 
+    def saved_selectors(self):
+        """The whole JSON object of the selectors file."""
+        return json.loads(self.selectors_path.read_text(encoding="utf-8"))
+
 
 class SelectorsAndValuesTest(ObserveTestCase):
     def test_selectors_file_is_created_empty_and_checked(self):
-        path = self.runtime / observe.SELECTORS_FILE_NAME
-        none = {"asset": None, "price": None, "payout": None}
-        self.assertEqual(observe.load_selectors(path), none)  # no file: no selector
+        path = self.selectors_path
+        self.assertEqual(observe.load_selectors(path), NO_SELECTORS)  # no file: no selector
         self.assertTrue(observe.create_selectors_file(path))
         self.assertEqual(json.loads(path.read_text(encoding="utf-8")), observe.SELECTORS_TEMPLATE)
-        self.assertEqual(observe.load_selectors(path), none)
+        self.assertEqual(observe.load_selectors(path), NO_SELECTORS)
         # A BOM, a comment key, spaces, "" and null are accepted; the file is never overwritten.
         path.write_text('\ufeff{"_nota": 1, "asset": " #a ", "price": "", "payout": null}', encoding="utf-8")
         self.assertFalse(observe.create_selectors_file(path))
@@ -324,6 +371,24 @@ class SelectorsAndValuesTest(ObserveTestCase):
             path.write_text(content, encoding="utf-8")
             with self.subTest(content=content), self.assertRaises(observe.ConfigError):
                 observe.load_selectors(path)
+
+    def test_saved_selectors_keep_backslashes_quotes_and_comments(self):
+        selectors = {
+            "asset": 'div[data-name="ativo"] > span',
+            "price": r"#preco\:valor",
+            "payout": None,
+        }
+        self.write_selectors(_nota="minha anotação", asset="#antigo")
+        observe.save_selectors(self.selectors_path, selectors, False)
+        self.assertEqual(observe.load_selectors(self.selectors_path), selectors)
+        raw = self.selectors_path.read_text(encoding="utf-8")
+        self.assertIn(r'"asset": "div[data-name=\"ativo\"] > span"', raw)  # json escaped them
+        self.assertIn(r'"price": "#preco\\:valor"', raw)
+        saved = self.saved_selectors()
+        self.assertEqual(saved["_nota"], "minha anotação")
+        self.assertEqual(saved["_leia_me"], observe.SELECTORS_TEMPLATE["_leia_me"])
+        self.assertEqual(saved["payout"], "")
+        self.assertEqual(sorted(path.name for path in self.runtime.iterdir()), [observe.SELECTORS_FILE_NAME])
 
     def test_values_are_checked_before_being_accepted(self):
         accepted = {
@@ -376,6 +441,7 @@ class ObserveOnceTest(ObserveTestCase):
                 session = FakeSession({"#preco": answer})
                 observation = observe.observe_once(session, {"price": "#preco"}, FakeClock())
                 self.assertEqual(observation.readings["price"], observe.FieldReading(None, f"indisponível: {reason}"))
+                self.assertEqual(observation.readings["price"].reason, reason)
                 self.assertFalse(observation.valid)
 
     def test_a_page_outside_pocketoption_is_not_read(self):
@@ -401,9 +467,10 @@ class MainTest(ObserveTestCase):
         run = self.run_main("--count", "3", session=session)
         self.assertEqual((run.code, run.err), (0, ""))
         self.assertEqual(self.profile_dirs, [self.runtime / "browser-profile"])
-        self.assertEqual((session.opened, self.logins, session.closes), ([URL], 1, 1))
+        self.assertEqual((session.opened, len(self.answers.prompts), session.closes), ([URL], 1, 1))
+        self.assertIn("pressione Enter aqui para começar a leitura", self.answers.prompts[0])
         self.assertEqual(session.reads, ["#ativo-teste", "#preco-teste", "#payout-teste"] * 3)
-        self.assertEqual(run.sleep.calls, [5.0, 5.0])  # between the observations only
+        self.assertEqual(session.waits, [5.0, 5.0])  # the session's wait, between observations only
         ok = ["ok: #ativo-teste", "ok: #preco-teste", "ok: #payout-teste"]
         self.assertEqual(
             self.csv_rows(),
@@ -419,6 +486,7 @@ class MainTest(ObserveTestCase):
             run.out,
         )
         self.assertIn("Concluído: 3 observações, 3 válidas gravadas.", run.out)
+        self.assertIn("Compare as observações com a tela", run.out)
         self.assertIn("Navegador fechado.", run.out)
 
     def test_unavailable_fields_are_marked_and_empty_observations_are_not_written(self):
@@ -442,9 +510,14 @@ class MainTest(ObserveTestCase):
                 "", "indisponível: sem seletor em observe-selectors.json",
             ],
         )
+        self.assertIn(
+            "ativo EUR/USD OTC | preço INDISPONÍVEL (o seletor não encontrou nenhum elemento)"
+            " | payout INDISPONÍVEL (sem seletor em observe-selectors.json) | gravada no CSV",
+            run.out,
+        )
         self.assertIn("OBSERVAÇÃO 3 | 2026-10-14T12:00:10.000+00:00", run.out)
         self.assertIn("não gravada: nenhum campo disponível", run.out)
-        self.assertEqual(run.sleep.calls, [1.0, 1.0])
+        self.assertEqual(session.waits, [1.0, 1.0])
 
     def test_without_valid_observations_no_csv_is_created(self):
         self.write_selectors(asset="#ativo-teste")
@@ -458,19 +531,18 @@ class MainTest(ObserveTestCase):
         session = FakeSession()
         run = self.run_main("--count", "1", session=session)
         self.assertEqual(run.code, 2)
-        path = self.runtime / observe.SELECTORS_FILE_NAME
-        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), observe.SELECTORS_TEMPLATE)
-        self.assertIn(f"Criei {path} com os campos vazios", run.out)
+        self.assertEqual(self.saved_selectors(), observe.SELECTORS_TEMPLATE)
+        self.assertIn(f"Criei {self.selectors_path} com os campos vazios", run.out)
         self.assertIn("CONFIGURAÇÃO: nenhum seletor preenchido", run.err)
-        self.assertEqual((session.reads, self.logins, session.closes), ([], 1, 1))
+        self.assertIn("Rode com --configure", run.err)
+        self.assertEqual((session.reads, len(self.answers.prompts), session.closes), ([], 1, 1))
         self.assertEqual(self.csv_files(), [])
 
     def test_ctrl_c_closes_the_browser_and_keeps_the_csv(self):
         self.write_selectors(**SELECTORS)
-        session = FakeSession(
-            {"#ativo-teste": shown("EUR/USD OTC"), "#preco-teste": shown("1.08534"), "#payout-teste": shown("92%")}
-        )
-        run = self.run_main(session=session, sleep=FakeSleep({1: press_ctrl_c}))  # until Ctrl+C
+        elements = {"#ativo-teste": shown("EUR/USD OTC"), "#preco-teste": shown("1.08534"), "#payout-teste": shown("92%")}
+        session = FakeSession(elements, wait_actions={1: press_ctrl_c})  # until Ctrl+C
+        run = self.run_main(session=session)
         self.assertEqual((run.code, run.err), (130, ""))
         self.assertEqual(len(self.csv_rows()), 1)
         self.assertEqual(session.closes, 1)
@@ -479,8 +551,9 @@ class MainTest(ObserveTestCase):
         self.assertIn("Navegador fechado.", run.out)
         # In a terminal, Ctrl+C also stops the Playwright driver, so closing may fail.
         error = observe.BrowserError("Exception: Connection closed while reading from the driver")
+        session = FakeSession(elements, wait_actions={1: press_ctrl_c})
         session.close = mock.Mock(side_effect=error)
-        run = self.run_main(session=session, sleep=FakeSleep({1: press_ctrl_c}))
+        run = self.run_main(session=session)
         self.assertEqual((run.code, run.err), (130, ""))
         self.assertIn(f"O Ctrl+C também encerrou a conexão com o navegador ({error}).", run.out)
 
@@ -489,11 +562,7 @@ class MainTest(ObserveTestCase):
             with self.subTest(problem=problem.__name__):
                 self.write_selectors(**SELECTORS)
                 session = FakeSession()
-
-                def stop():
-                    raise problem
-
-                run = self.run_main(session=session, read_line=stop)
+                run = self.run_main(session=session, answers=[problem])
                 self.assertEqual(run.code, code)
                 self.assertEqual((session.reads, session.closes, self.csv_files()), ([], 1, []))
         self.assertIn("PARADA: a entrada do terminal terminou antes da confirmação do login", run.err)
@@ -507,7 +576,8 @@ class MainTest(ObserveTestCase):
         def close_window():
             session.window_closed = True
 
-        run = self.run_main(session=session, sleep=FakeSleep({1: close_window}))
+        session.wait_actions = {1: close_window}
+        run = self.run_main(session=session)
         self.assertEqual(run.code, 0)
         self.assertEqual(len(self.csv_rows()), 1)
         self.assertIn("A janela do navegador foi fechada; a leitura terminou.", run.out)
@@ -522,10 +592,11 @@ class MainTest(ObserveTestCase):
         cases = (
             ["--url", "http://pocketoption.com/"],
             ["--url", "https://pocketoption.com.example.org/?ssid=SEGREDO"],
+            ["--configure", "--url", "https://pocketoption.com.example.org/?ssid=SEGREDO"],
             ["--url", URL, "--interval", "0.5"],
             ["--url", URL, "--interval", "nan"],
             ["--url", URL, "--count", "0"],
-            [],
+            [],  # without --configure, --url is required
         )
         for argv in cases:
             with self.subTest(argv=argv):
@@ -540,45 +611,180 @@ class MainTest(ObserveTestCase):
         raise AssertionError("main() went past the arguments")
 
 
+class ConfigureTest(ObserveTestCase):
+    """--configure: link, login, selectors with previews, corrections and the saved file."""
+
+    def test_asks_the_link_and_each_selector_with_a_preview(self):
+        session = FakeSession(
+            {
+                "#ativo": shown("EUR/USD OTC"),
+                ".preco": observe.ElementText(2),
+                "#preco": shown("1.08534"),
+                "#payout": shown("+92%"),
+            }
+        )
+        answers = [
+            "http://pocketoption.com/",  # refused: not https
+            SECRET_URL,  # accepted
+            "",  # Enter after the login
+            "#ativo", "",  # asset: preview, Enter accepts it
+            ".preco", "#preco", "",  # price: ambiguous preview, another selector, accepted
+            "",  # payout: Enter leaves it without a selector
+            "payout", "#payout", "",  # summary: correct the payout, preview, accept
+            "",  # summary: Enter saves and starts
+        ]
+        run = self.run_main("--configure", "--count", "1", session=session, answers=answers, url=None)
+        self.assertEqual((run.code, run.err), (0, ""))
+        self.assertEqual(self.answers.pending, [])
+        self.assertEqual(session.opened, [SECRET_URL])
+        self.assertEqual(
+            {field: self.saved_selectors()[field] for field in observe.FIELDS},
+            {"asset": "#ativo", "price": "#preco", "payout": "#payout"},
+        )
+        self.assertEqual(
+            session.reads,
+            ["#ativo", ".preco", "#preco"]  # one preview per selector typed
+            + ["#ativo", "#preco"]  # first summary, without payout
+            + ["#payout"]  # preview of the correction
+            + ["#ativo", "#preco", "#payout"] * 2,  # second summary, then the observation
+        )
+        self.assertIn("Link recusado (a URL precisa começar com https://;", run.out)
+        self.assertIn("Prévia de ativo, lida agora: EUR/USD OTC. Confira se é o que a tela mostra.", run.out)
+        self.assertIn(
+            "Prévia de preço, lida agora: INDISPONÍVEL (o seletor encontrou 2 elementos;"
+            " precisa encontrar exatamente 1)",
+            run.out,
+        )
+        self.assertIn("Payout: sem seletor, o campo fica INDISPONÍVEL.", run.out)
+        self.assertIn("  payout: INDISPONÍVEL (sem seletor em observe-selectors.json)", run.out)
+        self.assertIn("  payout: 92% (seletor #payout)", run.out)
+        self.assertEqual(run.out.count(observe.COMPARE_WITH_SCREEN), 2)  # after each summary
+        self.assertIn(f"Seletores gravados em {self.selectors_path}.", run.out)
+        self.assertEqual(len(self.csv_rows()), 1)
+        self.assertNotIn("SEGREDO", run.out + run.err)
+        self.assertEqual(self.answers.prompts[1], "Link: ")
+
+    def test_reuses_saved_selectors_and_writes_the_json_itself(self):
+        asset, price = 'div[data-name="ativo"] > span', r"#preco\:valor"
+        payout = r'#pay\:out > span[title="Payout \"atual\""]'
+        self.write_selectors(_nota="minha anotação", asset=asset, price=price, payout="")
+        session = FakeSession({asset: shown("EUR/USD OTC"), price: shown("1.08534"), payout: shown("92%")})
+        answers = [
+            "",  # Enter after the login
+            "", "",  # asset: Enter keeps the saved selector, Enter accepts its preview
+            "", "",  # price: the same
+            payout, "",  # payout: pasted as copied, without escaping, and accepted
+            "",  # summary: Enter saves and starts
+        ]
+        run = self.run_main("--configure", "--count", "1", session=session, answers=answers)
+        self.assertEqual((run.code, run.err), (0, ""))
+        self.assertEqual(self.answers.pending, [])
+        self.assertIn(f"Ativo: seletor atual {asset}", run.out)
+        self.assertEqual(observe.load_selectors(self.selectors_path), {"asset": asset, "price": price, "payout": payout})
+        saved = self.saved_selectors()
+        self.assertEqual(saved["_nota"], "minha anotação")
+        self.assertEqual(saved["_leia_me"], observe.SELECTORS_TEMPLATE["_leia_me"])
+        self.assertIn(r'"payout": "#pay\\:out > span[title=\"Payout \\\"atual\\\"\"]"', self.selectors_path.read_text(encoding="utf-8"))
+        self.assertEqual(self.csv_rows()[0][2:], ["EUR/USD OTC", f"ok: {asset}", "1.08534", f"ok: {price}", "92", f"ok: {payout}"])
+
+    def test_keeps_an_invalid_file_as_a_copy(self):
+        self.runtime.mkdir(parents=True)
+        self.selectors_path.write_text('{"asset": "#a\\b"', encoding="utf-8")  # broken by hand
+        original = self.selectors_path.read_bytes()
+        session = FakeSession({"#ativo": shown("EUR/USD OTC")})
+        answers = ["", "#ativo", "", "", "", ""]  # login, asset and its preview, price, payout, save
+        run = self.run_main("--configure", "--count", "1", session=session, answers=answers)
+        self.assertEqual(run.code, 0, run.err)
+        self.assertIn("não é um JSON válido", run.err)
+        [copy] = self.runtime.glob("observe-selectors.invalido-*.json")
+        self.assertEqual(copy.read_bytes(), original)
+        self.assertIn(f"O arquivo inválido foi guardado como {copy}.", run.out)
+        self.assertEqual(observe.load_selectors(self.selectors_path), {"asset": "#ativo", "price": None, "payout": None})
+
+    def test_writes_nothing_when_cancelled_or_left_empty(self):
+        def closing_the_window_then(answer):
+            def act():
+                session.window_closed = True
+                return answer
+
+            return act
+
+        cases = (
+            # (answers, exit code, message on stderr)
+            (["", EOFError], 1, "PARADA: a entrada do terminal terminou durante a configuração dos seletores; nada foi gravado"),
+            (["", "", "", KeyboardInterrupt], 130, ""),
+            (["", "-", "", "", ""], 2, "CONFIGURAÇÃO: nenhum seletor foi escolhido"),
+            (["", closing_the_window_then("")], 1, "PARADA: a janela do navegador foi fechada durante a configuração; nada foi gravado"),
+        )
+        for answers, code, message in cases:
+            with self.subTest(code=code, message=message):
+                self.write_selectors(asset="#ativo")
+                original = self.selectors_path.read_bytes()
+                session = FakeSession({"#ativo": shown("EUR/USD OTC")})
+                run = self.run_main("--configure", "--count", "1", session=session, answers=answers)
+                self.assertEqual(run.code, code, run.err)
+                self.assertIn(message, run.err)
+                self.assertEqual(self.selectors_path.read_bytes(), original)
+                self.assertEqual((session.closes, self.csv_files()), (1, []))
+                self.assertEqual(sorted(path.name for path in self.runtime.iterdir()), [observe.SELECTORS_FILE_NAME])
+
+
 class PlaywrightSessionTest(ObserveTestCase):
     """main() with the real PlaywrightSession on top of the fake playwright.sync_api."""
 
-    def test_visible_browser_runtime_profile_and_reading_only(self):
-        self.write_selectors(**SELECTORS)
-        dom = {
-            "#ativo-teste": [("EUR/USD OTC", True)],
-            "#preco-teste": [("1.08534", True)],
-            "#payout-teste": [("+92%", True)],
-        }
-        page = FakePage(dom, goto_error=f"Page.goto: net::ERR_TIMED_OUT at {SECRET_URL}\nCall log: {SECRET_URL}")
+    def run_with_fake_playwright(self, page, *args, url=URL):
         context = FakeContext(page)
         chromium = FakeChromium(context)
         playwright = FakePlaywright(chromium)
         with mock.patch.dict(sys.modules, fake_playwright_modules(playwright)):
-            run = self.run_main("--count", "1", url=SECRET_URL, real_adapter=True)
+            run = self.run_main(*args, url=url, real_adapter=True)
+        return run, context, chromium, playwright
+
+    def dom(self):
+        return {
+            "#ativo-teste": [("EUR/USD OTC", True)],
+            "#preco-teste": [("1.08534", True)],
+            "#payout-teste": [("+92%", True)],
+        }
+
+    def test_visible_browser_runtime_profile_reading_and_playwright_wait(self):
+        self.write_selectors(**SELECTORS)
+        page = FakePage(self.dom(), goto_error=f"Page.goto: net::ERR_TIMED_OUT at {SECRET_URL}\nCall log: {SECRET_URL}")
+        run, context, chromium, playwright = self.run_with_fake_playwright(page, "--count", "2", url=SECRET_URL)
         self.assertEqual(run.code, 0, run.err)
         profile = self.runtime / "browser-profile"
         self.assertEqual(chromium.launches, [(str(profile.resolve()), False, True)])  # visible window
         self.assertTrue(profile.is_dir())
         self.assertEqual(page.calls[0], ("goto", SECRET_URL, "domcontentloaded", 60_000))
-        self.assertEqual(
-            page.calls[1:],
-            [
-                call
-                for selector in SELECTORS.values()
-                for call in (
-                    ("locator", selector),
-                    ("count", selector),
-                    ("is_visible", selector),
-                    ("inner_text", selector, 2_000),
-                )
-            ],
-        )
+        reads = reads_of(SELECTORS.values())
+        self.assertEqual(page.calls[1:], reads + [("wait_for_timeout", 5_000)] + reads)
         self.assertTrue(context.closed and playwright.stopped)
-        self.assertIn(f"AVISO: a abertura da página não terminou (FakePlaywrightError: Page.goto: net::ERR_TIMED_OUT at {URL})", run.err)
+        self.assertIn(
+            "AVISO: a abertura da página não terminou (FakePlaywrightError: Page.goto:"
+            f" net::ERR_TIMED_OUT at {URL})",
+            run.err,
+        )
         csv_text = self.csv_files()[0].read_text(encoding="utf-8")
-        self.assertEqual(self.csv_rows()[0][1:3], [URL, "EUR/USD OTC"])
+        self.assertEqual([row[1:3] for row in self.csv_rows()], [[URL, "EUR/USD OTC"]] * 2)
         self.assertNotIn("SEGREDO", run.out + run.err + csv_text)
+
+    def test_a_failed_wait_ends_the_reading(self):
+        error = "Page.wait_for_timeout: Target page, context or browser has been closed"
+        for closing, code in ((True, 0), (False, 1)):
+            with self.subTest(window_closed=closing):
+                self.write_selectors(**SELECTORS)
+                page = FakePage(self.dom(), wait_error=error, closing_wait=closing)
+                run, context, _, playwright = self.run_with_fake_playwright(page, "--count", "3")
+                self.assertEqual(run.code, code, run.err)
+                self.assertEqual(page.calls.count(("wait_for_timeout", 5_000)), 1)
+                self.assertTrue(context.closed and playwright.stopped)
+                if closing:  # the window was closed: the reading just ends
+                    self.assertIn("A janela do navegador foi fechada; a leitura terminou.", run.out)
+                else:
+                    self.assertIn(f"PARADA: a espera entre as leituras falhou (FakePlaywrightError: {error})", run.err)
+                self.assertEqual(len(self.csv_rows()), 1)  # the observation before the wait
+                for path in self.csv_files():
+                    path.unlink()
 
     def test_launch_failure_stops_playwright_and_explains(self):
         self.write_selectors(**SELECTORS)
@@ -600,7 +806,7 @@ class PlaywrightSessionTest(ObserveTestCase):
             run.err,
         )
         self.assertTrue(playwright.stopped)
-        self.assertEqual(self.logins, 0)
+        self.assertEqual(self.answers.prompts, [])
 
     def test_missing_playwright_explains_the_installation(self):
         self.write_selectors(**SELECTORS)
@@ -610,7 +816,7 @@ class PlaywrightSessionTest(ObserveTestCase):
         self.assertIn("CONFIGURAÇÃO: o Playwright não está instalado neste Python", run.err)
         self.assertIn("python -m pip install playwright==1.64.0", run.err)
         self.assertIn("python -m playwright install chromium", run.err)
-        self.assertEqual((self.logins, self.csv_files()), (0, []))
+        self.assertEqual((self.answers.prompts, self.csv_files()), ([], []))
 
 
 class ReadOnlySourceTest(unittest.TestCase):
@@ -618,6 +824,7 @@ class ReadOnlySourceTest(unittest.TestCase):
         tree = ast.parse((ROOT / "pocketautonomo" / "observe.py").read_text(encoding="utf-8"))
         attributes = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
         self.assertEqual(attributes & FORBIDDEN_ATTRIBUTES, set())
+        self.assertNotIn("sleep", attributes)  # the waits go through Playwright, never time.sleep
         names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
         self.assertEqual(names & {"getattr", "setattr", "eval", "exec", "__import__"}, set())
 
@@ -638,6 +845,7 @@ class ReadOnlySourceTest(unittest.TestCase):
             shown_help = run("--help")
             self.assertEqual(shown_help.returncode, 0, shown_help.stderr)
             self.assertIn("--url", shown_help.stdout)
+            self.assertIn("--configure", shown_help.stdout)
             refused = run("--url", "https://example.org/?ssid=SEGREDO")
             self.assertEqual(refused.returncode, 2)
             self.assertIn("pocketoption.com", refused.stderr)

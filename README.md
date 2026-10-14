@@ -7,7 +7,7 @@ Núcleo em desenvolvimento para controlar ciclos de entradas com progressão fix
 ## Requisitos
 
 - Python 3.9 ou mais novo. O motor, a simulação e os testes usam só a biblioteca padrão; não há nada para instalar com `pip`. Versões já testadas: 3.9.25 localmente, em Linux, e 3.12 no GitHub Actions, em Linux e Windows (veja a seção Integração contínua, abaixo).
-- Só para o coletor: Python 3.10 ou mais novo e o Playwright, instalados como explica a seção do coletor.
+- Só para o coletor: Python 3.10 ou mais novo, de 64 bits no Windows, e o Playwright. No Windows, o `preparar_windows.cmd` instala o Playwright e o Chromium dele (veja a seção do coletor).
 - Git, para baixar o código.
 
 ## Instalação
@@ -39,7 +39,7 @@ Rode todos os comandos abaixo na raiz do repositório, a pasta `claude`. No Wind
 
 No GitHub, o workflow [`.github/workflows/tests.yml`](.github/workflows/tests.yml) roda essa suíte e os dois exemplos finitos abaixo em Linux e Windows a cada push e pull request. As execuções ficam na [aba Actions](https://github.com/vickzinha9/claude/actions/workflows/tests.yml).
 
-Os testes do coletor em `tests/test_observe.py` usam objetos falsos no lugar do navegador e não precisam do Playwright. Os dois de `tests/test_observe_playwright.py` abrem um Chromium de verdade, sem janela, numa página local de teste: sem o Playwright, como no CI, eles aparecem como `skipped`.
+Os testes do coletor em `tests/test_observe.py` e os da preparação e dos lançadores em `tests/test_setup_observer.py` usam objetos falsos no lugar do navegador, do `pip` e do `venv`, e não precisam do Playwright. Os dois de `tests/test_observe_playwright.py` abrem um Chromium de verdade, sem janela, numa página local de teste, que não é a Pocket Option. Sem o Playwright eles aparecem como `skipped`, a menos que a variável `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1` exista: aí falham, como o job de navegador do CI exige.
 
 ## Simulação local
 
@@ -122,7 +122,7 @@ Banco preservado: runtime/simulation-20261014-054555-b9105cb7.db
 
 ## Integração contínua (GitHub Actions)
 
-O workflow `.github/workflows/tests.yml` roda a cada push, a cada pull request e sob demanda (`workflow_dispatch`), em `ubuntu-latest` e `windows-latest`, com Python 3.12 instalado pelo `actions/setup-python`. Em cada sistema ele executa, com `python`:
+O workflow `.github/workflows/tests.yml` roda a cada push, a cada pull request e sob demanda (`workflow_dispatch`). O job `tests` roda em `ubuntu-latest` e `windows-latest`, com Python 3.12 instalado pelo `actions/setup-python`. Em cada sistema ele executa, com `python`:
 
 ```text
 python -m unittest discover -s tests -v
@@ -143,6 +143,14 @@ Os 2 testes pulados são os do coletor com Chromium de verdade, porque o CI não
 
 Nos dois sistemas, os acentos da saída apareceram corretos no log. Os testes de exclusividade do banco também passaram, inclusive no Windows, onde a trava usa `msvcrt.locking`.
 
+O job `windows-browser` roda só em `windows-latest` e testa o coletor numa **página local de teste**, servida pelo próprio Playwright para o nome reservado `observe.test`. Ele não acessa a Pocket Option, então passar nele não valida nada na plataforma real. Os passos são estes:
+
+1. cria em `runtime/` um arquivo no perfil do navegador e um `observe-selectors.json`, que precisam continuar iguais no fim;
+2. roda `preparar_windows.cmd` duas vezes, pelo `cmd`: a primeira cria `.venv` e instala o Playwright e o Chromium, e a segunda reutiliza `.venv`;
+3. roda, com o Python de `.venv`, os dois testes de `tests/test_observe_playwright.py`, que usam o Chromium de verdade, sem janela. Com `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1`, eles falham em vez de ser pulados;
+4. roda `observar_windows.cmd --help` e `observar_windows.cmd --url http://example.org/`, que precisa terminar com código 2. Nenhum dos dois abre o navegador;
+5. confere que os dois arquivos de `runtime/` não mudaram.
+
 ### Windows: testado em CI, não no seu computador
 
 O CI roda numa máquina virtual do GitHub, com o `python` instalado pelo `setup-python`, sem interação e com a saída gravada em log. **Nada disso foi testado no seu computador.** No Windows, continuam sem teste:
@@ -151,51 +159,73 @@ O CI roda numa máquina virtual do GitHub, com o `python` instalado pelo `setup-
 - o console interativo e um Ctrl+C de verdade;
 - o modo `--forever`, que só termina com Ctrl+C;
 - a saída redirecionada para arquivo sem `PYTHONIOENCODING=utf-8`;
-- o coletor com o Playwright: instalação, janela visível, login e Ctrl+C.
+- no coletor: os lançadores abertos com dois cliques, a pausa no fim, a janela visível do navegador, o DevTools, o login, o `--configure` com você digitando e um Ctrl+C de verdade.
 
 ## Coletor somente leitura da Pocket Option
 
 `python -m pocketautonomo.observe` abre a tela de operações num Chromium visível, espera você fazer o login e lê ativo, preço e payout com os seletores que você conferiu. **Não envia ordens, não clica em CALL/PUT e não faz operações financeiras.** A pesquisa, o método, o que foi comprovado e os passos de validação estão no [INTEGRATION.md](INTEGRATION.md).
 
-### Instalação no Windows
+### Windows: os dois lançadores
 
-Precisa do Python 3.10 ou mais novo, porque o Playwright 1.64.0 exige isso. No PowerShell, na pasta `claude`:
+Na raiz do projeto, a pasta `claude`, ficam dois arquivos. Abra-os nesta ordem, com dois cliques no Explorador de Arquivos ou pelo terminal (`.\preparar_windows.cmd` no PowerShell). Os dois entram sozinhos na pasta onde estão e esperam uma tecla no fim, para a janela não fechar antes de você ler.
+
+1. **`preparar_windows.cmd`** procura um Python 3.10 ou mais novo, de 64 bits, nesta ordem: `py -3.12`, `py -3` e `python`. Com ele, roda `python -m pocketautonomo.setup_observer`, que:
+   - cria `.venv` ou reutiliza a que já existe, se o Python dela servir;
+   - instala o `playwright==1.64.0`, a versão fixada em `pocketautonomo/observe.py`, e o Chromium dele;
+   - confere que `.venv` importa essa versão e que o Chromium abre, sem janela, uma página em branco.
+
+   Se uma etapa falhar, ele para com `FALHA: ...` ou `[ERRO] ...` e diz o que fazer. Ele nunca apaga `.venv` e não mexe em `runtime/`. Pode rodar de novo quantas vezes quiser.
+2. **`observar_windows.cmd`** usa o Python de `.venv` para rodar `python -m pocketautonomo.observe --configure --count 3`. Argumentos extras vão para o programa, como em `observar_windows.cmd --interval 10`.
+
+Se você apertar Ctrl+C, o `cmd` pergunta se quer finalizar o arquivo em lotes ("Deseja finalizar o arquivo em lotes (S/N)?", ou "Terminate batch job (Y/N)?" no Windows em inglês). Responda **N** para a janela continuar aberta com o resumo.
+
+### Configuração pelo terminal (`--configure`)
+
+É o modo que o `observar_windows.cmd` usa:
+
+1. sem `--url`, o programa pede o link no terminal e o confere com a mesma regra de `--url`. O link recusado não é repetido na tela;
+2. abre o navegador para o seu login e espera Enter;
+3. pede o seletor do ativo, do preço e do payout. Você cola o seletor como o DevTools copiou, sem escapar barras nem aspas. Enter mantém o seletor já gravado, e `-` deixa o campo sem seletor;
+4. lê cada seletor na hora e mostra a prévia: o valor encontrado ou `INDISPONÍVEL (motivo)`. Enter aceita o seletor; colar outro troca;
+5. mostra um resumo dos três campos, lidos juntos. Digite `ativo`, `preço` ou `payout` para corrigir um campo, ou Enter para gravar;
+6. grava `runtime/observe-selectors.json` com o módulo `json`, que faz os escapes, e faz as observações. Antes de você gravar, nada muda no arquivo; um arquivo inválido é guardado como cópia (`observe-selectors.invalido-...json`).
+
+**Texto encontrado não valida o campo.** O programa não sabe se o elemento escolhido é o certo: compare cada prévia e cada observação com o que a tela mostra.
+
+### Espera entre leituras
+
+Entre uma observação e a próxima, o coletor espera com `page.wait_for_timeout`, do Playwright, e não com `time.sleep`. A [documentação do Playwright](https://playwright.dev/python/docs/library#timesleep-leads-to-outdated-state) avisa que `time.sleep` deixa o estado desatualizado, porque a API síncrona só processa os eventos do navegador durante as chamadas dela. Isso não torna a leitura instantânea: cada valor é lido num instante, com algum atraso, e pode mudar logo depois.
+
+### Execução sem os lançadores
 
 ```powershell
 py -3.12 -m venv .venv
 .venv\Scripts\python -m pip install playwright==1.64.0
 .venv\Scripts\python -m playwright install chromium
+.venv\Scripts\python -m pocketautonomo.observe --configure --count 3
 ```
 
-- Com outra versão a partir da 3.10, troque `-3.12` por ela, como `-3.13`. Confira as versões instaladas com `py --list`.
-- A pasta `.venv` fica fora do Git. O `playwright install chromium` baixa o Chromium do Playwright para a sua pasta de usuário, fora do repositório.
-- O Playwright 1.64.0 foi testado só no Linux remoto, com Python 3.12.14. **No Windows, a instalação não foi testada.**
-
-### Execução
-
-```powershell
-.venv\Scripts\python -m pocketautonomo.observe --url "<link da sua tela de operações>" --count 3
-```
-
-Rode na pasta `claude`, porque a pasta `runtime/` é relativa à pasta atual. A janela do navegador abre, você faz o login, e o programa espera Enter no terminal antes de ler. Sem `--count`, ele lê até Ctrl+C.
+Rode na pasta `claude`, porque a pasta `runtime/` é relativa à pasta atual. Sem `--configure`, o programa exige `--url`, lê os seletores de `runtime/observe-selectors.json` depois do Enter e não pergunta nada. Sem `--count`, ele lê até Ctrl+C.
 
 | Opção | Significado |
 |---|---|
-| `--url LINK` | obrigatório: link `https://` de pocketoption.com ou de um subdomínio dele |
+| `--url LINK` | link `https://` de pocketoption.com ou de um subdomínio dele; obrigatório sem `--configure` |
+| `--configure` | pede no terminal o link (sem `--url`) e os seletores, com prévia, e grava o arquivo de seletores antes das observações |
 | `--interval S` | segundos entre uma leitura e a próxima (padrão 5, mínimo 1) |
 | `--count N` | quantas observações fazer; sem esta opção, lê até Ctrl+C |
 
 | Arquivo, em `runtime/` | Conteúdo |
 |---|---|
 | `browser-profile/` | perfil do navegador, com a sua sessão; não compartilhe |
-| `observe-selectors.json` | seletores de `asset`, `price` e `payout`, criado vazio na primeira execução |
+| `observe-selectors.json` | seletores de `asset`, `price` e `payout`, gravados pelo `--configure` ou criados vazios sem ele |
+| `observe-selectors.invalido-<data>-<hora>-<sufixo>.json` | cópia de um arquivo de seletores inválido, guardada pelo `--configure` antes de gravar o novo |
 | `observations-<data>-<hora>-<sufixo>.csv` | um arquivo novo por execução, com as observações válidas |
 
 | Código | Situação |
 |---|---|
 | 0 | terminou com pelo menos uma observação válida |
 | 1 | falhou, ou terminou sem nenhuma observação válida |
-| 2 | argumento ou configuração inválidos, inclusive seletores vazios e Playwright ausente |
+| 2 | argumento, link ou configuração inválidos, inclusive nenhum seletor e Playwright ausente |
 | 130 | interrompido por Ctrl+C; as linhas já gravadas ficam no CSV |
 
 ## Situação

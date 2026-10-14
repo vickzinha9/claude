@@ -1,14 +1,14 @@
 # Integração com a Pocket Option: leitura de dados
 
-Pesquisa e testes feitos em 14/10/2026, no branch `feature/progression-core`.
+Pesquisa e testes feitos em 14/10/2026, no branch `feature/progression-core`. No mesmo dia entraram os lançadores do Windows, o modo `--configure` e a espera pelo Playwright.
 
-> **Nenhuma conexão real foi comprovada.** Nada foi lido da plataforma real nesta etapa. A origem dos três campos (ativo, preço e payout) continua sem comprovação. Todos os testes usaram objetos falsos ou uma página local de teste.
+> **Nenhuma conexão real foi comprovada.** Nada foi lido da plataforma real até agora. A origem dos três campos (ativo, preço e payout) continua sem comprovação. Todos os testes usaram objetos falsos ou uma página local de teste, inclusive os do CI no Windows.
 
 ## Resumo
 
 - Não encontrei nenhuma interface oficial documentada (API, SDK ou documentação para desenvolvedores) que permita a um programa ler dados do terminal web CALL/PUT.
-- **Método escolhido:** um Chromium **visível**, controlado pelo Playwright, com o perfil em `runtime/browser-profile`. Você faz o login nessa janela, e o programa só lê o texto que a página mostra. A leitura usa seletores que você confere na tela real e grava em `runtime/observe-selectors.json`.
-- O programa não traz nenhum seletor pronto. Sem os seus, todo campo fica indisponível, com o motivo.
+- **Método escolhido:** um Chromium **visível**, controlado pelo Playwright, com o perfil em `runtime/browser-profile`. Você faz o login nessa janela, e o programa só lê o texto que a página mostra. A leitura usa seletores que você escolhe no terminal, com prévia de cada um (`--configure`, que o `observar_windows.cmd` usa), gravados em `runtime/observe-selectors.json`.
+- O programa não traz nenhum seletor pronto. Sem os seus, todo campo fica indisponível, com o motivo. Um seletor que encontra texto não valida o campo: só a sua comparação com a tela valida.
 
 ## 1. Fontes oficiais consultadas
 
@@ -45,16 +45,16 @@ Há bibliotecas de terceiros que imitam o WebSocket do site por engenharia rever
 
 ## 4. Método escolhido: `python -m pocketautonomo.observe`
 
-1. `--url` só aceita `https://pocketoption.com` ou um subdomínio dele, sem usuário, senha ou outra porta. O programa não tem link padrão.
+1. `--url` só aceita `https://pocketoption.com` ou um subdomínio dele, sem usuário, senha ou outra porta. O programa não tem link padrão. Com `--configure` e sem `--url`, ele pede o link no terminal e o confere com a mesma função.
 2. O Chromium do Playwright abre **visível**, com o perfil em `runtime/browser-profile`, fora do Git. O perfil guarda os dados do navegador entre execuções, inclusive a sessão: quem tiver essa pasta tem a sua sessão. Para encerrar a sessão, saia da conta na própria janela; para apagar os dados locais, apague a pasta.
 3. Você faz o login na janela, e o programa espera Enter no terminal.
-4. Depois do Enter, ele lê `runtime/observe-selectors.json`. Esse arquivo é criado com os campos vazios na primeira execução.
-5. A cada `--interval` segundos (padrão 5, mínimo 1), o programa lê cada campo que tem seletor. Ele exige **exatamente um elemento visível**, com texto no formato do campo. Se não houver, o campo fica `indisponível: <motivo>`.
+4. Com `--configure`, ele pede no terminal o seletor de cada campo e mostra na hora o que leu: o valor ou `INDISPONÍVEL (motivo)`. Você aceita, troca ou deixa o campo sem seletor; Enter mantém o seletor já gravado. Num resumo dos três campos, você corrige o que quiser e grava. O arquivo `runtime/observe-selectors.json` é escrito pelo módulo `json`, então você não escapa barras nem aspas. Sem `--configure`, o programa lê esse arquivo depois do Enter; na primeira execução, ele é criado com os campos vazios.
+5. A cada `--interval` segundos (padrão 5, mínimo 1), o programa lê cada campo que tem seletor. Ele exige **exatamente um elemento visível**, com texto no formato do campo. Se não houver, o campo fica `indisponível: <motivo>`. Entre duas leituras, a espera é `page.wait_for_timeout`, do Playwright, e não `time.sleep`, que deixaria o estado do Playwright desatualizado ([documentação](https://playwright.dev/python/docs/library#timesleep-leads-to-outdated-state)). Isso não elimina a latência: cada valor é lido num instante e pode mudar logo depois.
 6. Observações com pelo menos um campo disponível vão para `runtime/observations-<data>-<hora>-<sufixo>.csv`, gravadas linha a linha. As demais aparecem só no terminal.
 
 **Garantias:**
 
-- **Só leitura.** Além de abrir e fechar o navegador, o código usa apenas `goto`, `url`, `is_closed`, `locator`, `count`, `is_visible` e `inner_text`. Um teste analisa o código-fonte e falha se aparecer, por exemplo, `click`, `fill`, `press`, `type`, `evaluate`, `cookies`, `storage_state`, `route`, `keyboard` ou `mouse`.
+- **Só leitura.** Além de abrir e fechar o navegador, o código usa apenas `goto`, `url`, `is_closed`, `locator`, `count`, `is_visible`, `inner_text` e `wait_for_timeout`. Um teste analisa o código-fonte e falha se aparecer, por exemplo, `click`, `fill`, `press`, `type`, `evaluate`, `cookies`, `storage_state`, `route`, `keyboard`, `mouse` ou `sleep`.
 - **Origem conferida.** Uma página fora de pocketoption.com nunca é lida. Cada campo disponível registra o seletor usado (`ok: <seletor>`).
 - **Sem segredos na saída.** Parâmetros (`?...`) e fragmento (`#...`) da URL nunca aparecem no terminal nem no CSV. O programa não lê cookies, tokens, armazenamento do site nem tráfego de rede.
 - **Horário.** O horário de captura vem do relógio deste computador, em UTC, com milissegundos, logo antes da leitura. Nenhum horário é lido da plataforma.
@@ -78,22 +78,25 @@ Há bibliotecas de terceiros que imitam o WebSocket do site por engenharia rever
 
 ## 5. O que foi comprovado
 
-| Item | Com dados simulados | Na plataforma real |
+| Item | Com dados simulados ou na página local de teste | Na plataforma real, no seu computador |
 |---|---|---|
-| Só aceitar URLs https de pocketoption.com | testes em `tests/test_observe.py` | não se aplica |
-| Abrir o navegador visível com o perfil em `runtime/` | Playwright falso: `headless=False` e perfil `runtime/browser-profile`. No Linux remoto, a janela visível não abre, por falta de tela | **não executado** |
-| Perfil preservado entre execuções | Chromium real, sem janela (headless), em página local: um dado gravado na primeira sessão apareceu na segunda | **não executado** |
+| Só aceitar URLs https de pocketoption.com, inclusive o link digitado no `--configure` | testes em `tests/test_observe.py` | não se aplica |
+| Lançadores do Windows | CI `windows-latest`: `preparar_windows.cmd` duas vezes, criando e reutilizando `.venv` com o Playwright e o Chromium; `observar_windows.cmd --help` e com um link recusado, código 2; `runtime/` igual no fim. No Linux remoto, a preparação rodou de verdade, criando e reutilizando `.venv` | **não executado** |
+| Abrir o navegador visível com o perfil em `runtime/` | Playwright falso: `headless=False` e perfil `runtime/browser-profile`. A janela visível não abriu em nenhum teste: o Linux remoto não tem tela, e o CI usa o Chromium sem janela | **não executado** |
+| Perfil preservado entre execuções | Chromium real, sem janela, em página local, no Linux remoto e no CI Windows: um dado gravado na primeira sessão apareceu na segunda | **não executado** |
 | Login manual | não se aplica | **não executado**: depende de você |
+| `--configure`: link, prévias, correção e gravação | objetos falsos: link recusado e aceito, prévias com valor e `INDISPONÍVEL`, correção, reutilização, seletores com barras e aspas gravados intactos, arquivo inválido guardado como cópia, nada gravado ao cancelar. Chromium real em página local: o fluxo inteiro, até as 3 observações | **não executado** |
 | Ativo, preço e payout | objetos falsos e Chromium real em página local de teste | **não comprovados**: nenhum seletor foi conferido na tela real |
 | Nenhum clique | teste no código-fonte e página local com botões CALL e PUT que contam cliques: zero cliques | não se aplica |
+| Espera do Playwright entre leituras | objetos falsos; Playwright falso com `wait_for_timeout(5000)`; Chromium real com duas esperas de 1 s; navegador encerrado durante a espera: a leitura terminou com código 0 e o CSV ficou | **não executado** |
 | Horário de captura, CSV e campos indisponíveis | testes | **não executado** |
-| Ctrl+C | testes e SIGINT real no Linux, com Chromium sem janela: código 130, as 5 linhas lidas ficaram no CSV e nenhum processo do Chromium sobrou | **não testado no Windows** |
+| Ctrl+C durante a espera | testes e SIGINT real no Linux, com Chromium sem janela. Para o grupo de processos, como num terminal: código 130, as 4 linhas lidas ficaram no CSV e nenhum processo sobrou. Só para o Python: código 130 e "Navegador fechado." | **não testado no Windows** |
 
-A página local de teste é HTML escrito para os testes e servido pelo próprio Playwright para o nome reservado `observe.test`, sem acesso à rede. Ela não imita a Pocket Option, e passar nela não diz nada sobre a plataforma real.
+A página local de teste é HTML escrito para os testes e servido pelo próprio Playwright para o nome reservado `observe.test`, sem acesso à rede. Ela não imita a Pocket Option, e passar nela, no Linux ou no CI Windows, não diz nada sobre a plataforma real.
 
 ## 6. Bloqueios e riscos
 
-1. **URL não informada.** O pedido trouxe `<COLE AQUI O LINK OFICIAL DA SUA TELA DE OPERAÇÕES>` no lugar do link. Não inventei nenhum: você informa o link em `--url`.
+1. **URL não informada.** O pedido trouxe `<COLE AQUI O LINK OFICIAL DA SUA TELA DE OPERAÇÕES>` no lugar do link. Não inventei nenhum: o `observar_windows.cmd` pede o link no terminal, ou você o informa em `--url`.
 2. **Login.** Só você pode fazer. Não tentei login nem pedi credenciais.
 3. **Sem tela no Linux remoto.** O Playwright recusa a janela visível: `TargetClosedError`, com a dica "Looks like you launched a headed browser without having a XServer running".
 4. **robots.txt veda `*/cabinet*`.** Por isso não abri o terminal, nem o demo, a partir do servidor. As páginas permitidas `/pt/try-demo/` e `/en/try-demo/` responderam 404.
@@ -104,19 +107,19 @@ A página local de teste é HTML escrito para os testes e servido pelo próprio 
 
 ## 7. Como validar no seu Windows
 
-A instalação está no [README](README.md#coletor-somente-leitura-da-pocket-option). Se puder, valide primeiro na conta demo.
+Os lançadores estão descritos no [README](README.md#windows-os-dois-lançadores). Se puder, valide primeiro na conta demo.
 
-1. Na pasta `claude`, rode:
+1. Na pasta `claude`, abra `preparar_windows.cmd` com dois cliques. Ele deve terminar com "Pronto:" e "tudo pronto". Se aparecer `FALHA:` ou `[ERRO]`, siga o que a mensagem diz e abra de novo.
+2. Abra `observar_windows.cmd`. Quando ele pedir, cole o link da sua tela de operações e pressione Enter.
+3. Faça o login na janela do navegador e vá até a tela de operações. Só então pressione Enter no terminal.
+4. Para cada campo que o terminal pedir (ativo, preço e payout):
+   - na janela do navegador, abra o DevTools com F12 (ou Ctrl+Shift+I) e ligue o modo de inspeção com Ctrl+Shift+C;
+   - clique no elemento. No modo de inspeção, o clique só seleciona o elemento; fora dele, o clique é de verdade. Não use a inspeção sobre os botões CALL e PUT;
+   - no painel Elements, clique com o botão direito no elemento destacado e escolha Copy > Copy selector (em português, Copiar > Copiar seletor);
+   - cole no terminal, como veio, e pressione Enter;
+   - compare a prévia com a tela. Se ela bater, pressione Enter. Se aparecer `INDISPONÍVEL` ou outro valor, cole outro seletor.
+5. No resumo, compare os três valores com a tela. Digite `ativo`, `preço` ou `payout` para corrigir um campo, ou pressione Enter para gravar e começar as 3 observações, uma a cada 5 segundos.
+6. Compare cada linha `OBSERVAÇÃO` com o que a tela mostrava naquele momento. O CSV fica em `runtime\observations-...csv`.
+7. Me envie a saída do terminal, os seletores que funcionaram e se os valores bateram com a tela. Confira antes se não há dado pessoal nela. Só então os campos podem ser considerados comprovados.
 
-   ```powershell
-   .venv\Scripts\python -m pocketautonomo.observe --url "<link da sua tela de operações>" --count 3
-   ```
-
-   Na primeira vez, ele cria `runtime\observe-selectors.json` com os campos vazios.
-2. Faça o login na janela que abrir e vá até a tela de operações. **Não pressione Enter ainda.**
-3. Nessa mesma janela, abra o DevTools com F12 (ou Ctrl+Shift+I) e ligue o modo de inspeção com Ctrl+Shift+C. Clique no nome do ativo. No modo de inspeção, o clique só seleciona o elemento; fora dele, o clique é de verdade. Não use a inspeção sobre os botões CALL e PUT.
-4. No painel Elements, clique com o botão direito no elemento destacado e escolha Copy > Copy selector (em português, Copiar > Copiar seletor).
-5. Abra `runtime\observe-selectors.json` no Bloco de Notas e cole o seletor entre as aspas de `"asset"`. Se o seletor tiver `\`, troque cada um por `\\`; depois, troque cada `"` por `\"`. Faça o mesmo com o preço (`"price"`) e o payout (`"payout"`) e salve o arquivo.
-6. Volte ao terminal e pressione Enter. O programa faz 3 leituras, uma a cada 5 segundos.
-7. Compare cada linha `OBSERVAÇÃO` com a tela. Um campo `indisponível` traz o motivo: nenhum elemento, mais de um, elemento oculto ou texto em outro formato. Ajuste o seletor e rode de novo. Como o perfil guarda os dados do navegador, o login deve continuar valendo, a menos que a plataforma encerre a sessão.
-8. Me envie a saída do terminal, os seletores que funcionaram e se os valores bateram com a tela. Confira antes se não há dado pessoal nela. Só então os campos podem ser considerados comprovados.
+Numa nova execução, Enter mantém cada seletor gravado. Como o perfil guarda os dados do navegador, o login deve continuar valendo, a menos que a plataforma encerre a sessão.

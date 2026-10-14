@@ -74,3 +74,68 @@ jobs:
           $code = $LASTEXITCODE
           Write-Output "exit code: $code"
           exit $code
+
+  # The collector's Windows launchers and its two real-browser tests. Chromium opens only
+  # the local test page that the tests serve themselves, for the reserved name observe.test:
+  # nothing here reaches the Pocket Option, so passing says nothing about the real platform.
+  windows-browser:
+    name: windows-latest / launchers and Chromium on a local test page
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      PYTHONIOENCODING: utf-8
+      POCKETAUTONOMO_SEM_PAUSA: "1" # the launchers skip their final pause
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Create local data that the launchers must keep
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force runtime\browser-profile | Out-Null
+          Set-Content -NoNewline -Path runtime\browser-profile\sentinel.txt -Value "existing profile"
+          Set-Content -NoNewline -Path runtime\observe-selectors.json -Value '{"asset": "#sentinel", "price": "", "payout": ""}'
+          Get-FileHash runtime\browser-profile\sentinel.txt, runtime\observe-selectors.json | Format-Table Hash, Path -AutoSize
+
+      - name: "preparar_windows.cmd: create .venv, install Playwright and Chromium"
+        shell: cmd
+        run: call preparar_windows.cmd < NUL
+
+      - name: "preparar_windows.cmd again: reuse .venv"
+        shell: cmd
+        run: call preparar_windows.cmd < NUL
+
+      - name: Real Chromium tests on the local test page, not the Pocket Option
+        shell: cmd
+        env:
+          POCKETAUTONOMO_REQUIRE_BROWSER_TESTS: "1" # fail instead of skipping without Playwright
+        run: .venv\Scripts\python -m unittest -v tests.test_observe_playwright
+
+      - name: "observar_windows.cmd --help: no browser opens"
+        shell: cmd
+        run: call observar_windows.cmd --help < NUL
+
+      - name: "observar_windows.cmd with a refused link: exit code 2, no browser opens"
+        shell: cmd
+        run: |
+          call observar_windows.cmd --url http://example.org/ < NUL
+          set CODE=%ERRORLEVEL%
+          echo exit code: %CODE%
+          if not "%CODE%"=="2" exit /b 1
+
+      - name: The local data is unchanged
+        shell: pwsh
+        run: |
+          $profile = Get-Content -Raw runtime\browser-profile\sentinel.txt
+          $selectors = Get-Content -Raw runtime\observe-selectors.json
+          Write-Output "sentinel.txt: $profile"
+          Write-Output "observe-selectors.json: $selectors"
+          if ($profile -ne "existing profile") { exit 1 }
+          if ($selectors -ne '{"asset": "#sentinel", "price": "", "payout": ""}') { exit 1 }
