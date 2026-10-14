@@ -1,6 +1,6 @@
 # Status
 
-Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O estado do coordenador, inclusive o estado de envio de cada reserva, pode ser salvo em SQLite, e só um coordenador por vez opera cada banco; sem banco, tudo fica em memória. O executor envia a ordem de uma reserva e consulta o resultado da ordem pendente, testado com corretoras falsas e com a corretora simulada em memória (item 14). **Ainda não existem conexão com a corretora nem programa de linha de comando:** nenhuma ordem real é enviada nem consultada.
+Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O estado do coordenador, inclusive o estado de envio de cada reserva, pode ser salvo em SQLite, e só um coordenador por vez opera cada banco; sem banco, tudo fica em memória. O executor envia a ordem de uma reserva e consulta o resultado da ordem pendente, testado com corretoras falsas e com a corretora simulada em memória (item 14). O programa `python3 -m pocketautonomo.local_simulation` roda ciclos completos com essa corretora simulada (item 15). **Ainda não existe conexão com a corretora:** nenhuma ordem real é enviada nem consultada.
 
 ## Concluído
 
@@ -132,12 +132,33 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
       - `test_settle_win_or_loss_once_and_refuse_a_different_result`: WIN e LOSS liquidam uma vez, a repetição devolve `False` e um resultado diferente é recusado, mantendo o primeiro;
       - `test_unknown_id_and_invalid_result_are_refused`: id desconhecido, inclusive de outra instância, gera `KeyError`; DRAW, CANCELLED, REJECTED, UNKNOWN, OPEN e outros valores geram `ValueError`, e a ordem continua OPEN;
       - `test_simulated_win_ends_the_cycle_through_the_engine`: com `Coordinator`, `SqliteStore` e `OrderExecutor`, a reserva de 500 centavos é enviada, a consulta com a ordem ainda OPEN mantém a pendência e, depois de liquidar WIN, a consulta grava o resultado e encerra o ciclo, sem gale e com um único envio. O banco guarda o id `SIM-...` e o WIN.
+15. **Programa local de simulação:** `pocketautonomo/local_simulation.py`, com testes em `tests/test_local_simulation.py`
+    - `python3 -m pocketautonomo.local_simulation` roda ciclos completos pelo motor existente: `Coordinator` com `SqliteStore` decide ciclo, tentativa e valor; `OrderExecutor` envia e reconcilia; `SimulatedBroker` recebe as ordens. O README traz os comandos para Linux e Windows e explica a saída.
+    - Opções: `--cycles N` ou `--forever` (uma das duas, nunca as duas), `--results` (obrigatório), `--asset` (padrão `SIM_ASSET`), `--direction` (CALL ou PUT, padrão CALL), `--poll-interval` (positivo e finito, padrão 0.25) e `--db`. Argumento inválido gera código 2 antes de criar qualquer arquivo.
+    - Para cada entrada: reserva com saldo fictício de 10000 centavos, envio pelo executor, consulta pelo executor confirmando OPEN, espera de `--poll-interval`, liquidação no simulador com o próximo resultado de `--results` e reconciliação pelo executor. Um ciclo novo só começa depois que o anterior se encerra.
+    - Os resultados vêm só de `--results`, usados em ordem e repetidos ao terminar. O programa não analisa o mercado nem calcula lucratividade, e o saldo fictício serve só para validar as reservas.
+    - A saída mostra SIMULAÇÃO, ciclo, tentativa, ativo, direção, valor, id da ordem e estado ou resultado, em uma linha `estado OPEN` e outra `resultado ...` por ordem, além do encerramento de cada ciclo.
+    - Sem `--db`, cada execução cria um banco com nome único em `runtime/`, relativo à pasta atual, e preserva os anteriores. `runtime/` está no `.gitignore`.
+    - Ao abrir, o banco passa pelas proteções de recuperação do coordenador. Um banco com ciclo aberto, com ou sem reserva pendente, é recusado sem alteração, com mensagem e código 1. Um banco só com ciclos encerrados é reaproveitado, e a numeração continua.
+    - Resposta incerta, falha de gravação ou recusa do coordenador param a execução com `PARADA: ...` e código 1, preservando o banco. O programa nunca reenvia ordens, inventa resultados ou abandona ciclos.
+    - Ctrl+C (`KeyboardInterrupt`) fecha o coordenador e libera a trava em `finally`; a reserva pendente, se houver, fica como estava, e o código é 130.
+    - **Testes na suíte** (`tests/test_local_simulation.py`, 11 testes, com uma espera falsa no lugar de `time.sleep`):
+      - três ciclos LOSS,LOSS,WIN: nove ordens, 500/1000/2000 por ciclo, cada reserva enviada uma vez, uma espera de 0,25 s por ordem;
+      - dois ciclos de quatro LOSS, com ativo e direção escolhidos: oito ordens de 500 a 4000 e nenhuma tentativa 5;
+      - resultados usados em ordem e repetidos entre ciclos;
+      - Ctrl+C no meio de um ciclo: código 130, pendência ACCEPTED preservada sem resultado, nada reenviado e trava liberada;
+      - banco com ciclo aberto, com e sem reserva pendente: recusado com código 1, sem envio, sem espera e sem alteração;
+      - falha de gravação do resultado: código 1, mensagem clara e reserva ainda pendente;
+      - `--forever` até Ctrl+C; banco encerrado reaproveitado com a numeração continuando; argumentos inválidos; nomes únicos em `runtime/`; e o programa rodando de verdade com `python -m`.
+    - **Verificação avulsa, fora da suíte, só em Linux:**
+      - os dois exemplos finitos, com os comandos exatos do pedido: 9 ordens com três WIN e 8 ordens com duas quartas LOSS, código 0 nos dois;
+      - `--forever --results "LOSS,LOSS,WIN" --poll-interval 0.25` interrompido com SIGINT real depois de 3 s: código 130, 11 ordens, a pendência ACCEPTED preservada, a trava liberada e 0,05 s de CPU em 3 s de execução. Reabrir esse banco foi recusado com código 1, sem alteração.
 
 ## Testes
 
     python3 -m unittest discover -s tests -v
 
-Último resultado: 149 testes, todos passando, no Python 3.9.25. No 3.10, 3.12, 3.13 e 3.14, a última execução foi em `75d66ac`, com 137 testes, todos com SQLite 3.40.0; as mudanças seguintes só rodaram no 3.9.25. Tudo foi executado em Linux; o caminho do Windows (`msvcrt.locking`) ainda não foi executado.
+Último resultado: 160 testes, todos passando, no Python 3.9.25. No 3.10, 3.12, 3.13 e 3.14, a última execução foi em `75d66ac`, com 137 testes, todos com SQLite 3.40.0; as mudanças seguintes só rodaram no 3.9.25. Tudo foi executado em Linux; o caminho do Windows (`msvcrt.locking`) ainda não foi executado.
 
 ## Decisões em vigor
 
@@ -166,13 +187,17 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
 - Com o coordenador fechado, `reconcile_pending` não devolve relatório: o `CoordinatorError` de `status()` sobe.
 - Uma falha ao gravar o resultado consultado mantém a reserva pendente e não ativa `submission_failure`. Como a pendência impede nova entrada, nada é enviado até uma nova consulta gravar o resultado.
 - A corretora simulada liquida só com WIN ou LOSS, informados por quem conduz a simulação. O estado OPEN que ela usa é o `ORDER_OPEN` de `executor.py`, o mesmo que `reconcile_pending` reconhece.
+- A simulação local só reaproveita um banco sem ciclo aberto e nunca resolve sozinha uma pendência de execução anterior.
+- Códigos de saída da simulação local: 0 (ciclos pedidos encerrados), 1 (recusa ou parada), 2 (argumentos inválidos) e 130 (Ctrl+C).
+- A pasta `runtime/` é relativa à pasta atual: a simulação deve rodar da raiz do repositório.
 
 ## Em aberto para as próximas etapas
 
-- **Executor de ordens:** o envio e a consulta do resultado existem e têm testes, inclusive com a corretora simulada, mas nada os chama fora dos testes. Faltam o armazenamento durável dos relatórios, horários, payout e a estratégia CALL/PUT.
-- **Programa de linha de comando: pendente.** Ainda não há comando para rodar ciclos simulados no terminal; a corretora simulada só é usada pelos testes.
+- **Executor de ordens:** o envio e a consulta do resultado são usados pela simulação local e pelos testes, nunca com uma corretora real. Faltam o armazenamento durável dos relatórios, horários, payout e a estratégia CALL/PUT.
+- **Pendência deixada pela simulação:** depois de um Ctrl+C ou de uma parada com reserva pendente, o banco fica recusado pela simulação, porque a corretora simulada daquela execução deixou de existir. Não há ferramenta para resolver essa pendência; o caminho é usar um banco novo.
+- A simulação não grava arquivo de log: a saída aparece só no terminal, e o histórico fica no banco.
 - O id de uma aceitação que não pôde ser gravada só existe no `SubmissionReport`. Quem chama `submit` precisa guardá-lo ou registrá-lo em log até a recuperação; senão, a reserva fica SUBMITTING sem id.
-- **Conexão com a Pocket Option: pendente.** Nenhuma ordem real é enviada nem consultada.
+- **Conexão com a Pocket Option: pendente.** Nenhuma ordem real é enviada nem consultada. Dados de mercado, estratégia e executor real também ficam para os pacotes seguintes.
 - Reservas UNVERIFIED ou SUBMITTING sem id ficam em `NO_ORDER_ID`, porque a consulta só usa o id vinculado. Falta decidir como recuperá-las.
 - UNKNOWN não tem prazo: o bloqueio dura até chegar um resultado definitivo.
-- Rodar a suíte no Windows para confirmar o caminho `msvcrt.locking` (CI em Linux e Windows).
+- **Windows não testado:** os comandos do README para Windows estão documentados, mas nem a suíte nem a simulação rodaram em Windows, e o caminho `msvcrt.locking` também não (falta CI em Linux e Windows).
