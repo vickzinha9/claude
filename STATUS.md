@@ -267,6 +267,10 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
       - a preparação real, numa cópia do projeto, levou 13 s na primeira vez e 3 s na segunda. Ela instalou o OCR, e o OCR leu `1.26543`. `runtime/` ficou idêntico, e nada foi gravado em `~/.cache/Microsoft`;
       - num experimento com o gráfico de teste, 450 cotações aleatórias a 100%, 125% e 150% de escala deram 450 leituras certas, com mediana de 64 a 82 ms por captura e leitura;
       - com a etiqueta do cursor sobre o marcador ou logo acima, a leitura continuou certa. Com uma segunda caixa igual alinhada, ficou ambígua; com o marcador fora da área ou com outra cor, ficou indisponível.
+    - **CI:** a execução [38660238445](https://github.com/vickzinha9/claude/actions/runs/38660238445), no commit `8e5c556`, terminou com `success` nos três jobs.
+      - `windows-browser`: o `preparar_windows.cmd` escolheu `py -3.12` (Python 3.12.10, 64 bits). Ele instalou o Playwright e o OCR (`rapidocr-3.10.0`, `onnxruntime-1.31.0`, `numpy-2.5.4`, `opencv-python-headless-5.0.0.93`) e o Chromium. O OCR leu `1.26543` na imagem de teste, em 44 s no total; a segunda vez levou 6 s.
+      - Os 3 testes com Chromium e OCR de verdade passaram em 12,7 s, inclusive a leitura da cotação no gráfico de teste em canvas. `runtime/` continuou igual.
+      - `tests`: 217 testes. No Linux, 210 passaram e 7 foram pulados. No Windows, 214 passaram, inclusive os 4 do `PreparerOnWindowsTest`, e 3 foram pulados, porque o job não instala o Playwright.
     - **Plataforma real: não executado.** A leitura visual ainda não rodou na sua tela.
 
 ## Testes
