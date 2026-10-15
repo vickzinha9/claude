@@ -189,6 +189,7 @@ Na raiz do projeto, a pasta `claude`, ficam três arquivos. Abra os dois primeir
 
    Se uma etapa falhar, ele para com `FALHA: ...` ou `[ERRO] ...` e diz o que fazer. Ele nunca apaga `.venv` e não mexe em `runtime/`. Pode rodar de novo quantas vezes quiser.
 2. **`observar_windows.cmd`** usa o Python de `.venv` para rodar `python -m pocketautonomo.observe --configure --count 3`. Argumentos extras vão para o programa, como em `observar_windows.cmd --interval 10`.
+3. **`varrer_windows.cmd`** usa o mesmo Python para rodar `python -m pocketautonomo.scan --configure`, também com os argumentos extras, como em `varrer_windows.cmd --cycles 2`. Ele precisa das fontes gravadas pelo `observar_windows.cmd`.
 
 Se você apertar Ctrl+C, o `cmd` pergunta se quer finalizar o arquivo em lotes ("Deseja finalizar o arquivo em lotes (S/N)?", ou "Terminate batch job (Y/N)?" no Windows em inglês). Responda **N** para a janela continuar aberta com o resumo.
 
