@@ -37,8 +37,16 @@ keeps a second scan from starting.
 Each visit is written as soon as it ends to a new CSV file in runtime/, one line per
 favorite per cycle, with observe's columns and the scan's own. payout_eligible is sim when
 the numeric payout is ELIGIBLE_PAYOUT% or more, the criterion for a future first entry: it
-is not a chance of winning, and the assets below it are recorded too. Times come from this
-computer's clock, in UTC; none of them is the server's.
+is not a chance of winning, and the assets below it are recorded too. analysis_ready tells
+apart, whatever the payout, the visits whose data is complete and current, the only ones
+usable for analysis. Times come from this computer's clock, in UTC; none of them is the
+server's. Every reading of the quote also goes, with the time of each step, to a timings
+file next to the CSV (quote_timings).
+
+After each visit, the local analysis (pocketautonomo.analysis) receives the visit's quote
+when its data is usable, together with the usable quotes of the earlier scan files, and
+says CALL, PUT or AGUARDAR, with the reason, in the terminal and in the CSV. Without a rule
+validated on separate data, it says AGUARDAR. The scan sends no order whatever it says.
 
 Exit codes: 0 when at least one line with data was written, 1 when the scan failed or wrote
 none, 2 for invalid arguments or configuration, including a missing Playwright, and 130
@@ -58,7 +66,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 
-from pocketautonomo import observe, quote_timings
+from pocketautonomo import analysis, observe, quote_timings
 from pocketautonomo.observe import (
     COMPLETE,
     EXIT_CONFIG,
@@ -153,6 +161,8 @@ SCAN_COLUMNS = observe.CSV_COLUMNS + (
     "analysis_ready",  # sim: complete and current data, usable for analysis; não otherwise
     "analysis_note",  # why the data is not usable for analysis, or what makes it usable
     "data_age_ms",  # from the capture of the quote to the recording of the visit
+    "analysis_decision",  # CALL, PUT or AGUARDAR: what the local analysis said right after the visit
+    "analysis_decision_note",  # its reason; a CALL or PUT also says until when it is valid
 )
 
 # Words of the trade buttons, of the Amount and of money operations, in English and in
@@ -342,6 +352,7 @@ class Visit:
     polls: int = 0
     reference: object = None  # Reference, when the previous asset's quote was read for a click
     recorded_at: object = None  # this computer's clock, in UTC, when the visit ended
+    decision: object = None  # analysis.Decision right after the visit, when the analysis runs
 
     @property
     def eligibility(self):
@@ -385,6 +396,7 @@ class Scan:
     load_timeout: float
     progress: ScanProgress
     last_clicked: object = None  # (key, how many elements the list had) of the last click
+    analyzer: object = None  # analysis.Analyzer, from the start of the scan
 
     @property
     def sources(self):
@@ -539,6 +551,14 @@ def build_parser():
         help="segundos, depois do clique, para confirmar o ativo e ter dados estáveis (padrão"
         f" {DEFAULT_LOAD_TIMEOUT:g}, de {MIN_LOAD_TIMEOUT:g} a {MAX_LOAD_TIMEOUT:g}); o que não"
         " estabilizar fica indisponível",
+    )
+    parser.add_argument(
+        "--horizon",
+        type=analysis.horizon_seconds,
+        default=analysis.DEFAULT_HORIZON,
+        help="segundos das operações hipotéticas da análise local CALL/PUT (padrão"
+        f" {analysis.DEFAULT_HORIZON:g}, de {analysis.MIN_HORIZON:g} a {analysis.MAX_HORIZON:g}); a"
+        " análise não envia ordens",
     )
     return parser
 
@@ -885,6 +905,14 @@ def run_scan(session, scan, args, ctx):
     progress = scan.progress
     progress.csv_path = new_scan_csv_path(ctx.runtime_dir)
     progress.timings = quote_timings.TimingRecorder(quote_timings.timing_path(progress.csv_path), warn)
+    history = analysis.load_history(ctx.runtime_dir, exclude=(progress.csv_path,))
+    scan.analyzer = analysis.Analyzer(args.horizon, history)
+    say(
+        f"Análise local CALL/PUT, com operações hipotéticas de {seconds_text(args.horizon)} s, depois"
+        f" de cada visita com dados para análise: {history.usable} cotações utilizáveis de"
+        f" {count(history.files, 'arquivo anterior', 'arquivos anteriores')}. Sem regra validada em"
+        f" dados separados, a decisão é {analysis.WAIT}. {analysis.DISCLAIMER}"
+    )
     streak = 0  # cycles in a row without any complete reading
     while args.cycles is None or progress.cycles < args.cycles:
         if session.is_closed():
@@ -904,6 +932,7 @@ def run_scan(session, scan, args, ctx):
             try:
                 for favorite in favorites.usable:
                     visit = visit_favorite(session, scan, favorite, cycle, favorites.total, ctx)
+                    visit = with_decision(visit, scan)
                     record(visit, progress, ctx)
                     visits.append(visit)
                     unconfirmed = unconfirmed + 1 if visit.switch == NOT_CONFIRMED else 0
@@ -921,6 +950,7 @@ def run_scan(session, scan, args, ctx):
         line = cycle_summary(cycle, visits, ctx.elapsed_ms(start) / 1000)
         if args.cycles is not None and cycle >= args.cycles:
             say(line)
+            say(analysis_summary(scan))
             return
         pause = pause_seconds(args.interval, streak)
         if streak:
@@ -928,6 +958,7 @@ def run_scan(session, scan, args, ctx):
         else:
             line += f" Próximo ciclo em {seconds_text(pause)} s."
         say(line)
+        say(analysis_summary(scan))
         session.wait(pause)
 
 
@@ -1363,6 +1394,43 @@ def analysis_of(visit):
     return Analysis(True, "ativo, cotação e payout lidos juntos, conferidos e atuais", age_ms)
 
 
+def with_decision(visit, scan):
+    """visit with the local analysis made right after it: CALL, PUT or AGUARDAR, and why.
+
+    Only a visit with data usable for analysis feeds the analysis, with the quote and the
+    payout of its last reading; the decision is computed at the moment the visit was
+    recorded, so a CALL or PUT can only come from a quote captured moments before.
+    """
+    if scan.analyzer is None:
+        return visit
+    state = visit.analysis
+    readings = visit.observation.readings
+    price = readings["price"]
+    number = quote_number(price.value) if price.available else None
+    if not state.ready or number is None:
+        reason = f"sem dados para análise nesta visita: {state.note}"
+        return replace(visit, decision=analysis.Decision(visit.favorite.name, analysis.WAIT, reason))
+    name = readings["asset"].value
+    sample = analysis.Sample(price.captured_at, number, price.value, payout_number(readings["payout"].value))
+    scan.analyzer.add(name, sample)
+    return replace(visit, decision=scan.analyzer.decide(name, visit.recorded_at))
+
+
+def analysis_summary(scan):
+    """The line about the analysis at the end of a cycle: how many assets have a validated rule."""
+    if scan.analyzer is None:
+        return ""
+    assets, validated = scan.analyzer.summary()
+    horizon = seconds_text(scan.analyzer.horizon)
+    line = (
+        f"ANÁLISE CALL/PUT (operações de {horizon} s): {count(assets, 'ativo', 'ativos')} com dados,"
+        f" {len(validated)} com regra validada em dados separados"
+    )
+    if validated:
+        return line + f" ({', '.join(validated)}); a decisão de cada um vale só logo depois da visita dele."
+    return line + f": {analysis.WAIT}, sem decisão CALL ou PUT."
+
+
 def record(visit, progress, ctx):
     """Write visit to the CSV, count it and show it."""
     if progress.csv is None:
@@ -1422,16 +1490,25 @@ def scan_row(visit):
         str(visit.polls),
         visit.eligibility,
     ]
-    reference, analysis = visit.reference, visit.analysis
+    reference, state, decision = visit.reference, visit.analysis, visit.decision
     row += [
         reference.status if reference is not None else "",
         str(reference.attempts) if reference is not None else "",
         f"{reference.ms:.1f}" if reference is not None else "",
-        READY if analysis.ready else NOT_READY,
-        analysis.note,
-        "" if analysis.age_ms is None else f"{analysis.age_ms:.1f}",
+        READY if state.ready else NOT_READY,
+        state.note,
+        "" if state.age_ms is None else f"{state.age_ms:.1f}",
+        decision.action if decision is not None else "",
+        decision_note(decision) if decision is not None else "",
     ]
     return row
+
+
+def decision_note(decision):
+    """The reason of a decision, with the end of its validity for CALL and PUT."""
+    if decision.valid_until is None:
+        return decision.reason
+    return f"{decision.reason}; válida até {decision.valid_until.isoformat(timespec='seconds')} (relógio local, UTC)"
 
 
 def spreadsheet_safe(text):
@@ -1472,7 +1549,7 @@ def cycle_heading(cycle, favorites):
 
 
 def visit_lines(visit):
-    """The two terminal lines of a visit: the data, then where the time went."""
+    """The terminal lines of a visit: the data, where the time went and the analysis after it."""
     observation = visit.observation
     parts = [
         f"CICLO {visit.cycle} | favorito {visit.favorite.position} de {visit.total}, {visit.favorite.name}",
@@ -1497,7 +1574,10 @@ def visit_lines(visit):
             detail += f" ({price.timings.describe()})"
         times.append(detail)
     times.append(f"relógio local {utc_text(observation.captured_at)}")
-    return " | ".join(parts), "  tempos: " + " | ".join(times)
+    lines = (" | ".join(parts), "  tempos: " + " | ".join(times))
+    if visit.decision is not None:
+        lines += (f"  análise CALL/PUT: {visit.decision.describe()}",)
+    return lines
 
 
 def reference_text(reference):

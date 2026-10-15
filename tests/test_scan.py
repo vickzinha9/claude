@@ -20,6 +20,7 @@ import sys
 import tempfile
 import types
 import unittest
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from unittest import mock
@@ -606,6 +607,69 @@ class AnalysisReadinessTest(ScanTestCase):
         )
         self.assertIn(first_gbp["captured_at_utc"][:19], line)  # the time of the reading it shows
         self.assertNotIn("93%", line)
+
+
+class ScanAnalysisTest(ScanTestCase):
+    """The local CALL/PUT analysis inside the scan: fed by usable visits, AGUARDAR without validation."""
+
+    def test_every_visit_is_followed_by_the_analysis_and_waits_without_validation(self):
+        platform = FakePlatform(assets=(EUR, GBP, ("USD/JPY OTC", None, 151.235)))
+        code = self.run_scan("--cycles", "2", "--interval", "3", "--load-timeout", "5", platform=platform)
+        self.assertEqual(code, 0, self.err)
+        rows = self.rows()
+        self.assertEqual({row["analysis_decision"] for row in rows}, {"AGUARDAR"})
+        for row in rows:
+            if row["analysis_ready"] == "sim":
+                self.assertTrue(row["analysis_decision_note"].startswith("dados insuficientes:"), row)
+            else:
+                self.assertEqual(row["analysis_decision_note"], f"sem dados para análise nesta visita: {row['analysis_note']}")
+        self.assertIn("Análise local CALL/PUT, com operações hipotéticas de 300 s, depois de cada visita", self.out)
+        self.assertIn("0 cotações utilizáveis de 0 arquivos anteriores", self.out)
+        self.assertIn("  análise CALL/PUT: AGUARDAR (dados insuficientes:", self.out)
+        self.assertIn("  análise CALL/PUT: AGUARDAR (sem dados para análise nesta visita: falta o payout)", self.out)
+        self.assertIn(
+            "ANÁLISE CALL/PUT (operações de 300 s): 2 ativos com dados, 0 com regra validada em dados separados:"
+            " AGUARDAR, sem decisão CALL ou PUT.",
+            self.out,
+        )
+        self.assertNotRegex(self.out, r"análise CALL/PUT: (CALL|PUT) ")
+
+    def test_the_analysis_starts_from_the_earlier_scan_files(self):
+        platform = FakePlatform(assets=(EUR,))
+        self.assertEqual(self.run_scan("--cycles", "1", platform=platform), 0, self.err)
+        self.assertEqual(self.run_scan("--cycles", "1", "--horizon", "60", platform=platform), 0, self.err)
+        self.assertIn("1 cotações utilizáveis de 1 arquivo anterior", self.out)
+        self.assertIn("operações hipotéticas de 60 s", self.out)
+        history = scan.analysis.load_history(self.runtime)
+        self.assertEqual((history.files, history.usable), (2, 2))  # one usable visit in each file
+
+    def test_a_validated_rule_gives_a_decision_valid_only_moments_after_the_visit(self):
+        from test_analysis import legs
+
+        series = legs(6000)
+        history = scan.analysis.History()
+        last = series.samples[-1]
+        for sample in series.samples[:-1]:
+            history.add(EUR[0], sample)
+        analyzer = scan.analysis.Analyzer(300.0, history)
+        stub = types.SimpleNamespace(analyzer=analyzer)
+        readings = {
+            "asset": observe.FieldReading(EUR[0], "ok: #ativo"),
+            "price": observe.FieldReading(last.quote, "ok: #cotacao", "texto", last.at, 5.0),
+            "payout": observe.FieldReading("92", "ok: #payout"),
+        }
+        observation = observe.Observation(last.at, URL, readings, 10.0)
+        favorite = scan.Favorite(0, EUR[0], EUR[0])
+        visit = scan.Visit(1, favorite, 1, scan.ALREADY, observation, polls=2, recorded_at=last.at + timedelta(seconds=1))
+        decided = scan.with_decision(visit, stub)
+        self.assertIn(decided.decision.action, ("CALL", "PUT"))
+        row = dict(zip(scan.SCAN_COLUMNS, scan.scan_row(decided)))
+        self.assertEqual(row["analysis_decision"], decided.decision.action)
+        self.assertIn("validada:", row["analysis_decision_note"])
+        self.assertIn("válida até", row["analysis_decision_note"])
+        self.assertIn(f"  análise CALL/PUT: {decided.decision.action} (regra tendência de 300 s validada:", "\n".join(scan.visit_lines(decided)))
+        late = replace(visit, recorded_at=last.at + timedelta(seconds=30))  # recorded too late: data not current
+        self.assertEqual(scan.with_decision(late, stub).decision.action, "AGUARDAR")
 
 
 class EligibilityTest(unittest.TestCase):

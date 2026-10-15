@@ -10,6 +10,7 @@ Pesquisa e testes feitos em 14/10/2026, no branch `feature/progression-core`. No
 - **Método escolhido:** um Chromium **visível**, controlado pelo Playwright, com o perfil em `runtime/browser-profile`. Você faz o login nessa janela, e o coletor só lê o que a página mostra. A leitura usa fontes que você escolhe no terminal, com prévia de cada uma (`--configure`, que o `observar_windows.cmd` usa), gravadas em `runtime/observe-selectors.json`: seletores de texto e, para a cotação, também a leitura visual do marcador no gráfico, com OCR local (seção 4).
 - **Varredura dos favoritos:** `python -m pocketautonomo.scan` (`varrer_windows.cmd`) usa o mesmo navegador, o mesmo perfil e as mesmas fontes, e acrescenta uma única ação: o clique num ativo favorito, por um seletor que você confere, para selecioná-lo. Ela nunca clica em BUY, SELL, CALL ou PUT, não mexe no Amount e não envia ordens.
 - O programa não traz nenhum seletor nem marcador pronto. Sem os seus, todo campo fica indisponível, com o motivo. Um seletor que encontra texto ou um OCR que lê um número não validam o campo: só a sua comparação com a tela valida.
+- **Análise local CALL/PUT:** usa só os CSV da varredura, sem acessar a plataforma nem a rede, e responde `AGUARDAR` até uma regra fixa ser validada em dados separados (README, seção da análise; STATUS, item 24).
 
 ## 1. Fontes oficiais consultadas
 

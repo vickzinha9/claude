@@ -210,7 +210,7 @@ class LaunchersTest(unittest.TestCase):
         return [line for line in lines if line and not line.lower().startswith("rem")]
 
     def test_launchers_enter_their_folder_and_never_touch_runtime(self):
-        for name in ("preparar_windows.cmd", "observar_windows.cmd", "varrer_windows.cmd"):
+        for name in ("preparar_windows.cmd", "observar_windows.cmd", "varrer_windows.cmd", "analisar_windows.cmd"):
             with self.subTest(name=name):
                 commands = self.commands(name)
                 self.assertEqual(commands[0], "@echo off")
@@ -237,6 +237,9 @@ class LaunchersTest(unittest.TestCase):
         scan = self.commands("varrer_windows.cmd")
         self.assertIn('".venv\\Scripts\\python.exe" -m pocketautonomo.scan --configure %*', scan)
         self.assertIn('set "CODIGO=%ERRORLEVEL%"', scan)
+        analyze = self.commands("analisar_windows.cmd")
+        self.assertIn('".venv\\Scripts\\python.exe" -m pocketautonomo.analysis %*', analyze)
+        self.assertIn('set "CODIGO=%ERRORLEVEL%"', analyze)
 
 
 
@@ -389,6 +392,48 @@ class ScanLauncherOnWindowsTest(unittest.TestCase):
         self.assertEqual(code, 2, out)
         self.assertIn("varrer_windows.cmd terminou com codigo 2.", out)
         self.assertFalse((self.project / "runtime").exists())
+
+
+@unittest.skipUnless(os.name == "nt", "cmd.exe só existe no Windows")
+class AnalysisLauncherOnWindowsTest(unittest.TestCase):
+    """analisar_windows.cmd with cmd.exe, in a copy of the project: it only reads runtime\\."""
+
+    def test_the_launcher_shows_the_analysis_from_its_own_folder(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        base = Path(directory.name)
+        project = base / "projeto"
+        project.mkdir()
+        shutil.copy(ROOT / "analisar_windows.cmd", project)
+        shutil.copytree(ROOT / "pocketautonomo", project / "pocketautonomo", ignore=shutil.ignore_patterns("__pycache__"))
+        env = {key: value for key, value in os.environ.items() if key.upper() not in ("PYTHONPATH", "PYTHONHOME")}
+        env["POCKETAUTONOMO_SEM_PAUSA"] = "1"
+
+        def run(*args):
+            result = subprocess.run(
+                ["cmd", "/d", "/c", "call", str(project / "analisar_windows.cmd"), *args],
+                cwd=base, env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                encoding="utf-8", errors="replace", timeout=120,
+            )
+            return result.returncode, result.stdout + result.stderr
+
+        code, out = run()
+        self.assertEqual(code, 1, out)
+        self.assertIn("[ERRO] Nao encontrei .venv\\Scripts\\python.exe nesta pasta.", out)
+        venv = subprocess.run(
+            [sys.executable, "-m", "venv", "--without-pip", str(project / ".venv")],
+            capture_output=True, text=True, timeout=300,
+        )
+        self.assertEqual(venv.returncode, 0, venv.stderr)
+        env["PYTHONIOENCODING"] = "utf-8"
+        code, out = run()
+        self.assertEqual(code, 0, out)
+        self.assertIn("AGUARDAR: sem cotações utilizáveis.", out)
+        self.assertIn("analisar_windows.cmd terminou com codigo 0.", out)
+        code, out = run("--horizon", "5")
+        self.assertEqual(code, 2, out)
+        self.assertIn("analisar_windows.cmd terminou com codigo 2.", out)
+        self.assertFalse((project / "runtime").exists())  # nothing was written
 
 
 if __name__ == "__main__":

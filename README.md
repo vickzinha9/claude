@@ -39,7 +39,7 @@ Rode todos os comandos abaixo na raiz do repositório, a pasta `claude`. No Wind
 
 No GitHub, o workflow [`.github/workflows/tests.yml`](.github/workflows/tests.yml) roda essa suíte e os dois exemplos finitos abaixo em Linux e Windows a cada push e pull request. As execuções ficam na [aba Actions](https://github.com/vickzinha9/claude/actions/workflows/tests.yml).
 
-Os testes do coletor em `tests/test_observe.py`, os da leitura visual em `tests/test_quote_reader.py`, os da varredura dos favoritos em `tests/test_scan.py` e os da preparação e dos lançadores em `tests/test_setup_observer.py` usam objetos falsos no lugar do navegador, do OCR, do `pip` e do `venv`, e imagens sintéticas de gráfico. Eles não precisam do Playwright nem do OCR. Os 4 testes de `PreparerOnWindowsTest`, o de `OpenImageOnWindowsTest` e o de `ScanLauncherOnWindowsTest` só rodam no Windows. Dos 5 de `tests/test_observe_playwright.py`, 4 abrem um Chromium de verdade, sem janela, em páginas locais de teste, que não são a Pocket Option; dois deles leem a cotação de um gráfico desenhado em canvas, com o OCR de verdade, e um desses varre uma barra de favoritos de teste, com cliques de verdade. O quinto confere a leitura de aquecimento do OCR de verdade. Sem o Playwright ou o OCR eles aparecem como `skipped`, a menos que a variável `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1` exista: aí falham, como o job de navegador do CI exige.
+Os testes do coletor em `tests/test_observe.py`, os da leitura visual em `tests/test_quote_reader.py`, os da varredura dos favoritos em `tests/test_scan.py` e os da preparação e dos lançadores em `tests/test_setup_observer.py` usam objetos falsos no lugar do navegador, do OCR, do `pip` e do `venv`, e imagens sintéticas de gráfico. Eles não precisam do Playwright nem do OCR. Os 4 testes de `PreparerOnWindowsTest`, o de `OpenImageOnWindowsTest`, o de `ScanLauncherOnWindowsTest` e o de `AnalysisLauncherOnWindowsTest` só rodam no Windows. Os da análise local CALL/PUT, em `tests/test_analysis.py`, usam séries sintéticas e só a biblioteca padrão. Dos 5 de `tests/test_observe_playwright.py`, 4 abrem um Chromium de verdade, sem janela, em páginas locais de teste, que não são a Pocket Option; dois deles leem a cotação de um gráfico desenhado em canvas, com o OCR de verdade, e um desses varre uma barra de favoritos de teste, com cliques de verdade. O quinto confere a leitura de aquecimento do OCR de verdade. Sem o Playwright ou o OCR eles aparecem como `skipped`, a menos que a variável `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1` exista: aí falham, como o job de navegador do CI exige.
 
 ## Simulação local
 
@@ -178,7 +178,7 @@ O CI roda numa máquina virtual do GitHub, com o `python` instalado pelo `setup-
 
 ### Windows: os lançadores
 
-Na raiz do projeto, a pasta `claude`, ficam três arquivos. Abra os dois primeiros nesta ordem, com dois cliques no Explorador de Arquivos ou pelo terminal (`.\preparar_windows.cmd` no PowerShell); o terceiro, `varrer_windows.cmd`, faz a [varredura dos favoritos](#varredura-dos-favoritos). Os três entram sozinhos na pasta onde estão e esperam uma tecla no fim, para a janela não fechar antes de você ler.
+Na raiz do projeto, a pasta `claude`, ficam quatro arquivos. Abra os dois primeiros nesta ordem, com dois cliques no Explorador de Arquivos ou pelo terminal (`.\preparar_windows.cmd` no PowerShell); o terceiro, `varrer_windows.cmd`, faz a [varredura dos favoritos](#varredura-dos-favoritos), e o quarto, `analisar_windows.cmd`, mostra a [análise local CALL/PUT](#análise-local-callput) dos dados da varredura. Os quatro entram sozinhos na pasta onde estão e esperam uma tecla no fim, para a janela não fechar antes de você ler.
 
 1. **`preparar_windows.cmd`** procura um Python 3.11 ou mais novo, de 64 bits, nesta ordem: `py -3.12`, `py -3` e `python`. Um candidato só é aceito se o teste dele terminar com código exatamente 0. Um código negativo, como o `-1610612730` que o `py` devolve quando falta o Python pedido, também é falha: o lançador mostra `py -3.12: nao serve (codigo -1610612730).` e tenta o próximo. Com o Python escolhido, ele roda `python -m pocketautonomo.setup_observer`, que:
    - cria `.venv` ou reutiliza a que já existe, se o Python dela servir;
@@ -190,6 +190,7 @@ Na raiz do projeto, a pasta `claude`, ficam três arquivos. Abra os dois primeir
    Se uma etapa falhar, ele para com `FALHA: ...` ou `[ERRO] ...` e diz o que fazer. Ele nunca apaga `.venv` e não mexe em `runtime/`. Pode rodar de novo quantas vezes quiser.
 2. **`observar_windows.cmd`** usa o Python de `.venv` para rodar `python -m pocketautonomo.observe --configure --count 3`. Argumentos extras vão para o programa, como em `observar_windows.cmd --interval 10`.
 3. **`varrer_windows.cmd`** usa o mesmo Python para rodar `python -m pocketautonomo.scan --configure`, também com os argumentos extras, como em `varrer_windows.cmd --cycles 2`. Ele precisa das fontes gravadas pelo `observar_windows.cmd`.
+4. **`analisar_windows.cmd`** usa o mesmo Python para rodar `python -m pocketautonomo.analysis`, com os argumentos extras, como em `analisar_windows.cmd --horizon 60`. Ele só lê os CSV da varredura em `runtime/`; não abre o navegador e não grava nada.
 
 Se você apertar Ctrl+C, o `cmd` pergunta se quer finalizar o arquivo em lotes ("Deseja finalizar o arquivo em lotes (S/N)?", ou "Terminate batch job (Y/N)?" no Windows em inglês). Responda **N** para a janela continuar aberta com o resumo.
 
@@ -359,6 +360,7 @@ Três trocas seguidas sem confirmação encerram o ciclo, sem clicar nos favorit
 | `--cycles N` | quantos ciclos fazer, cada um passando uma vez por todos os favoritos; sem esta opção, continua até Ctrl+C |
 | `--interval S` | segundos entre o fim de um ciclo e o começo do próximo (padrão 10, mínimo 1). Depois de um ciclo sem nenhuma leitura completa, a espera dobra a cada ciclo assim, até 120 s, e volta ao normal com uma leitura completa |
 | `--load-timeout S` | segundos, depois do clique, para confirmar o ativo e ter dados estáveis (padrão 20, de 5 a 120) |
+| `--horizon S` | segundos das operações hipotéticas da [análise local CALL/PUT](#análise-local-callput) (padrão 300, de 30 a 3600) |
 
 | Arquivo, em `runtime/` | Conteúdo |
 |---|---|
@@ -367,7 +369,7 @@ Três trocas seguidas sem confirmação encerram o ciclo, sem clicar nos favorit
 | `tempos-scan-<data>-<hora>-<sufixo>.csv` | uma linha por leitura da cotação dessa execução, inclusive as tentativas antes de cada clique e as leituras recusadas, com o tempo de cada etapa (veja [Tempos de cada leitura](#tempos-de-cada-leitura-da-cotação)) |
 | `scan.lock` | a trava que impede duas varreduras ao mesmo tempo; pode ficar na pasta depois do fim |
 
-O CSV da varredura tem as 16 colunas do coletor, descritas acima, e mais estas; as 6 últimas são novas:
+O CSV da varredura tem as 16 colunas do coletor, descritas acima, e mais estas; as 8 últimas são novas:
 
 | Coluna | Conteúdo |
 |---|---|
@@ -385,6 +387,7 @@ O CSV da varredura tem as 16 colunas do coletor, descritas acima, e mais estas; 
 | `analysis_ready` | `sim` com dados completos e atuais, utilizáveis para análise; `não` nos outros casos |
 | `analysis_note` | o motivo de `não`, ou o que faz os dados utilizáveis |
 | `data_age_ms` | milissegundos da captura da cotação à gravação da visita |
+| `analysis_decision`, `analysis_decision_note` | o que a [análise local](#análise-local-callput) disse logo depois da visita, `CALL`, `PUT` ou `AGUARDAR`, e o motivo |
 
 | Código | Situação |
 |---|---|
@@ -393,6 +396,36 @@ O CSV da varredura tem as 16 colunas do coletor, descritas acima, e mais estas; 
 | 2 | argumento, link ou configuração inválidos, inclusive sem o seletor do ativo em `observe-selectors.json`, sem o seletor dos favoritos fora do `--configure` e Playwright ou OCR ausentes |
 | 130 | interrompido por Ctrl+C; as linhas já gravadas ficam no CSV |
 
+## Análise local CALL/PUT
+
+`python -m pocketautonomo.analysis` (no Windows, `analisar_windows.cmd`) lê os CSV da varredura em `runtime/` e mostra, para cada ativo, `CALL`, `PUT` ou `AGUARDAR`, com o motivo. A varredura faz a mesma análise depois de cada visita. **Nada disso envia ordens nem usa IA paga:** são regras fixas, calculadas neste computador, só com a biblioteca padrão do Python.
+
+```bat
+analisar_windows.cmd
+analisar_windows.cmd --horizon 60
+varrer_windows.cmd --cycles 2 --horizon 60
+```
+
+Como a decisão é tomada:
+
+1. **Dados:** só as linhas da varredura com `analysis_ready` = `sim`, com o horário de captura da cotação. Linhas de arquivos anteriores a essa coluna são ignoradas e contadas.
+2. **Operações hipotéticas** de `--horizon` segundos (padrão 300, de 30 a 3600): uma decisão no instante t é acerto em CALL quando a primeira cotação a partir de t + horizonte, até 10% do horizonte depois, está acima da cotação em t; em PUT, abaixo; igual é empate, que não conta. As decisões ficam a um horizonte ou mais uma da outra, sem sobreposição.
+3. **Regras fixas**, escritas antes de qualquer dado: seguir o movimento do último horizonte ou dos últimos 3 horizontes (tendência), ou ir contra ele (reversão). Cada regra só usa cotações anteriores à decisão.
+4. **Validação em dados separados:** as decisões são divididas no tempo. Os primeiros 60% (desenvolvimento) só escolhem a regra com mais acertos entre as que têm 50 operações ou mais; os 40% seguintes (avaliação) nunca escolhem nada, só medem a regra escolhida, e nenhuma operação do desenvolvimento usa cotações do período da avaliação. A regra só é validada com **200 operações de avaliação ou mais** e com o limite inferior do intervalo de 99% (Wilson) da taxa de acerto acima de **52,6%**, o ponto de equilíbrio de um payout de 90% (1 / 1,9).
+5. **Decisão:** `CALL` ou `PUT` só com uma regra validada, uma cotação capturada no máximo 5 s antes e payout de 90% ou mais, a condição da primeira entrada. A decisão vale até 5 s depois da captura da cotação: um momento perdido não vira ordem atrasada. Em qualquer outro caso, `AGUARDAR`, com o motivo, como `dados insuficientes: no máximo 15 de 50 operações por regra para escolher uma, e depois 200 de avaliação em dados separados`.
+
+**Nenhuma taxa de acerto aparece antes de 200 operações de avaliação**, e nenhuma confiança é inventada: uma taxa mostrada é sempre a medida na avaliação, com a contagem e o intervalo. A validação é recalculada à medida que os dados chegam; repetir o teste aumenta a chance de uma validação falsa, que o intervalo de 99% e as 200 operações reduzem, sem eliminar. Resultados passados não garantem resultados futuros. Com a progressão de R$ 5, R$ 10, R$ 20 e R$ 40, cada operação mantém o sinal do seu valor esperado: abaixo de 52,6% de acerto, uma regra perde dinheiro em média, com ou sem gale.
+
+**Quantidade de dados:** a varredura lê cada favorito uma vez por ciclo. Com 8 favoritos e ciclos de cerca de 1 min, cada ativo tem no máximo umas 12 decisões por hora com horizonte de 300 s, e só parte delas tem a cotação do resultado e a do movimento anterior. Juntar 50 operações de desenvolvimento e 200 de avaliação de um ativo leva dias de varredura contínua; até lá, a resposta é `AGUARDAR`.
+
+Na varredura, cada visita ganha uma terceira linha, como `  análise CALL/PUT: AGUARDAR (dados insuficientes: ...)`, e cada ciclo termina com `ANÁLISE CALL/PUT (operações de 300 s): N ativos com dados, 0 com regra validada em dados separados: AGUARDAR, sem decisão CALL ou PUT.` O CSV da varredura ganhou no fim as colunas `analysis_decision` (`CALL`, `PUT` ou `AGUARDAR`) e `analysis_decision_note` (o motivo; numa decisão `CALL` ou `PUT`, também até quando ela vale).
+
+| Código de `analisar_windows.cmd` | Situação |
+|---|---|
+| 0 | análise mostrada, inclusive `AGUARDAR` sem dados |
+| 1 | falha ao ler a pasta |
+| 2 | argumento inválido |
+
 ## Situação
 
-O [STATUS.md](STATUS.md) descreve o que já funciona, as decisões em vigor e o que falta: a validação da varredura na plataforma real, a análise CALL/PUT e o executor real.
+O [STATUS.md](STATUS.md) descreve o que já funciona, as decisões em vigor e o que falta: a validação da varredura na plataforma real, dados suficientes para a análise CALL/PUT e o executor real.
