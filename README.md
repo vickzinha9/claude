@@ -39,7 +39,7 @@ Rode todos os comandos abaixo na raiz do repositório, a pasta `claude`. No Wind
 
 No GitHub, o workflow [`.github/workflows/tests.yml`](.github/workflows/tests.yml) roda essa suíte e os dois exemplos finitos abaixo em Linux e Windows a cada push e pull request. As execuções ficam na [aba Actions](https://github.com/vickzinha9/claude/actions/workflows/tests.yml).
 
-Os testes do coletor em `tests/test_observe.py`, os da leitura visual em `tests/test_quote_reader.py` e os da preparação e dos lançadores em `tests/test_setup_observer.py` usam objetos falsos no lugar do navegador, do OCR, do `pip` e do `venv`, e imagens sintéticas de gráfico. Eles não precisam do Playwright nem do OCR. Os 4 testes de `PreparerOnWindowsTest` só rodam no Windows. Os 3 de `tests/test_observe_playwright.py` abrem um Chromium de verdade, sem janela, em páginas locais de teste, que não são a Pocket Option; um deles lê a cotação de um gráfico desenhado em canvas, com o OCR de verdade. Sem o Playwright ou o OCR eles aparecem como `skipped`, a menos que a variável `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1` exista: aí falham, como o job de navegador do CI exige.
+Os testes do coletor em `tests/test_observe.py`, os da leitura visual em `tests/test_quote_reader.py` e os da preparação e dos lançadores em `tests/test_setup_observer.py` usam objetos falsos no lugar do navegador, do OCR, do `pip` e do `venv`, e imagens sintéticas de gráfico. Eles não precisam do Playwright nem do OCR. Os 4 testes de `PreparerOnWindowsTest` e o de `OpenImageOnWindowsTest` só rodam no Windows. Os 3 de `tests/test_observe_playwright.py` abrem um Chromium de verdade, sem janela, em páginas locais de teste, que não são a Pocket Option; um deles lê a cotação de um gráfico desenhado em canvas, com o OCR de verdade. Sem o Playwright ou o OCR eles aparecem como `skipped`, a menos que a variável `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1` exista: aí falham, como o job de navegador do CI exige.
 
 ## Simulação local
 
@@ -213,22 +213,22 @@ Na pergunta da cotação, há três caminhos:
 Na leitura visual:
 
 1. você informa o seletor do elemento do gráfico, o que o DevTools mostra sobre o marcador da cotação;
-2. o programa captura só esse elemento, procura na metade direita da imagem as caixas com texto dentro (as etiquetas de preço) e lê cada uma com o OCR local. A escala de preços, que é texto sem caixa, e as velas, que são caixas sem texto, ficam de fora. O campo Amount e o resto da página nem entram na captura;
-3. ele grava `runtime/cotacao-candidatos.png`, com as caixas numeradas, abre essa imagem e lista cada candidato com a cor, o tamanho e o texto lido;
+2. o programa captura só esse elemento e procura na metade direita da imagem as caixas com texto dentro (as etiquetas de preço). A escala de preços, que é texto sem caixa, e as velas, que são caixas sem texto, ficam de fora. O campo Amount e o resto da página nem entram na captura. O marcador da Pocket Option é **semitransparente**: na sua validação, ele era `#498390` sobre a vela verde e `#3f638e` sobre o fundo. Por isso a caixa cresce a partir de cada região de uma cor só, para os pixels vizinhos de cor parecida, e a etiqueta inteira vira um candidato, com as linhas do texto;
+3. ele grava uma imagem nova, `runtime/cotacao-candidatos-<data>-<hora>-<sufixo>.png`, com as caixas numeradas, abre essa imagem e lista cada candidato com a cor, o tamanho e o texto lido pelo OCR. **Um candidato sem cotação legível não pode ser escolhido**;
 4. você digita o número do marcador que acompanha a cotação atual, e não o da etiqueta do cursor nem o de uma operação aberta;
-5. o programa guarda a cor, o tamanho e a distância desse marcador até a borda direita do elemento. **A altura dele nunca é guardada**: a cada leitura, o marcador é procurado de novo, onde estiver;
-6. ele faz 3 prévias, uma por segundo, com o relógio local e a duração de cada uma, e grava `runtime/cotacao-previa.png` com o marcador lido em destaque. Compare cada prévia com a tela. Enter aceita, `r` repete, `n` escolhe o marcador de novo e `-` desiste. Se a cor do marcador mudar, por exemplo de azul para verde, escolha-o de novo com `n` e digite `+` para somar a cor nova às gravadas.
+5. o programa guarda as cores do preenchimento desse marcador (cada uma que ocupe 5% dele ou mais, até 4), o tamanho e a distância até a borda direita do elemento. **A altura dele nunca é guardada**: a cada leitura, o marcador é procurado de novo, onde estiver;
+6. ele faz 3 prévias, uma por segundo, com o relógio local e o tempo de cada etapa: captura (elemento, tela e decodificação), detecção e OCR. A imagem da última prévia, com o marcador lido em destaque, vai para outro arquivo novo, `runtime/cotacao-previa-<data>-<hora>-<sufixo>.png`. Compare cada prévia com a tela. **A leitura visual só pode ser aceita quando as 3 prévias leram uma cotação.** Com todas lidas, Enter aceita; `r` repete, `n` escolhe o marcador de novo e `-` desiste. Com alguma `INDISPONÍVEL`, Enter repete a prévia. Se a cor do marcador mudar, por exemplo sobre uma vela vermelha, escolha-o de novo com `n` e digite `+` para somar as cores novas às gravadas.
 
 **Regras da leitura visual.** A cotação fica `INDISPONÍVEL (motivo)`, e nunca vira zero, nem é corrigida, nem repete um valor anterior, quando:
 
-- nenhuma caixa tem a cor, o tamanho e o alinhamento do marcador;
+- nenhuma caixa tem a cor, o tamanho e o alinhamento do marcador. Uma cor conta como do marcador até 40 níveis por canal de distância de uma das cores gravadas: a diferença entre as duas cores medidas na sua tela é 32. Sobre uma vela vermelha, a cor calculada para o mesmo marcador fica a 47 de `#3f638e`: se a calibração foi feita só sobre o fundo, a cotação fica indisponível ali até você somar essa cor;
 - mais de uma caixa tem: a leitura é ambígua;
 - a caixa está cortada pela borda da captura, ou o gráfico não cabe inteiro na janela;
 - o texto do marcador não é um número com casas decimais;
 - as duas leituras do OCR, em tons de cinza e em preto e branco, divergem, ou uma delas tem confiança abaixo de 0,90;
 - o marcador tem mais de uma linha com número.
 
-Uma linha sem número, como uma contagem `00:42`, é ignorada. O OCR roda no seu computador: o modelo vem dentro do pacote `rapidocr`, o programa não baixa modelos e desliga a telemetria do `onnxruntime`. A imagem do gráfico fica na memória; só as duas prévias da configuração são gravadas em `runtime/`. Deixe a janela do navegador visível, sem minimizar, e o mouse fora do gráfico.
+Uma linha sem número, como uma contagem `00:42`, é ignorada. O OCR roda no seu computador: o modelo vem dentro do pacote `rapidocr`, o programa não baixa modelos e desliga a telemetria do `onnxruntime`. A imagem do gráfico fica na memória; só as imagens de conferência da configuração são gravadas em `runtime/`, cada uma num arquivo novo. Nenhuma imagem é sobrescrita: no Windows, uma imagem aberta num visualizador não pode ser regravada, e foi isso que encerrou a sua validação com `[Errno 22] Invalid argument`. Se uma imagem não puder ser gravada, o programa mostra o motivo e oferece tentar de novo (Enter), continuar sem a imagem (`c`) ou desistir da leitura visual (`-`); a configuração não termina. Deixe a janela do navegador visível, sem minimizar, e o mouse fora do gráfico.
 
 ### Espera entre leituras
 
@@ -256,11 +256,11 @@ Rode na pasta `claude`, porque a pasta `runtime/` é relativa à pasta atual. Se
 |---|---|
 | `browser-profile/` | perfil do navegador, com a sua sessão; não compartilhe |
 | `observe-selectors.json` | seletores de `asset`, `price` e `payout`, gravados pelo `--configure` ou criados vazios sem ele. Com a leitura visual, `price` fica vazio e `price_ocr` guarda o seletor do gráfico e o marcador |
-| `cotacao-candidatos.png`, `cotacao-previa.png` | imagens do gráfico da configuração visual: os candidatos numerados e a última prévia. Não as compartilhe se mostrarem dados seus |
+| `cotacao-candidatos-<data>-<hora>-<sufixo>.png`, `cotacao-previa-<data>-<hora>-<sufixo>.png` | imagens do gráfico da configuração visual, uma nova a cada captura: os candidatos numerados e a última prévia. As antigas não são apagadas; apague-as você mesmo, depois de fechá-las. Não as compartilhe se mostrarem dados seus |
 | `observe-selectors.invalido-<data>-<hora>-<sufixo>.json` | cópia de um arquivo de seletores inválido, guardada pelo `--configure` antes de gravar o novo |
 | `observations-<data>-<hora>-<sufixo>.csv` | um arquivo novo por execução, com as observações válidas; colunas na tabela abaixo |
 
-As 8 primeiras colunas do CSV são as de antes, na mesma ordem. As 5 últimas são novas. **Todos os horários vêm do relógio deste computador, em UTC; nenhum é o horário do servidor da Pocket Option.**
+As 13 primeiras colunas do CSV são as dos arquivos anteriores, na mesma ordem; as 3 últimas são novas. **Todos os horários vêm do relógio deste computador, em UTC; nenhum é o horário do servidor da Pocket Option.**
 
 | Coluna | Conteúdo |
 |---|---|
@@ -274,6 +274,9 @@ As 8 primeiras colunas do CSV são as de antes, na mesma ordem. As 5 últimas s�
 | `price_captured_at_utc` | relógio local logo antes da captura da cotação |
 | `price_processing_ms` | milissegundos da captura e da leitura da cotação |
 | `observation_ms` | milissegundos da observação inteira |
+| `price_capture_ms` | leitura visual: milissegundos da captura (achar o elemento, tirar a imagem e decodificá-la) |
+| `price_detection_ms` | leitura visual: milissegundos para achar o marcador na imagem |
+| `price_ocr_ms` | leitura visual: milissegundos do OCR, vazio quando o marcador não foi achado |
 
 | Código | Situação |
 |---|---|

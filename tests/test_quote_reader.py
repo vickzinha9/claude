@@ -14,7 +14,19 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # chart_images, next to the tests
 
 import chart_images  # noqa: E402
-from chart_images import CURSOR, GREEN, MARKER, FakeEngine, chart  # noqa: E402
+from chart_images import (  # noqa: E402
+    CANDLE_GREEN,
+    CANDLE_RED,
+    CURSOR,
+    DARK_BACKGROUND,
+    GREEN,
+    LABEL_ALPHA,
+    LABEL_BASE,
+    MARKER,
+    FakeEngine,
+    blend,
+    chart,
+)
 from pocketautonomo import quote_reader as qr  # noqa: E402
 
 WIDTH = 400  # chart() default
@@ -22,7 +34,7 @@ WIDTH = 400  # chart() default
 
 def model_from(image, color=MARKER):
     [box] = [box for box in qr.candidate_boxes(image, 1.0) if box.color == color]
-    return qr.MarkerModel.from_box(box, image.width, 1.0)
+    return qr.MarkerModel.from_box(box, image, 1.0)
 
 
 class CandidateTest(unittest.TestCase):
@@ -48,7 +60,7 @@ class CandidateTest(unittest.TestCase):
         canvas.strokes(800 - 130, 308, 7, chart_images.TEXT, height=20)
         boxes = qr.candidate_boxes(canvas.image(), 2.0)  # 2 device pixels per CSS pixel
         self.assertEqual(len(boxes), 1)
-        model = qr.MarkerModel.from_box(boxes[0], 800, 2.0)
+        model = qr.MarkerModel.from_box(boxes[0], canvas.image(), 2.0)
         self.assertEqual((model.width, model.height, model.right_gap), (69.0, 18.0, 1.0))
 
 
@@ -90,16 +102,16 @@ class LocateTest(unittest.TestCase):
         box, reason = self.locate(green)
         self.assertIsNone(box)
         self.assertIn("não apareceu", reason)
-        both = self.model.with_color(GREEN)
+        both = self.model.with_colors([GREEN])
         self.assertEqual(both.colors, (MARKER, GREEN))
-        self.assertIs(both.with_color((GREEN[0] + 5, GREEN[1], GREEN[2])), both)  # within tolerance
+        self.assertIs(both.with_colors([(GREEN[0] + 5, GREEN[1], GREEN[2])]), both)  # already known
         box, reason = self.locate(green, both)
         self.assertIsNone(reason)
         self.assertEqual(box.color, GREEN)
 
     def test_model_json_round_trip_and_errors(self):
         data = self.model.to_json()
-        self.assertEqual(data, {"colors": ["#2962ff"], "width": 68.0, "height": 18.0, "right_gap": 1.0, "tolerance": 20})
+        self.assertEqual(data, {"colors": ["#2962ff"], "width": 68.0, "height": 18.0, "right_gap": 1.0, "tolerance": 40})
         self.assertEqual(qr.MarkerModel.from_json(data), self.model)
         broken = (
             [],
@@ -143,7 +155,7 @@ class ReadTextTest(unittest.TestCase):
         canvas = chart_images.Canvas()
         canvas.label(WIDTH - 69, 140, MARKER, height=26, lines=2)
         image = canvas.image()
-        model = qr.MarkerModel.from_box(qr.candidate_boxes(image, 1.0)[0], WIDTH, 1.0)
+        model = qr.MarkerModel.from_box(qr.candidate_boxes(image, 1.0)[0], image, 1.0)
         countdown = FakeEngine(answers=[("1.26543", 0.99), ("1.26543", 0.99), ("00:42", 0.99), ("00:42", 0.99)])
         reading = qr.read_quote(image, 1.0, model, countdown)
         self.assertEqual(reading.value, "1.26543")
@@ -159,13 +171,98 @@ class ReadTextTest(unittest.TestCase):
                 canvas = chart_images.Canvas(120, 40, background=(10, 10, 10))
                 canvas.label(10, 10, box_color, text=text_color)
                 image = canvas.image()
-                [box] = qr.find_label_boxes(image, 1.0, 0, 120, lambda c: None if c == (10, 10, 10) else c, lambda k: k)
+                [box] = qr.find_label_boxes(image, 1.0, 0, 120, lambda c: None if c == (10, 10, 10) else c)
                 gray = qr._luminance_free_crop(image, box)
                 values = set(gray.data)
                 self.assertEqual(min(values), 0)  # the strokes are black
                 self.assertEqual(max(values), 255)  # the box is white
                 [line] = qr._text_lines(gray)
                 self.assertEqual(line.data[0], 255)  # padded with white
+
+
+class TranslucentMarkerTest(unittest.TestCase):
+    """The marker of the validation, which is about 80% opaque: its fill depends on what is behind.
+
+    translucent_chart reproduces what was measured on the user's captures (#3f638e over the
+    background, #498390 over a green candle, digits with gaps of 2 px), not the captures.
+    """
+
+    over_background = blend(LABEL_BASE, DARK_BACKGROUND, LABEL_ALPHA)  # #3f638e
+    over_green = blend(LABEL_BASE, CANDLE_GREEN, LABEL_ALPHA)  # #498391
+    over_red = blend(LABEL_BASE, CANDLE_RED, LABEL_ALPHA)  # #6e6b8d
+
+    def calibrate(self, image):
+        [box] = qr.candidate_boxes(image, 1.0)
+        return box, qr.MarkerModel.from_box(box, image, 1.0)
+
+    def test_the_whole_label_is_one_candidate_even_partly_over_a_candle(self):
+        box, model = self.calibrate(chart_images.translucent_chart(label_y=150, candle=(100, 200)))
+        # All 55x23 px, the rows of the text included, although only the margins are over
+        # the background and the digits leave gaps of 2 px.
+        self.assertEqual((box.x0, box.y0, box.x1, box.y1), (WIDTH - 57, 150, WIDTH - 2, 173))
+        self.assertEqual(box.color, self.over_green)
+        # Both fills enter the model: over the candle, most of it, and over the background.
+        self.assertEqual(model.colors, (self.over_green, self.over_background))
+        self.assertEqual((model.width, model.height, model.right_gap, model.tolerance), (55.0, 23.0, 2.0, 40))
+
+    def test_the_marker_is_found_over_the_background_and_over_candles(self):
+        _, model = self.calibrate(chart_images.translucent_chart(label_y=150, candle=(100, 200)))
+        images = {
+            "fundo": chart_images.translucent_chart(label_y=60),
+            "vela verde": chart_images.translucent_chart(label_y=200, candle=(120, 260)),
+            "vela vermelha": chart_images.translucent_chart(label_y=200, candle=(120, 260), candle_color=CANDLE_RED),
+        }
+        for where, image in images.items():
+            with self.subTest(where=where):
+                box, reason = qr.locate_marker(image, 1.0, model)
+                self.assertIsNone(reason)
+                self.assertEqual((box.width, box.height), (55, 23))
+
+    def test_the_fragment_of_the_validation_does_not_find_the_label(self):
+        # What the earlier version learned on the user's capture: the part of the label over
+        # the candle, 46x9 px, #498390, with the tolerance of 20.
+        fragment = qr.MarkerModel(((0x49, 0x83, 0x90),), 46.0, 9.0, 7.0, 20)
+        box, reason = qr.locate_marker(chart_images.translucent_chart(label_y=60), 1.0, fragment)
+        self.assertIsNone(box)
+        self.assertIn("o marcador da cotação não apareceu", reason)
+
+    def test_a_label_fully_over_a_red_candle_needs_its_color(self):
+        # Calibrated over the background only, the model does not cover the fill over a red
+        # candle (47 from #3f638e): the reading is unavailable until that color is added.
+        _, model = self.calibrate(chart_images.translucent_chart(label_y=60))
+        self.assertEqual(model.colors, (self.over_background,))
+        red = chart_images.translucent_chart(label_y=200, candle=(120, 260), candle_color=CANDLE_RED)
+        box, reason = qr.locate_marker(red, 1.0, model)
+        self.assertIsNone(box)
+        self.assertIn("não apareceu", reason)
+        box, reason = qr.locate_marker(red, 1.0, model.with_colors([self.over_red]))
+        self.assertIsNone(reason)
+        self.assertEqual((box.width, box.height), (55, 23))
+
+    def test_a_line_across_the_label_does_not_split_it(self):
+        image = chart_images.translucent_chart(label_y=150, line_through=(11, (255, 255, 255)))
+        box, model = self.calibrate(image)
+        self.assertEqual((box.y0, box.y1, box.width), (150, 173, 55))
+        found, reason = qr.locate_marker(image, 1.0, model)
+        self.assertIsNone(reason)
+        self.assertEqual((found.y0, found.y1), (150, 173))
+
+    def test_the_background_is_the_dark_picture_not_the_most_frequent_color(self):
+        # A background picture has many slightly different colors; in the validation, the
+        # most frequent exact color was a red candle's.
+        canvas = chart_images.Canvas(200, 200)
+        for y in range(200):
+            for x in range(200):
+                canvas.fill(x, y, x + 1, y + 1, (20 + (x * 7 + y * 3) % 12, 23 + (x + y) % 10, 38 + (x * y) % 9))
+        canvas.fill(20, 20, 70, 180, CANDLE_RED)
+        image = canvas.image()
+        counts = {}
+        for y in range(image.height):
+            for color in image.row(y, 0, image.width):
+                counts[color] = counts.get(color, 0) + 1
+        self.assertEqual(max(counts, key=counts.get), CANDLE_RED)  # the old rule's choice
+        background = qr.background_color(image, 0, image.width)
+        self.assertTrue(qr.colors_match(background, DARK_BACKGROUND, 12), background)
 
 
 class PreviewImageTest(unittest.TestCase):

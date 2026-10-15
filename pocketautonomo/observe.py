@@ -32,18 +32,22 @@ marker on a canvas, which has no text. With the visual source, set up by --confi
 program captures only the chart element given by a selector you checked, finds the
 current-quote marker in that image with quote_reader and reads it with the local OCR of
 quote_ocr. The image stays in memory; only the configuration's previews are written to
-runtime/. A reading that is missing, ambiguous or does not look like a quote is
-unavailable, with the reason: no zero, no correction, no earlier value. To check whether
-the quote also exists as text, --configure can search the page for visible elements whose
-text looks like a quote.
+runtime/, each to a new file, so that no image still open in a viewer is overwritten. A
+reading that is missing, ambiguous or does not look like a quote is unavailable, with the
+reason: no zero, no correction, no earlier value. A candidate without a valid reading
+cannot be chosen, and the visual reading is accepted only when all its previews read a
+quote. To check whether the quote also exists as text, --configure can search the page for
+visible elements whose text looks like a quote.
 
 Each observation carries its capture time, taken from this computer's clock in UTC right
 before the reading; no time is read from the platform, and none of these times is the
 server's. The quote also records its source, the moment of its capture and how long the
-capture and the reading took, and each observation is marked complete, when the asset,
-the quote and the payout are all available, or partial. Observations with at least one
-available field are written, line by line, to a new CSV file in runtime/; the others are
-only shown in the terminal. The query and the fragment of a URL are never shown or written.
+capture and the reading took, split, for the visual reading, into the capture (element,
+screenshot and decoding), the detection of the marker and the OCR. Each observation is
+marked complete, when the asset, the quote and the payout are all available, or partial.
+Observations with at least one available field are written, line by line, to a new CSV
+file in runtime/; the others are only shown in the terminal. The query and the fragment
+of a URL are never shown or written.
 Between two observations, the program waits with Playwright's page.wait_for_timeout, not
 time.sleep, so that Playwright keeps processing the browser's events; each value is still
 read at one moment and can change right after.
@@ -102,6 +106,10 @@ CSV_COLUMNS = (
     "price_captured_at_utc",  # this computer's clock right before the quote was captured
     "price_processing_ms",  # capture and reading of the quote, in milliseconds
     "observation_ms",  # the whole observation, in milliseconds
+    # The visual reading of the quote, step by step, in milliseconds; empty for text.
+    "price_capture_ms",  # finding the chart element, the screenshot and decoding it
+    "price_detection_ms",  # finding the marker in the image
+    "price_ocr_ms",  # preparing the marker's text and the OCR readings
 )
 OK = "ok"
 UNAVAILABLE = "indisponível"
@@ -118,8 +126,11 @@ MAX_ASSET_LENGTH = 60
 PREVIEW_READINGS = 3
 SEARCH_RESULTS = 15
 SEARCH_SCAN = 60
-CANDIDATES_IMAGE = "cotacao-candidatos.png"
-PREVIEW_IMAGE = "cotacao-previa.png"
+# Each capture of the configuration gets its own image, never overwritten: on Windows, an
+# image still open in a viewer cannot be truncated ([Errno 22] Invalid argument).
+CANDIDATES_PREFIX = "cotacao-candidatos"
+PREVIEW_PREFIX = "cotacao-previa"
+PREVIEW_GIVE_UP = "desistir"
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -202,7 +213,8 @@ class FieldReading:
 
     source is texto or ocr; captured_at is this computer's clock, in UTC, right before the
     capture; processing_ms is how long the capture and the reading took. All three are
-    None when there was nothing to read.
+    None when there was nothing to read. timings, for the visual reading only, splits that
+    time into capture, detection and OCR.
     """
 
     value: object
@@ -210,6 +222,7 @@ class FieldReading:
     source: object = None
     captured_at: object = None
     processing_ms: object = None
+    timings: object = None  # QuoteTimings
 
     @property
     def available(self):
@@ -248,10 +261,47 @@ class Capture:
     image: object = None  # quote_reader.RgbImage, in device pixels
     css_width: float = 0.0  # the element's width in CSS pixels
     clipped: bool = False  # part of the element was outside the window: no image
+    # Milliseconds of each step, when the session measured them.
+    element_ms: object = None  # finding the element: count, visibility and position
+    screenshot_ms: object = None  # page.screenshot
+    decode_ms: object = None  # decoding the PNG
 
     @property
     def scale(self):
         return self.image.width / self.css_width
+
+
+@dataclass(frozen=True)
+class QuoteTimings:
+    """Milliseconds of each step of one visual reading; None for a step that did not run."""
+
+    capture_ms: object = None
+    detection_ms: object = None
+    ocr_ms: object = None
+    element_ms: object = None
+    screenshot_ms: object = None
+    decode_ms: object = None
+
+    def describe(self):
+        parts = []
+        if self.capture_ms is not None:
+            text = f"captura {self.capture_ms:.0f} ms"
+            steps = [
+                f"{name} {value:.0f}"
+                for name, value in (
+                    ("elemento", self.element_ms),
+                    ("tela", self.screenshot_ms),
+                    ("decodificação", self.decode_ms),
+                )
+                if value is not None
+            ]
+            if steps:
+                text += f" ({', '.join(steps)})"
+            parts.append(text)
+        for name, value in (("detecção", self.detection_ms), ("OCR", self.ocr_ms)):
+            if value is not None:
+                parts.append(f"{name} {value:.0f} ms")
+        return ", ".join(parts)
 
 
 @dataclass(frozen=True)
@@ -689,13 +739,21 @@ def read_field(session, field, source, ctx):
         return unavailable(f"sem seletor em {SELECTORS_FILE_NAME}")
     start = ctx.monotonic()
     captured_at = ctx.now()
+    timings = None
     if isinstance(source, QuoteOcrSource):
-        reading = read_quote_visually(session, source, ctx)[0]
+        visual = read_quote_visually(session, source, ctx)
+        reading, timings = visual.reading, visual.timings
         kind = OCR_SOURCE
     else:
         reading = read_text_field(session, field, source)
         kind = TEXT_SOURCE
-    return replace(reading, source=kind, captured_at=captured_at, processing_ms=ctx.elapsed_ms(start))
+    return replace(
+        reading,
+        source=kind,
+        captured_at=captured_at,
+        processing_ms=ctx.elapsed_ms(start),
+        timings=timings,
+    )
 
 
 def read_text_field(session, field, selector):
@@ -740,18 +798,46 @@ def capture_chart(session, chart):
     return capture, None
 
 
+@dataclass(frozen=True)
+class VisualReading:
+    """One visual reading of the quote: the field, the capture, the marker and the times."""
+
+    reading: FieldReading
+    capture: object = None  # Capture, when the chart was captured
+    box: object = None  # quote_reader.Box of the marker, when it was found
+    timings: object = None  # QuoteTimings
+
+
 def read_quote_visually(session, source, ctx):
-    """(FieldReading, Capture or None, Box or None) of the quote read from the chart."""
+    """The VisualReading of the quote, with capture, detection and OCR timed apart."""
+    start = ctx.monotonic()
     capture, problem = capture_chart(session, source.chart)
+    capture_ms = ctx.elapsed_ms(start)
+    steps = {}
+    if capture is not None:
+        steps = {
+            "element_ms": capture.element_ms,
+            "screenshot_ms": capture.screenshot_ms,
+            "decode_ms": capture.decode_ms,
+        }
     if capture is None:
-        return unavailable(problem), None, None
-    reading = quote_reader.read_quote(capture.image, capture.scale, source.marker, ctx.engine.get())
-    if reading.value is None:
-        return unavailable(reading.reason), capture, reading.box
-    value, problem = parse_price(reading.value)
+        return VisualReading(unavailable(problem), None, None, QuoteTimings(capture_ms, **steps))
+    start = ctx.monotonic()
+    box, reason = quote_reader.locate_marker(capture.image, capture.scale, source.marker)
+    detection_ms = ctx.elapsed_ms(start)
+    if box is None:
+        timings = QuoteTimings(capture_ms, detection_ms, **steps)
+        return VisualReading(unavailable(reason), capture, None, timings)
+    start = ctx.monotonic()
+    found = quote_reader.read_marker_text(capture.image, box, ctx.engine.get())
+    timings = QuoteTimings(capture_ms, detection_ms, ctx.elapsed_ms(start), **steps)
+    if found.value is None:
+        return VisualReading(unavailable(found.reason), capture, box, timings)
+    value, problem = parse_price(found.value)
     if problem is not None:
-        return unavailable(problem), capture, reading.box
-    return FieldReading(value, f"{OK}: {OCR_SOURCE} {source.chart}"), capture, reading.box
+        return VisualReading(unavailable(problem), capture, box, timings)
+    reading = FieldReading(value, f"{OK}: {OCR_SOURCE} {source.chart}")
+    return VisualReading(reading, capture, box, timings)
 
 
 def run_observations(session, selectors, args, ctx, progress):
@@ -816,6 +902,11 @@ def csv_row(observation):
         "" if price.processing_ms is None else f"{price.processing_ms:.1f}",
         "" if observation.duration_ms is None else f"{observation.duration_ms:.1f}",
     ]
+    timings = price.timings or QuoteTimings()
+    row += [
+        "" if value is None else f"{value:.1f}"
+        for value in (timings.capture_ms, timings.detection_ms, timings.ocr_ms)
+    ]
     return row
 
 
@@ -846,8 +937,13 @@ def observation_line(number, observation):
     for field in FIELDS:
         reading = observation.readings[field]
         text = f"{LABELS[field]} {shown_value(field, reading)}"
-        if field == "price" and reading.available and reading.source:
-            text += f" ({SOURCE_LABELS[reading.source]}, {reading.processing_ms:.0f} ms)"
+        # The time of a visual reading is shown even when it failed, to find what is slow.
+        timed = reading.available or reading.timings is not None
+        if field == "price" and reading.source and reading.processing_ms is not None and timed:
+            detail = f"{SOURCE_LABELS[reading.source]}, {reading.processing_ms:.0f} ms"
+            if reading.timings is not None:
+                detail += f": {reading.timings.describe()}"
+            text += f" ({detail})"
         parts.append(text)
     parts.append("gravada no CSV" if observation.valid else "não gravada: nenhum campo disponível")
     return " | ".join(parts)
@@ -960,7 +1056,19 @@ def configure_selectors(session, path, read_line, ctx):
         selectors[field] = ask_source(session, field, selectors[field], read_line, ctx)
     if not any(selectors.values()):
         raise ConfigError(f"nenhum seletor foi escolhido, e {path} não foi alterado")
-    save_selectors(path, selectors, invalid)
+    while True:
+        try:
+            save_selectors(path, selectors, invalid)
+            break
+        except OSError as error:
+            warn(f"AVISO: não foi possível gravar {path} ({describe(error)}).")
+            answer = ask(
+                read_line,
+                "Enter tenta gravar de novo; - desiste sem gravar: ",
+                CONFIGURATION_MOMENT,
+            ).strip()
+            if answer == "-":
+                raise ObserverStopped(f"os seletores não foram gravados em {path}") from None
     say(f"Seletores gravados em {path}.")
     return selectors
 
@@ -1019,10 +1127,12 @@ QUOTE_PROMPT = (
 VISUAL_INTRO = (
     "O programa captura só o elemento do gráfico, procura na metade direita dele as caixas"
     " com texto, como o marcador da cotação, numera essas caixas numa imagem e lê cada uma"
-    " com o OCR local. Você escolhe a que acompanha a cotação atual. O programa guarda a cor,"
-    " o tamanho e o alinhamento à borda direita desse marcador, nunca a altura dele: a cada"
-    " leitura, o marcador é procurado de novo. Deixe a janela do navegador visível e o mouse"
-    " fora do gráfico, para que a etiqueta do cursor não apareça."
+    " com o OCR local. Você escolhe a que acompanha a cotação atual; um candidato sem cotação"
+    " legível não pode ser escolhido. O programa guarda as cores do preenchimento, o tamanho"
+    " e o alinhamento à borda direita desse marcador, nunca a altura dele: a cada leitura, o"
+    " marcador é procurado de novo. Cada captura gera uma imagem nova em runtime/, sem"
+    " sobrescrever as anteriores. Deixe a janela do navegador visível e o mouse fora do"
+    " gráfico, para que a etiqueta do cursor não apareça."
 )
 COMPARE_QUOTE = (
     "Compare cada prévia com a cotação que a tela mostrava naquele instante. A leitura visual"
@@ -1154,9 +1264,13 @@ def configure_visual_source(session, previous, read_line, ctx):
         boxes = quote_reader.candidate_boxes(capture.image, capture.scale)
         engine = ctx.engine.get()
         readings = [quote_reader.read_marker_text(capture.image, box, engine) for box in boxes]
-        path = write_preview(ctx, CANDIDATES_IMAGE, capture.image, list(enumerate(boxes, 1)))
-        say(f"  Imagem da captura do gráfico, com os candidatos numerados: {path}")
-        ctx.show_image(path)
+        shown = save_preview(
+            ctx, CANDIDATES_PREFIX, capture.image, list(enumerate(boxes, 1)), read_line,
+            "Imagem da captura do gráfico, com os candidatos numerados",
+        )
+        if shown == PREVIEW_GIVE_UP:
+            say("Leitura visual não configurada.")
+            return None
         if not boxes:
             say(
                 "  Nenhuma caixa com texto apareceu na metade direita do gráfico. Confira, na"
@@ -1175,7 +1289,10 @@ def configure_visual_source(session, previous, read_line, ctx):
             continue
         say("  Candidatos, de cima para baixo; compare com a tela e com a imagem:")
         for number, (box, reading) in enumerate(zip(boxes, readings), 1):
-            text = reading.value if reading.value else f"nenhuma cotação legível ({reading.reason})"
+            if reading.value:
+                text = reading.value
+            else:
+                text = f"nenhuma cotação legível ({reading.reason}); não pode ser escolhido"
             gap = (capture.image.width - box.x1) / capture.scale
             cut = "; cortado pela borda" if box.cut else ""
             say(
@@ -1197,22 +1314,33 @@ def configure_visual_source(session, previous, read_line, ctx):
         if not (answer.isdigit() and 1 <= int(answer) <= len(boxes)):
             say(f"  {preview(answer)} não é um dos números da lista.")
             continue
-        box = boxes[int(answer) - 1]
+        number = int(answer)
+        box, reading = boxes[number - 1], readings[number - 1]
         if box.cut:
             say("  Esse candidato está cortado pela borda da captura; capture de novo com ele inteiro.")
             continue
-        marker = quote_reader.MarkerModel.from_box(box, capture.image.width, capture.scale)
+        if reading.value is None or parse_price(reading.value)[1] is not None:
+            say(
+                f"  O candidato {number} não tem uma cotação legível"
+                f" ({reading.reason or parse_price(reading.value)[1]}). Uma calibração precisa"
+                " de uma leitura válida do marcador: escolha outro número, ou pressione Enter"
+                " para capturar de novo."
+            )
+            continue
+        marker = quote_reader.MarkerModel.from_box(box, capture.image, capture.scale)
         if previous is not None and previous.chart == chart:
-            known = previous.marker.with_color(box.color)
-            if known is not previous.marker:
+            # The colors already saved come first; the size and the gap are the new box's.
+            kept = replace(marker, colors=previous.marker.colors)
+            merged = kept.with_colors(marker.colors)
+            if merged is not kept:  # the new box has a color that the saved ones do not cover
                 add = ask(
                     read_line,
-                    "Enter usa só a cor deste marcador; + soma a cor dele às do marcador já"
-                    " gravado, para quando a cor muda: ",
+                    "Enter usa só as cores deste marcador; + soma a elas as cores do marcador"
+                    " já gravado, para quando a cor muda: ",
                     CONFIGURATION_MOMENT,
                 ).strip()
                 if add == "+":
-                    marker = known
+                    marker = merged
         source = QuoteOcrSource(chart, marker)
         outcome = review_visual_source(session, source, read_line, ctx)
         if outcome == MARKER_AGAIN:
@@ -1222,40 +1350,59 @@ def configure_visual_source(session, previous, read_line, ctx):
 
 
 def review_visual_source(session, source, read_line, ctx):
-    """Preview source a few times: the source when accepted, None to give up, or MARKER_AGAIN."""
+    """Preview source a few times: the source when accepted, None to give up, or MARKER_AGAIN.
+
+    The visual reading can be accepted only when every preview read a quote: a calibration
+    whose previews were unavailable is never accepted.
+    """
     while True:
         say(
             f"  Prévia da leitura visual: {PREVIEW_READINGS} leituras, uma por segundo. Olhe a"
             " cotação na tela a cada uma."
         )
-        last = None
+        last, valid = None, 0
         for number in range(1, PREVIEW_READINGS + 1):
             if number > 1:
                 session.wait(1.0)
             if session.is_closed():
                 raise ObserverStopped(WINDOW_CLOSED_IN_CONFIGURATION)
             start, moment = ctx.monotonic(), ctx.now()
-            reading, capture, box = read_quote_visually(session, source, ctx)
+            visual = read_quote_visually(session, source, ctx)
             say(
                 f"  Prévia {number}, relógio local {utc_text(moment)}:"
-                f" {shown_value('price', reading)} (em {ctx.elapsed_ms(start):.0f} ms)"
+                f" {shown_value('price', visual.reading)} (em {ctx.elapsed_ms(start):.0f} ms:"
+                f" {visual.timings.describe()})"
             )
-            last = capture, box
-        capture, box = last
-        if capture is not None:
-            path = write_preview(ctx, PREVIEW_IMAGE, capture.image, [(1, box)] if box else [])
-            say(f"  Imagem da última prévia, com o marcador lido destacado como 1: {path}")
-            ctx.show_image(path)
-        say(COMPARE_QUOTE)
-        answer = ask(
-            read_line,
-            "Enter aceita a leitura visual; r repete a prévia; n escolhe o marcador de novo;"
-            " - desiste: ",
-            CONFIGURATION_MOMENT,
-        ).strip().lower()
-        if not answer:
+            valid += visual.reading.available
+            last = visual
+        if last.capture is not None:
+            boxes = [(1, last.box)] if last.box else []
+            shown = save_preview(
+                ctx, PREVIEW_PREFIX, last.capture.image, boxes, read_line,
+                "Imagem da última prévia, com o marcador lido destacado como 1",
+            )
+            if shown == PREVIEW_GIVE_UP:
+                say("Leitura visual não configurada.")
+                return None
+        if valid == PREVIEW_READINGS:
+            say(COMPARE_QUOTE)
+            prompt = (
+                "Enter aceita a leitura visual; r repete a prévia; n escolhe o marcador de"
+                " novo; - desiste: "
+            )
+        else:
+            say(
+                f"  {PREVIEW_READINGS - valid} de {PREVIEW_READINGS} prévias ficaram"
+                " INDISPONÍVEIS: a leitura visual não pode ser aceita assim. Tire o mouse do"
+                " gráfico e repita, ou escolha o marcador de novo. O marcador é"
+                " semitransparente: se ele estava sobre uma vela de outra cor, escolha-o de novo"
+                " com n e some a cor nova com +."
+            )
+            prompt = "Enter ou r repete a prévia; n escolhe o marcador de novo; - desiste: "
+        answer = ask(read_line, prompt, CONFIGURATION_MOMENT).strip().lower()
+        if not answer and valid == PREVIEW_READINGS:
             return source
-        if answer == "r":
+        if answer in ("", "r"):
             continue
         if answer == "n":
             return MARKER_AGAIN
@@ -1265,12 +1412,60 @@ def review_visual_source(session, source, read_line, ctx):
         say(f"  Resposta não reconhecida: {preview(answer)}.")
 
 
-def write_preview(ctx, name, image, labelled_boxes):
-    """Write a preview PNG in runtime/; the capture stays out of every other file."""
-    ctx.runtime_dir.mkdir(parents=True, exist_ok=True)
-    path = ctx.runtime_dir / name
-    path.write_bytes(quote_reader.annotated_png(image, labelled_boxes))
+def new_preview_path(runtime_dir, prefix):
+    """A new image path with a unique name in runtime_dir, which is created if needed."""
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    while True:
+        name = f"{prefix}-{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:8]}.png"
+        path = runtime_dir / name
+        if not path.exists():
+            return path
+
+
+def write_preview(ctx, prefix, image, labelled_boxes):
+    """Write a preview PNG to a new file in runtime/ and return its path.
+
+    Each image gets a new name and is created with "x", so no file is ever overwritten: an
+    earlier image may still be open in a viewer, and on Windows a file open there cannot be
+    truncated. The capture stays out of every other file.
+    """
+    data = quote_reader.annotated_png(image, labelled_boxes)
+    path = new_preview_path(ctx.runtime_dir, prefix)
+    with open(path, "xb") as file:
+        file.write(data)
     return path
+
+
+def save_preview(ctx, prefix, image, labelled_boxes, read_line, title):
+    """Write and open a preview image; PREVIEW_GIVE_UP, None without the image, or the path.
+
+    A failure to write it is reported with its cause and lets you try again, go on without
+    the image, or give up the visual reading; the configuration goes on.
+    """
+    while True:
+        try:
+            path = write_preview(ctx, prefix, image, labelled_boxes)
+        except OSError as error:
+            warn(
+                f"AVISO: não foi possível gravar a imagem de conferência em {ctx.runtime_dir}"
+                f" ({describe(error)}). Confira se há espaço em disco e se a pasta pode ser"
+                " gravada; as imagens anteriores não foram tocadas."
+            )
+            answer = ask(
+                read_line,
+                "Enter tenta gravar de novo; c continua sem a imagem; - desiste da leitura"
+                " visual: ",
+                CONFIGURATION_MOMENT,
+            ).strip().lower()
+            if answer == "c":
+                say("  Continuando sem a imagem: confira os candidatos e as prévias pelo terminal.")
+                return None
+            if answer == "-":
+                return PREVIEW_GIVE_UP
+            continue
+        say(f"  {title}: {path}")
+        ctx.show_image(path)
+        return path
 
 
 def preview_reading(session, field, selector, ctx):
@@ -1489,6 +1684,7 @@ class PlaywrightSession:
         page.screenshot with a clip neither scrolls nor touches the page, unlike an element
         screenshot, and caret="initial" leaves the text caret as it is.
         """
+        start = time.perf_counter()
         try:
             locator = self._page.locator(selector)
             matches = locator.count()
@@ -1500,19 +1696,27 @@ class PlaywrightSession:
             if box is None or box["width"] < 1 or box["height"] < 1:
                 return Capture(1)
             clip = {key: box[key] for key in ("x", "y", "width", "height")}
+            located = time.perf_counter()
             png = self._page.screenshot(clip=clip, caret="initial", timeout=timeout_ms)
+            shot = time.perf_counter()
         except self._error_type as error:
             raise ReadError(describe(error)) from error
         try:
             image = decode_png(png)
         except OcrUnavailable as error:
             raise ConfigError(str(error)) from error
+        decoded = time.perf_counter()
+        steps = {
+            "element_ms": round((located - start) * 1000, 1),
+            "screenshot_ms": round((shot - located) * 1000, 1),
+            "decode_ms": round((decoded - shot) * 1000, 1),
+        }
         # The screenshot keeps only what is inside the window. A cropped capture has
         # different scales across and down, and its right edge is not the element's.
         across, down = image.width / box["width"], image.height / box["height"]
         if abs(across - down) > 0.02 * max(across, down):
-            return Capture(1, True, None, box["width"], clipped=True)
-        return Capture(1, True, image, box["width"])
+            return Capture(1, True, None, box["width"], clipped=True, **steps)
+        return Capture(1, True, image, box["width"], **steps)
 
     def find_quote_texts(self, limit):
         """TextMatch of up to limit visible elements whose whole text looks like a quote."""

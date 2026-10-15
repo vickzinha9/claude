@@ -1,6 +1,6 @@
 # Status
 
-Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O estado do coordenador, inclusive o estado de envio de cada reserva, pode ser salvo em SQLite, e só um coordenador por vez opera cada banco; sem banco, tudo fica em memória. O executor envia a ordem de uma reserva e consulta o resultado da ordem pendente, testado com corretoras falsas e com a corretora simulada em memória (item 14). O programa `python3 -m pocketautonomo.local_simulation` roda ciclos completos com essa corretora simulada (item 15). O GitHub Actions roda a suíte e os exemplos finitos em Linux e Windows (item 16). O coletor `python -m pocketautonomo.observe` lê ativo, preço e payout da tela da Pocket Option, somente para leitura, e foi testado só com dados simulados e numa página local de teste (item 17). No Windows, `preparar_windows.cmd` instala o coletor, e `observar_windows.cmd` configura os seletores pelo terminal e faz três observações (item 18). A cotação do ativo, que a Pocket Option desenha em canvas, pode ser lida pela imagem do gráfico, com OCR local (item 20). **Ainda não existe conexão comprovada com a corretora:** nenhuma ordem real é enviada nem consultada, e nenhum dado foi lido da plataforma real.
+Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O estado do coordenador, inclusive o estado de envio de cada reserva, pode ser salvo em SQLite, e só um coordenador por vez opera cada banco; sem banco, tudo fica em memória. O executor envia a ordem de uma reserva e consulta o resultado da ordem pendente, testado com corretoras falsas e com a corretora simulada em memória (item 14). O programa `python3 -m pocketautonomo.local_simulation` roda ciclos completos com essa corretora simulada (item 15). O GitHub Actions roda a suíte e os exemplos finitos em Linux e Windows (item 16). O coletor `python -m pocketautonomo.observe` lê ativo, preço e payout da tela da Pocket Option, somente para leitura, e foi testado só com dados simulados e numa página local de teste (item 17). No Windows, `preparar_windows.cmd` instala o coletor, e `observar_windows.cmd` configura os seletores pelo terminal e faz três observações (item 18). A cotação do ativo, que a Pocket Option desenha em canvas, pode ser lida pela imagem do gráfico, com OCR local (item 20); a sua segunda validação no Windows não leu a cotação, e o item 21 corrige as duas causas. **Ainda não existe conexão comprovada com a corretora:** nenhuma ordem real é enviada nem consultada, e nenhum dado foi lido da plataforma real.
 
 ## Concluído
 
@@ -272,17 +272,55 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
       - Os 3 testes com Chromium e OCR de verdade passaram em 12,7 s, inclusive a leitura da cotação no gráfico de teste em canvas. `runtime/` continuou igual.
       - `tests`: 217 testes. No Linux, 210 passaram e 7 foram pulados. No Windows, 214 passaram, inclusive os 4 do `PreparerOnWindowsTest`, e 3 foram pulados, porque o job não instala o Playwright.
     - **Plataforma real: não executado.** A leitura visual ainda não rodou na sua tela.
+    - O item 21 trocou os nomes fixos das imagens, a detecção do marcador e as regras para aceitar a configuração visual.
+21. **Segunda validação no Windows: `[Errno 22]` e calibração do marcador.** `pocketautonomo/observe.py` e `pocketautonomo/quote_reader.py`, com testes em `tests/test_observe.py`, `tests/test_quote_reader.py` e `tests/test_observe_playwright.py`, e as imagens sintéticas em `tests/chart_images.py`.
+    - **Resultado da sua segunda validação**, informado por você em 15/10/2026, com as imagens `cotacao-candidatos.png` e `cotacao-previa.png`, que ficaram fora do Git:
+      - a calibração escolheu uma caixa `#498390` de 46x9 px, sem texto legível;
+      - as 3 prévias não acharam o marcador, embora a `cotacao-previa.png` mostre `1.42045`, e levaram 3486, 2059 e 3023 ms;
+      - o `n`, para escolher o marcador de novo, parou com `PARADA: [Errno 22] Invalid argument: 'runtime\\cotacao-candidatos.png'`. O navegador fechou, e o código foi 1.
+    - **Causa do `[Errno 22]`:** `write_preview` regravava nomes fixos com `path.write_bytes`, e a imagem anterior continuava aberta no visualizador, aberto pelo programa com `os.startfile`.
+      - Um visualizador mapeia na memória a imagem que mostra, e o Windows recusa truncar um arquivo mapeado (`ERROR_USER_MAPPED_FILE`). Esse erro não tem errno próprio e aparece como `[Errno 22] Invalid argument`; um arquivo travado por outro programa daria `[Errno 13] Permission denied`.
+      - O teste `OpenImageOnWindowsTest` reproduz o erro no Windows com `mmap` no lugar do visualizador; o app Fotos não foi testado.
+    - **Correção do `[Errno 22]`:**
+      - cada captura grava um arquivo novo em `runtime/`, `cotacao-candidatos-<data>-<hora>-<sufixo>.png` ou `cotacao-previa-<data>-<hora>-<sufixo>.png`, criado com `open(caminho, "xb")`, que nunca sobrescreve um arquivo. Nenhuma imagem é apagada, nem as de nome fixo da versão anterior;
+      - uma falha de gravação mostra `AVISO: não foi possível gravar a imagem de conferência em <runtime> (<motivo>)` e pergunta o que fazer: Enter tenta de novo, `c` continua sem a imagem e `-` desiste da leitura visual. A configuração continua, e o navegador não fecha;
+      - a gravação final do `observe-selectors.json` também pode ser repetida depois de uma falha, ou abandonada com `-`, sem gravar.
+    - **Causa da calibração errada**, medida nas suas duas imagens, na escala 1 (554x871 px):
+      - a etiqueta é semitransparente: `#3f638e` sobre o fundo escuro (`#141726`) e `#498390` sobre a vela verde (`#45b734`). As duas cores correspondem a uma etiqueta com opacidade de cerca de 80%, uma estimativa;
+      - a detecção juntava só pixels de uma cor exata e pegou a parte da etiqueta sobre a vela, com 46 px de largura;
+      - ela exigia, em cada linha, 25% da largura coberta por trechos de 3 px ou mais. Nas linhas do texto, os algarismos cortam o preenchimento em trechos menores, e a caixa ficou com as 9 linhas acima dos algarismos;
+      - o modelo guardou `#498390`, 46x9 px, com tolerância 20. Na prévia, a etiqueta estava sobre o fundo, a 32 dessa cor, e tinha 55x23 px: nenhuma caixa serviu;
+      - nas duas imagens, a cor exata mais frequente da metade direita, tomada como fundo, era a de uma vela vermelha (`#ff3e1f`), porque o fundo tem muitos tons próximos.
+    - **Correção da calibração** (`quote_reader.py`):
+      - cada região de uma cor exata é só uma semente. A caixa cresce dela para os pixels vizinhos a até 40 por canal da cor da semente (`GROW_TOLERANCE`), fora do fundo;
+      - uma linha entra na caixa quando os pixels dela chegam aos dois lados da etiqueta, com folga de 15% da largura (`EDGE_FRACTION`), inclusive nas linhas do texto. Uma linha de outra cor que atravesse a etiqueta, com até 2 px de altura (`ROW_GAP`), não a divide;
+      - o fundo é a média da faixa de cores mais frequente, em faixas de 16 níveis por canal. Nas suas imagens, deu `#222534`;
+      - o modelo guarda até 4 cores do preenchimento, cada uma com 5% dele ou mais, e a tolerância passou de 20 para 40 (`COLOR_TOLERANCE`). Na leitura, um pixel a até 40 de qualquer cor gravada conta como do marcador, então uma etiqueta metade sobre a vela e metade sobre o fundo continua uma caixa só;
+      - `MarkerModel.from_box` recebe a imagem, para medir as cores, e `with_colors` substituiu `with_color`. Com `+`, as cores já gravadas vêm primeiro, e a caixa nova dá o tamanho e a distância à borda;
+      - o formato do `observe-selectors.json` não mudou. Um marcador já gravado mantém a tolerância dele; uma calibração nova grava 40.
+    - **Resultado nas suas imagens**, fora da suíte, com o OCR real:
+      - na `cotacao-previa.png`, a detecção nova achou a etiqueta `#3f638e` de 55x23 px, e o OCR leu `1.42045`, o valor que a imagem mostra. A detecção anterior, nessa imagem, achava 53x21 px e lia o mesmo valor;
+      - na `cotacao-candidatos.png`, a caixa tem as 23 linhas da etiqueta, mas só 48 px de largura, porque as marcas rosas da configuração cobrem as bordas na metade de cima. As marcas também atravessam o texto, que ficou sem leitura; essa imagem não serviu para medir o OCR;
+      - o modelo calibrado em cada imagem acha a etiqueta na outra, e o modelo do fragmento (46x9 px, tolerância 20) continua sem achar a etiqueta da prévia.
+    - **Calibração sem leitura válida:** um candidato sem cotação legível aparece com "não pode ser escolhido" e é recusado com `O candidato N não tem uma cotação legível`. As prévias só podem ser aceitas quando as 3 leram uma cotação; senão, o terminal mostra `k de 3 prévias ficaram INDISPONÍVEIS`, e Enter repete a prévia.
+    - **Tempo de cada etapa:** cada prévia e cada linha `OBSERVAÇÃO` mostram a captura (achar o elemento, tirar a imagem e decodificá-la), a detecção e o OCR, também quando a leitura fica indisponível. O CSV ganhou três colunas no fim, `price_capture_ms`, `price_detection_ms` e `price_ocr_ms`; as 13 anteriores mantêm a ordem. Nas observações, o motor do OCR só é carregado quando um marcador é achado.
+    - **Tempos medidos no Linux remoto**, na `cotacao-previa.png`: decodificação 10 ms, detecção 8 ms (15 ms numa versão ampliada para 150%) e OCR de 15 a 19 ms, depois da primeira leitura, que leva cerca de 80 ms. Isso não explica os 2 a 3,5 s das suas prévias. A suspeita é a captura no navegador visível do Windows, que não foi medida aí; num gráfico de teste, com o Chromium sem janela no Linux, ela levou 6 ms para achar o elemento, 26 ms para a tela e 2 ms para decodificar. A captura não foi alterada.
+    - **Testes na suíte:**
+      - `tests/test_quote_reader.py`, 18 testes (eram 12). Os 6 de `TranslucentMarkerTest` usam uma etiqueta sintética 80% opaca, com as cores medidas: a etiqueta inteira como um só candidato, parte sobre uma vela; o marcador achado sobre o fundo, sobre uma vela verde e sobre uma vermelha; o modelo do fragmento da validação, que não acha a etiqueta; o modelo calibrado só sobre o fundo, que só acha a etiqueta inteira sobre uma vela vermelha depois de somar a cor dela; uma linha atravessando a etiqueta; e o fundo com muitos tons, cuja cor exata mais frequente é a de uma vela;
+      - `tests/test_observe.py`, 41 testes (eram 34). Os novos cobrem o `n` com imagens novas e as antigas preservadas; a falha de gravação da imagem com Enter, `c` e `-`; o candidato sem leitura recusado; as prévias com uma leitura indisponível, que não podem ser aceitas; o tempo de cada etapa; a gravação dos seletores repetida depois de uma falha; e, só no Windows, `OpenImageOnWindowsTest`: com a imagem mapeada por `mmap`, `write_bytes` falha com `EINVAL`, e `write_preview` grava outro arquivo, sem tocar no primeiro;
+      - `tests/test_observe_playwright.py`, 3 testes. O da leitura visual agora usa um gráfico em canvas com a etiqueta em `rgba(74, 118, 168, 0.8)`, calibrada sobre uma vela verde e lida sobre o fundo. Sobre a vela, o Chromium a desenha na cor medida na plataforma, `#498390`, com folga de 4 por canal no teste; o modelo gravado tem também a cor sobre o fundo, e as 4 observações só trazem cotações que o gráfico mostrou, com os três tempos maiores que zero.
+    - **Plataforma real: não executado.** As correções ainda não rodaram na sua tela.
 
 ## Testes
 
     python3 -m unittest discover -s tests -v
 
-Último resultado local, em Linux: 217 testes.
+Último resultado local, em Linux: 230 testes.
 
-- Com o Playwright 1.64.0 e o OCR, no Python 3.12.14, passaram 213. Os 4 de `PreparerOnWindowsTest`, que só rodam no Windows, foram pulados.
-- Sem o Playwright, nos Python 3.9.25, 3.10.20, 3.11.15, 3.12.14, 3.13.13 e 3.14.4, passaram 210. Também foram pulados os 3 de `tests/test_observe_playwright.py`.
+- Com o Playwright 1.64.0 e o OCR (`rapidocr` 3.10.0 e `onnxruntime` 1.31.0), no Python 3.12.14 e com `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1`, passaram 225, inclusive os 3 com Chromium real. Foram pulados os 5 que só rodam no Windows: os 4 de `PreparerOnWindowsTest` e o de `OpenImageOnWindowsTest`.
+- Sem o Playwright, nos Python 3.9.25, 3.10.20, 3.11.15, 3.12.13, 3.13.13 e 3.14.4, passaram 222. Também foram pulados os 3 de `tests/test_observe_playwright.py`.
 
-O motor e a simulação continuam rodando no 3.9; só o coletor exige o 3.11. Os resultados do CI estão nos itens 16, 18, 19 e 20.
+O motor e a simulação continuam rodando no 3.9; só o coletor exige o 3.11. Os resultados do CI estão nos itens 16, 18, 19, 20 e 21.
 
 ## Decisões em vigor
 
@@ -321,8 +359,11 @@ O motor e a simulação continuam rodando no 3.9; só o coletor exige o 3.11. Os
 - O horário de captura vem do relógio local, em UTC; nenhum horário é lido da plataforma.
 - O Playwright e o OCR são opcionais: só o coletor precisa deles, importados quando usados. O job `tests` do CI não os instala; o job `windows-browser` os instala pelo `preparar_windows.cmd`.
 - A cotação do ativo fica na chave `price` e nas colunas `price` do CSV; ela nunca é o valor da aposta (Amount). Um número inteiro nunca é aceito como cotação.
-- A leitura visual guarda a cor, o tamanho e o alinhamento do marcador, nunca a altura. Ausente, ambígua, cortada ou inválida, a cotação fica indisponível; ela nunca vira zero, não é corrigida e não repete um valor anterior.
-- A captura é só do elemento do gráfico, com `clip`, na memória. Só as duas prévias da configuração são gravadas em `runtime/`.
+- A leitura visual guarda até 4 cores do preenchimento do marcador, o tamanho e o alinhamento, nunca a altura. Uma cor conta como do marcador até 40 níveis por canal de uma cor gravada, porque a etiqueta é semitransparente. Ausente, ambígua, cortada ou inválida, a cotação fica indisponível; ela nunca vira zero, não é corrigida e não repete um valor anterior.
+- A configuração visual nunca aceita uma calibração sem leitura válida: um candidato sem cotação legível é recusado, e as prévias só são aceitas quando as 3 leram uma cotação.
+- A captura é só do elemento do gráfico, com `clip`, na memória. Só as imagens de conferência da configuração são gravadas em `runtime/`, cada uma num arquivo novo, que nunca sobrescreve outro. O programa não apaga nenhuma imagem.
+- Uma falha ao gravar uma imagem de conferência ou os seletores não encerra a configuração: o programa mostra o motivo e oferece tentar de novo.
+- O CSV só ganha colunas no fim; as anteriores mantêm o nome e a ordem.
 - O OCR roda no computador, com o modelo do pacote, sem baixar modelos e com a telemetria do `onnxruntime` desligada.
 - Todo horário do CSV e do terminal é do relógio local, em UTC, e é chamado assim; nenhum é apresentado como horário do servidor.
 - Um candidato do `preparar_windows.cmd` só é aceito com código de saída exatamente 0.
@@ -337,13 +378,16 @@ O motor e a simulação continuam rodando no 3.9; só o coletor exige o 3.11. Os
 - **Pendência deixada pela simulação:** depois de um Ctrl+C ou de uma parada com reserva pendente, o banco fica recusado pela simulação, porque a corretora simulada daquela execução deixou de existir. Não há ferramenta para resolver essa pendência; o caminho é usar um banco novo.
 - A simulação não grava arquivo de log: a saída aparece só no terminal, e o histórico fica no banco.
 - O id de uma aceitação que não pôde ser gravada só existe no `SubmissionReport`. Quem chama `submit` precisa guardá-lo ou registrá-lo em log até a recuperação; senão, a reserva fica SUBMITTING sem id.
-- **Coleta na Pocket Option: não comprovada.** O ativo foi conferido por você, e o payout foi lido (item 19). Falta a cotação: a leitura visual (item 20) precisa rodar na sua tela, e a cotação precisa ser comparada com ela, seguindo a seção 7 do `INTEGRATION.md`. Nenhuma ordem real é enviada nem consultada.
+- **Coleta na Pocket Option: não comprovada.** O ativo foi conferido por você, e o payout foi lido (item 19). Falta a cotação: na segunda validação, a leitura visual rodou na sua tela, mas não leu nenhuma cotação (item 21). Com as correções, ela precisa rodar de novo, e a cotação precisa ser comparada com a tela, seguindo a seção 7 do `INTEGRATION.md`. Nenhuma ordem real é enviada nem consultada.
+- **Marcador sobre uma vela vermelha:** um modelo calibrado só sobre o fundo não cobre a cor calculada da etiqueta sobre uma vela vermelha (`#6e6b8d`, a 47 de `#3f638e`). Até você somar essa cor com `n` e `+`, a cotação fica indisponível ali. Testado só em imagem sintética.
+- **Tempo das prévias:** as suas levaram de 2 a 3,5 s, e a causa não foi medida no Windows. A captura é a suspeita; a divisão por etapa no terminal e no CSV deve mostrar onde está o gargalo antes de qualquer otimização.
+- **`[Errno 22]`:** a explicação vem da reprodução com `mmap` no Windows (item 21); o visualizador que você usou não foi testado.
 - **Pendentes depois da coleta comprovada:**
   - a varredura automática dos favoritos e dos demais ativos;
   - o filtro inicial de payout de 90% ou mais;
   - a análise local de CALL/PUT, avaliada em dados separados dos usados para desenvolvê-la;
   - o uso das quatro tentativas de R$ 5, R$ 10, R$ 20 e R$ 40, que já existem no motor.
-- **Coletor no seu Windows: em parte testado.** Funcionaram, por você, a instalação (depois de `py install 3.12`), a janela visível, o login e a leitura do ativo e do payout. Faltam a correção do lançador sem o Python 3.12, a instalação do OCR, a leitura visual, a busca em texto e um Ctrl+C de verdade.
+- **Coletor no seu Windows: em parte testado.** Funcionaram, por você, a instalação (depois de `py install 3.12`), a janela visível, o login e a leitura do ativo e do payout. Na segunda validação, a configuração visual chegou às prévias, o que só acontece com o OCR carregado. Faltam a correção do lançador sem o Python 3.12, uma leitura visual que acerte a cotação, a busca em texto e um Ctrl+C de verdade.
 - Reservas UNVERIFIED ou SUBMITTING sem id ficam em `NO_ORDER_ID`, porque a consulta só usa o id vinculado. Falta decidir como recuperá-las.
 - UNKNOWN não tem prazo: o bloqueio dura até chegar um resultado definitivo.
 - **Windows no computador do usuário: não testado.** O CI cobre `windows-latest` com PowerShell 7 e `python` (item 16). Faltam o lançador `py -3`, o Python 3.9 no Windows, o console interativo, um Ctrl+C de verdade, o modo `--forever` e a saída redirecionada sem `PYTHONIOENCODING=utf-8`.

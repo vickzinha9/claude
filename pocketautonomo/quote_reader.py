@@ -15,12 +15,23 @@ Finding the marker:
   candidate, numbered on a preview image, and you choose the one that follows the current
   quote. Only the chart region is captured, so the Amount field and the rest of the page
   never enter.
-- MarkerModel keeps what was learned from that choice: the color of the box, its size and
-  its distance to the right edge of the region, in CSS pixels. No vertical position is
-  stored: the marker moves with the quote and is found anew in each capture.
-- locate_marker accepts exactly one box with that color (within the tolerance), size and
-  alignment, fully inside the capture. No box, more than one, or a box cut by the edge of
-  the capture makes the reading unavailable, with the reason.
+- The marker of the Pocket Option is semi-transparent: on the captures of the validation,
+  its fill was #3f638e over the dark background and #498390 over a green candle. So a box
+  is never made of one exact color. In the configuration, each region of one exact color
+  is only a seed: the box grows from it to every touching pixel within GROW_TOLERANCE of
+  the seed's color, so the whole label is found, whatever part of it lies over a candle.
+- A row belongs to a box when the box's pixels reach both of its sides, the left and the
+  right margins of the label, even in the rows of the text, whose glyphs cut the row into
+  pieces. A thin line of another color across the label, up to ROW_GAP rows, does not
+  split it.
+- MarkerModel keeps what was learned from that choice: the fill colors of the box (each
+  that covers FILL_SHARE of it or more), its size and its distance to the right edge of the
+  region, in CSS pixels. No vertical position is stored: the marker moves with the quote
+  and is found anew in each capture.
+- locate_marker accepts exactly one box whose pixels are within the tolerance of the
+  model's colors, with its size and alignment, fully inside the capture. No box, more than
+  one, or a box cut by the edge of the capture makes the reading unavailable, with the
+  reason.
 
 Reading the text: the box is cropped, turned into dark text on white and split into text
 lines. Each line is read twice, in gray and in black and white. A value is accepted only
@@ -38,10 +49,17 @@ from itertools import groupby
 
 QUOTE_PATTERN = re.compile(r"[0-9]+(?:[.,][0-9]+)+")  # at least one decimal separator
 MIN_SCORE = 0.9
-COLOR_TOLERANCE = 20  # largest difference per channel to count as the marker's color
+# Largest difference per channel to count as the marker's color. A semi-transparent label
+# changes color with what is behind it: 32 between the two fills seen in the validation.
+COLOR_TOLERANCE = 40
+GROW_TOLERANCE = 40  # configuration: how far from the seed's color the box may grow
 TEXT_CONTRAST = 64  # smallest difference per channel between the text and its box
 BACKGROUND_DISTANCE = 24  # configuration: colors closer than this to the background are skipped
 MIN_RUN = 3  # device pixels of the same color in a row
+ROW_GAP = 2  # rows of another color that may cross a box without splitting it
+EDGE_FRACTION = 0.15  # how close to each side of the box a row's pixels must reach
+FILL_SHARE = 0.05  # smallest share of a box's fill for a color to enter the model
+MAX_MODEL_COLORS = 4
 SEARCH_FRACTION = 0.5  # configuration: the right half of the capture is searched
 MAX_CANDIDATES = 12
 
@@ -123,19 +141,32 @@ class MarkerModel:
     tolerance: int = COLOR_TOLERANCE
 
     @classmethod
-    def from_box(cls, box, image_width, scale):
+    def from_box(cls, box, image, scale):
+        """The model of box in image: its fill colors, size and gap to the right edge."""
         return cls(
-            colors=(tuple(box.color),),
+            colors=fill_colors(image, box),
             width=round(box.width / scale, 1),
             height=round(box.height / scale, 1),
-            right_gap=round((image_width - box.x1) / scale, 1),
+            right_gap=round((image.width - box.x1) / scale, 1),
         )
 
-    def with_color(self, color):
-        """This model also accepting color, unless it already matches one of its colors."""
-        if any(colors_match(color, known, self.tolerance) for known in self.colors):
+    def with_colors(self, colors):
+        """This model also accepting colors; one that already matches is not added.
+
+        The colors are kept in order, up to MAX_MODEL_COLORS: the model's own come first.
+        """
+        known = list(self.colors)
+        for color in colors:
+            if len(known) < MAX_MODEL_COLORS and not any(
+                colors_match(color, other, self.tolerance // 2) for other in known
+            ):
+                known.append(tuple(color))
+        if len(known) == len(self.colors):
             return self
-        return MarkerModel(self.colors + (tuple(color),), self.width, self.height, self.right_gap, self.tolerance)
+        return MarkerModel(tuple(known), self.width, self.height, self.right_gap, self.tolerance)
+
+    def matches(self, color):
+        return any(colors_match(color, known, self.tolerance) for known in self.colors)
 
     def to_json(self):
         return {
@@ -155,8 +186,8 @@ class MarkerModel:
         if unknown:
             raise ValueError(f"chave desconhecida no marcador: {', '.join(unknown)}")
         colors = data.get("colors")
-        if not isinstance(colors, list) or not 1 <= len(colors) <= 4:
-            raise ValueError("colors precisa ter de 1 a 4 cores")
+        if not isinstance(colors, list) or not 1 <= len(colors) <= MAX_MODEL_COLORS:
+            raise ValueError(f"colors precisa ter de 1 a {MAX_MODEL_COLORS} cores")
         parsed = tuple(parse_color_hex(color) for color in colors)
         numbers = {}
         for key, low, high in (("width", MIN_BOX_WIDTH, MAX_BOX_WIDTH), ("height", MIN_BOX_HEIGHT, MAX_BOX_HEIGHT), ("right_gap", 0, 400)):
@@ -206,18 +237,36 @@ class _Classifier(dict):
 
 
 def background_color(image, x0, x1):
-    """The most frequent color among a sample of the pixels between x0 and x1."""
-    counts = {}
+    """The background's color: the mean of the most frequent band of colors in a sample.
+
+    The colors are grouped in bands of 16 levels per channel, because a background picture
+    has many slightly different colors and none of them alone is the most frequent: in the
+    validation, the most frequent exact color was a candle's.
+    """
+    bands = {}
     for y in range(0, image.height, 3):
         for color in list(image.row(y, x0, x1))[::3]:
-            counts[color] = counts.get(color, 0) + 1
-    return max(counts, key=counts.get)
+            band = (color[0] >> 4, color[1] >> 4, color[2] >> 4)
+            entry = bands.get(band)
+            if entry is None:
+                bands[band] = [1, color[0], color[1], color[2]]
+            else:
+                entry[0] += 1
+                entry[1] += color[0]
+                entry[2] += color[1]
+                entry[3] += color[2]
+    n, r, g, b = max(bands.values(), key=lambda entry: entry[0])
+    return (round(r / n), round(g / n), round(b / n))
 
 
-def _runs(image, x0, x1, classify):
-    """Every row's runs of MIN_RUN or more pixels with the same key, as (y, xa, xb, key)."""
+def _runs(image, x0, x1, classify, rows=None):
+    """Every row's runs of MIN_RUN or more pixels with the same key, as (y, xa, xb, key).
+
+    rows, a (first, last + 1) pair, limits the rows; classify is a _Classifier.
+    """
+    first, end = rows if rows is not None else (0, image.height)
     runs = []
-    for y in range(image.height):
+    for y in range(first, end):
         x = x0
         for key, group in groupby(map(classify.__getitem__, image.row(y, x0, x1))):
             n = len(list(group))
@@ -227,8 +276,8 @@ def _runs(image, x0, x1, classify):
     return runs
 
 
-def _components(runs):
-    """Runs of the same key that touch between consecutive rows, grouped together."""
+def _components(runs, gap=0):
+    """Runs of the same key that overlap across rows, grouped; up to gap rows may separate them."""
     parent = list(range(len(runs)))
 
     def root(i):
@@ -237,55 +286,66 @@ def _components(runs):
             i = parent[i]
         return i
 
-    previous, current, row = [], [], None
+    by_row = {}
     for index, (y, xa, xb, key) in enumerate(runs):
-        if y != row:
-            previous = current if row == y - 1 else []
-            current, row = [], y
-        for other in previous:
-            _, oa, ob, okey = runs[other]
-            if okey == key and oa < xb and xa < ob:
-                a, b = root(index), root(other)
-                if a != b:
-                    parent[a] = b
-        current.append(index)
+        for back in range(1, gap + 2):
+            for other in by_row.get(y - back, ()):
+                _, oa, ob, okey = runs[other]
+                if okey == key and oa < xb and xa < ob:
+                    a, b = root(index), root(other)
+                    if a != b:
+                        parent[a] = b
+        by_row.setdefault(y, []).append(index)
     groups = {}
     for index in range(len(runs)):
         groups.setdefault(root(index), []).append(runs[index])
     return list(groups.values())
 
 
-def _core_rectangle(component):
+def _core_rectangle(component, gap=0):
     """The rectangle where most rows of the component sit, without an attached thin line.
 
     The left and right edges are the medians over the rows, so a price line that touches
-    the box in one or two rows, or a candle's wick, does not widen it. The rows are the
-    longest block of consecutive rows that cover a quarter of that width or more.
+    the box in one or two rows, or a candle's wick, does not widen it. A row belongs to the
+    rectangle when the component reaches both edges in it, give or take EDGE_FRACTION of
+    the width: in the rows of the text, the glyphs cut the fill into short pieces, but the
+    label's margins are still there on both sides. The rows are the longest block of such
+    rows, where up to gap missing rows in a row are bridged.
     """
-    rows = {}
+    spans = {}
     for y, xa, xb, _ in component:
-        rows.setdefault(y, []).append((xa, xb))
-    lefts = sorted(min(a for a, _ in spans) for spans in rows.values())
-    rights = sorted(max(b for _, b in spans) for spans in rows.values())
+        span = spans.get(y)
+        spans[y] = (xa, xb) if span is None else (min(span[0], xa), max(span[1], xb))
+    lefts = sorted(a for a, _ in spans.values())
+    rights = sorted(b for _, b in spans.values())
     x0, x1 = lefts[len(lefts) // 2], rights[len(rights) // 2]
     if x1 - x0 < MIN_RUN:
         return None
-    need = 0.25 * (x1 - x0)
-    good = sorted(
-        y for y, spans in rows.items() if sum(max(0, min(b, x1) - max(a, x0)) for a, b in spans) >= need
-    )
-    best = (0, -1)
-    start = previous = None
-    for y in good + [None]:
-        if y is not None and previous is not None and y == previous + 1:
-            previous = y
-            continue
-        if start is not None and previous - start > best[1] - best[0]:
-            best = (start, previous)
-        start = previous = y
-    if best[1] < best[0]:
+    edge = max(MIN_RUN, round((x1 - x0) * EDGE_FRACTION))
+    good = sorted(y for y, (a, b) in spans.items() if a <= x0 + edge and b >= x1 - edge)
+    if not good:
         return None
-    return x0, best[0], x1, best[1] + 1
+    blocks = []
+    start = previous = good[0]
+    for y in good[1:]:
+        if y - previous > gap + 1:
+            blocks.append((start, previous))
+            start = y
+        previous = y
+    blocks.append((start, previous))
+    first, last = max(blocks, key=lambda block: block[1] - block[0])
+    return x0, first, x1, last + 1
+
+
+def _fill_mode(image, rectangle, classify, key):
+    """The most frequent color among the pixels of rectangle that classify gives key."""
+    x0, y0, x1, y1 = rectangle
+    counts = {}
+    for y in range(y0, y1):
+        for color in image.row(y, x0, x1):
+            if classify[color] == key:
+                counts[color] = counts.get(color, 0) + 1
+    return max(counts, key=counts.get) if counts else None
 
 
 def text_ratio(image, rectangle, color):
@@ -304,28 +364,36 @@ def text_ratio(image, rectangle, color):
     return count / ((x1 - x0) * (y1 - y0))
 
 
-def find_label_boxes(image, scale, x0, x1, classify, color_of, limits=None):
+def _rectangles(image, x0, x1, classify, rows=None, gap=ROW_GAP):
+    """(rectangle, key, runs) of every component of the pixels that classify keeps."""
+    classify = classify if isinstance(classify, _Classifier) else _Classifier(classify)
+    found = []
+    for component in _components(_runs(image, x0, x1, classify, rows), gap):
+        rectangle = _core_rectangle(component, gap)
+        if rectangle is not None:
+            found.append((rectangle, component[0][3], len(component)))
+    return found, classify
+
+
+def find_label_boxes(image, scale, x0, x1, classify, limits=None, rows=None, gap=ROW_GAP):
     """Filled boxes with contrasting text inside, made of the pixels classify keeps.
 
-    classify maps a color to a key, or None for pixels that are not part of a box; runs and
-    boxes are made of pixels with the same key, and color_of(key) is the box color.
+    classify maps a color to a key, or None for pixels that are not part of a box; a box is
+    made of touching pixels with the same key, and its color is the most frequent one of
+    its fill. rows, a (first, last + 1) pair, limits the search to those rows.
     """
     limits = limits or (MIN_BOX_WIDTH, MAX_BOX_WIDTH, MIN_BOX_HEIGHT, MAX_BOX_HEIGHT)
     min_w, max_w, min_h, max_h = (value * scale for value in limits)
+    found, classify = _rectangles(image, x0, x1, classify, rows, gap)
     boxes = []
-    for component in _components(_runs(image, x0, x1, _Classifier(classify))):
-        if len(component) < min_h:
-            continue
-        rectangle = _core_rectangle(component)
-        if rectangle is None:
-            continue
+    for rectangle, key, run_count in found:
         bx0, by0, bx1, by1 = rectangle
         width, height = bx1 - bx0, by1 - by0
-        if not (min_w <= width <= max_w and min_h <= height <= max_h and width >= 1.2 * height):
+        sized = min_w <= width <= max_w and min_h <= height <= max_h and width >= 1.2 * height
+        if run_count < min_h or not sized:
             continue
-        y, xa, xb, key = max(component, key=lambda run: run[2] - run[1])
-        color = image.pixel((xa + xb) // 2, y)  # the real color; color_of only names the key
-        if not colors_match(color, color_of(key), COLOR_TOLERANCE):
+        color = _fill_mode(image, rectangle, classify, key)
+        if color is None:
             continue
         ratio = text_ratio(image, rectangle, color)
         if not TEXT_RATIO_RANGE[0] <= ratio <= TEXT_RATIO_RANGE[1]:
@@ -336,29 +404,104 @@ def find_label_boxes(image, scale, x0, x1, classify, color_of, limits=None):
     return boxes
 
 
+def _rect(box):
+    return box.x0, box.y0, box.x1, box.y1
+
+
+def _overlap(a, b):
+    """The area shared by two (x0, y0, x1, y1) rectangles."""
+    return max(0, min(a[2], b[2]) - max(a[0], b[0])) * max(0, min(a[3], b[3]) - max(a[1], b[1]))
+
+
 def candidate_boxes(image, scale):
-    """Configuration: every label box in the right part of the capture, top to bottom."""
+    """Configuration: every label box in the right part of the capture, top to bottom.
+
+    Each region of one exact color is a seed, with no need for text; the box grows from it
+    to the touching pixels within GROW_TOLERANCE of the seed's color, near the seed. Only
+    the grown boxes with text inside are candidates. A box found from more than one seed is
+    listed once.
+    """
     x0 = int(image.width * (1 - SEARCH_FRACTION))
     background = background_color(image, x0, image.width)
 
-    def classify(color):
+    def exact(color):
         return None if colors_match(color, background, BACKGROUND_DISTANCE) else color
 
-    boxes = find_label_boxes(image, scale, x0, image.width, classify, lambda key: key)
+    seeds, _ = _rectangles(image, x0, image.width, exact, gap=0)
+    seeds = [
+        (rectangle, key)
+        for rectangle, key, _ in seeds
+        if rectangle[3] - rectangle[1] >= MIN_RUN
+        and MIN_BOX_WIDTH * scale * 0.5 <= rectangle[2] - rectangle[0] <= MAX_BOX_WIDTH * scale
+    ]
+    seeds.sort(key=lambda seed: -(seed[0][2] - seed[0][0]) * (seed[0][3] - seed[0][1]))
+    margin_x, margin_y = int(MAX_BOX_WIDTH * scale / 2), int(MAX_BOX_HEIGHT * scale)
+    boxes = []
+    for (sx0, sy0, sx1, sy1), seed_color in seeds:
+        seed = (sx0, sy0, sx1, sy1)
+        if any(_overlap(seed, _rect(b)) == (sx1 - sx0) * (sy1 - sy0) for b in boxes):
+            continue  # already inside a box found from another seed
+
+        def near_seed(color, seed_color=seed_color):
+            if colors_match(color, background, BACKGROUND_DISTANCE):
+                return None
+            return 0 if colors_match(color, seed_color, GROW_TOLERANCE) else None
+
+        window_x0, window_x1 = max(x0, sx0 - margin_x), min(image.width, sx1 + margin_x)
+        rows = (max(0, sy0 - margin_y), min(image.height, sy1 + margin_y))
+        for box in find_label_boxes(image, scale, window_x0, window_x1, near_seed, rows=rows):
+            rectangle = _rect(box)
+            if not _overlap(rectangle, seed):
+                continue
+            area = box.width * box.height
+            same = [
+                b for b in boxes if _overlap(rectangle, _rect(b)) >= 0.5 * min(area, b.width * b.height)
+            ]
+            if same:
+                if all(area > b.width * b.height for b in same):
+                    boxes = [b for b in boxes if b not in same] + [box]
+                continue
+            boxes.append(box)
+    boxes.sort(key=lambda box: (box.y0, box.x0))
     return boxes[:MAX_CANDIDATES]
 
 
+def fill_colors(image, box):
+    """The colors that fill box, most frequent first, for the model.
+
+    Each one covers FILL_SHARE or more of the pixels within GROW_TOLERANCE of the box's
+    color and is farther than COLOR_TOLERANCE // 2 from the colors kept before it; there are
+    at most MAX_MODEL_COLORS. The box's outer rows and columns are left out: there, its
+    anti-aliased edge mixes the fill with what lies around it.
+    """
+    counts, total = {}, 0
+    x0, x1 = (box.x0 + 1, box.x1 - 1) if box.width > 4 else (box.x0, box.x1)
+    y0, y1 = (box.y0 + 2, box.y1 - 2) if box.height > 6 else (box.y0, box.y1)
+    for y in range(y0, y1):
+        for color in image.row(y, x0, x1):
+            if colors_match(color, box.color, GROW_TOLERANCE):
+                counts[color] = counts.get(color, 0) + 1
+                total += 1
+    kept = []
+    for color, n in sorted(counts.items(), key=lambda item: -item[1]):
+        if n < FILL_SHARE * total or len(kept) == MAX_MODEL_COLORS:
+            break
+        if not any(colors_match(color, other, COLOR_TOLERANCE // 2) for other in kept):
+            kept.append(color)
+    return tuple(kept) or (tuple(box.color),)
+
+
 def locate_marker(image, scale, model):
-    """(box, None) for the only box that matches the model, or (None, reason)."""
+    """(box, None) for the only box that matches the model, or (None, reason).
+
+    Every pixel within the tolerance of any of the model's colors belongs to the marker's
+    fill, so a label partly over a candle and partly over the background stays one box.
+    """
     reach = model.right_gap + model.width * WIDTH_RANGE[1] + ALIGN_TOLERANCE + 4
     x0 = max(0, int(image.width - reach * scale))
-    colors = model.colors
 
     def classify(color):
-        for index, known in enumerate(colors):
-            if colors_match(color, known, model.tolerance):
-                return index
-        return None
+        return 0 if model.matches(color) else None
 
     # A box cut by the top or the bottom of the capture shows only part of its height, so
     # the search accepts lower boxes; only a whole one can be read.
@@ -368,7 +511,7 @@ def locate_marker(image, scale, model):
         max(MIN_RUN / scale, model.height * 0.3),
         model.height * HEIGHT_RANGE[1],
     )
-    boxes = find_label_boxes(image, scale, x0, image.width, classify, lambda index: colors[index], limits)
+    boxes = find_label_boxes(image, scale, x0, image.width, classify, limits)
     boxes = [box for box in boxes if box.cut or box.height / scale >= model.height * HEIGHT_RANGE[0]]
     matching = []
     for box in boxes:

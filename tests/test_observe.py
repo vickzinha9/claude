@@ -13,8 +13,10 @@ import ast
 import collections
 import contextlib
 import csv
+import errno
 import io
 import json
+import mmap
 import os
 import subprocess
 import sys
@@ -530,7 +532,7 @@ class MainTest(ObserveTestCase):
             [
                 [
                     f"2026-10-14T12:00:{start:02d}.000+00:00", URL, "EUR/USD OTC", ok[0], price, ok[1], "92", ok[2],
-                    "completa", "texto", f"2026-10-14T12:00:{start + 10:02d}.000+00:00", "2.0", "14.0",
+                    "completa", "texto", f"2026-10-14T12:00:{start + 10:02d}.000+00:00", "2.0", "14.0", "", "", "",
                 ]
                 for start, price in ((0, "1.08534"), (20, "1.08540"), (40, "1.08529"))
             ],
@@ -564,7 +566,7 @@ class MainTest(ObserveTestCase):
                 "EUR/USD OTC", "ok: #ativo-teste",
                 "", "indisponível: o seletor não encontrou nenhum elemento",
                 "", "indisponível: sem seletor em observe-selectors.json",
-                "parcial", "texto", "2026-10-14T12:00:25.000+00:00", "2.0", "10.0",
+                "parcial", "texto", "2026-10-14T12:00:25.000+00:00", "2.0", "10.0", "", "", "",
             ],
         )
         self.assertIn(
@@ -819,8 +821,11 @@ class ConfigureTest(ObserveTestCase):
                 self.assertEqual(sorted(path.name for path in self.runtime.iterdir()), [observe.SELECTORS_FILE_NAME])
 
 
+# A model saved by the earlier version, with tolerance 20; the file keeps working.
 BLUE_MARKER = {"colors": ["#2962ff"], "width": 68.0, "height": 18.0, "right_gap": 1.0, "tolerance": 20}
 VISUAL = {"chart": "#grafico", "marker": BLUE_MARKER}
+# What a new calibration of the same marker saves.
+NEW_VISUAL = {"chart": "#grafico", "marker": {**BLUE_MARKER, "tolerance": 40}}
 
 
 class VisualQuoteTest(ObserveTestCase):
@@ -863,18 +868,24 @@ class VisualQuoteTest(ObserveTestCase):
             rows[0][2:],
             [
                 "GBP/USD OTC", "ok: #ativo", "1.26543", "ok: ocr #grafico", "92", "ok: #payout",
-                "completa", "ocr", "2026-10-14T12:00:10.000+00:00", "2.0", "14.0",
+                # The quote took 14 ms on the fake timer: capture, detection and OCR, 2 ms each.
+                "completa", "ocr", "2026-10-14T12:00:10.000+00:00", "14.0", "26.0", "2.0", "2.0", "2.0",
             ],
         )
         # Without the marker the quote is unavailable: empty, never zero, nor the earlier value.
         self.assertEqual(rows[1][4:9], ["", rows[1][5], "92", "ok: #payout", "parcial"])
         self.assertIn("indisponível: o marcador da cotação não apareceu", rows[1][5])
         self.assertEqual(rows[1][9], "ocr")
-        self.assertIn("cotação do ativo 1.26543 (leitura visual, 2 ms)", run.out)
+        self.assertEqual(rows[1][13:], ["2.0", "2.0", ""])  # without a marker, no OCR ran
+        self.assertIn(
+            "cotação do ativo 1.26543 (leitura visual, 14 ms: captura 2 ms, detecção 2 ms, OCR 2 ms)", run.out
+        )
+        self.assertIn("(leitura visual, 10 ms: captura 2 ms, detecção 2 ms) | payout 92%", run.out)
         self.assertIn("OBSERVAÇÃO 2 PARCIAL", run.out)
         self.assertIn("Campos com fonte: ativo, cotação do ativo (leitura visual), payout", run.out)
         self.assertEqual(session.capture_calls, ["#grafico", "#grafico"])
-        self.assertEqual(self.engine.gets, 3)  # once before the first observation, then per reading
+        # Once before the first observation, then only for a marker found: 1 + 1.
+        self.assertEqual(self.engine.gets, 2)
 
     def test_capture_problems_are_reasons(self):
         cases = (
@@ -937,10 +948,12 @@ class ConfigureQuoteTest(ObserveTestCase):
         self.assertEqual(self.answers.pending, [])
         saved = self.saved_selectors()
         self.assertEqual(saved["price"], "")
-        self.assertEqual(saved["price_ocr"], VISUAL)  # color, size and right gap; no height
-        candidates, previews = self.runtime / "cotacao-candidatos.png", self.runtime / "cotacao-previa.png"
-        self.assertEqual(self.shown_images, [candidates, previews])
+        self.assertEqual(saved["price_ocr"], NEW_VISUAL)  # colors, size and right gap; no height
+        candidates, previews = self.shown_images
+        self.assertRegex(candidates.name, r"^cotacao-candidatos-\d{8}-\d{6}-[0-9a-f]{8}\.png$")
+        self.assertRegex(previews.name, r"^cotacao-previa-\d{8}-\d{6}-[0-9a-f]{8}\.png$")
         for path in (candidates, previews):
+            self.assertEqual(path.parent, self.runtime)
             self.assertEqual(path.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
         self.assertIn("  1: caixa #4a4f5e de 68x18 px, a 1 px da borda direita; texto lido: 1.26543", run.out)
         self.assertIn("  2: caixa #2962ff de 68x18 px, a 1 px da borda direita; texto lido: 1.26543", run.out)
@@ -953,7 +966,7 @@ class ConfigureQuoteTest(ObserveTestCase):
         # Only the two preview images were added to runtime/.
         self.assertEqual(
             sorted(path.name for path in self.runtime.iterdir() if not path.name.startswith("observations-")),
-            ["cotacao-candidatos.png", "cotacao-previa.png", "observe-selectors.json"],
+            sorted([candidates.name, previews.name, "observe-selectors.json"]),
         )
 
     def test_search_lists_text_candidates_and_uses_the_one_chosen(self):
@@ -1012,6 +1025,119 @@ class ConfigureQuoteTest(ObserveTestCase):
         self.assertEqual(self.saved_selectors()["price_ocr"]["marker"]["colors"], ["#2962ff", "#26a69a"])
         self.assertEqual(self.csv_rows()[0][4], "1.26543")
 
+    def configure_visual(self, captures, answers, engine=None):
+        """--configure with asset and payout kept and the quote read from the chart."""
+        self.write_selectors(asset="#ativo", price="", payout="#payout")
+        session = FakeSession({"#ativo": shown("GBP/USD OTC"), "#payout": shown("92%")}, captures={"#grafico": captures})
+        before = ["", "", "", "ocr", "#grafico"]  # login, asset kept and accepted, ocr, chart
+        after = ["", "", ""]  # payout kept and accepted, summary saved
+        run = self.run_main("--configure", "--count", "1", session=session, answers=before + answers + after, engine=engine)
+        return run, session
+
+    def test_choosing_the_marker_again_writes_new_images_and_keeps_the_old_ones(self):
+        # The validation: n after three unavailable previews stopped the run with
+        # "PARADA: [Errno 22] Invalid argument: 'runtime\\cotacao-candidatos.png'".
+        self.runtime.mkdir(parents=True)
+        old = {name: f"imagem antiga {name}".encode() for name in ("cotacao-candidatos.png", "cotacao-previa.png")}
+        for name, data in old.items():
+            (self.runtime / name).write_bytes(data)
+        marker, gone = chart_images.chart(marker_y=150), chart_images.chart(marker_y=None)
+        captures = [marker, gone, gone, gone, marker]  # candidates, 3 previews, candidates, ...
+        run, session = self.configure_visual(captures, ["1", "n", "1", ""])
+        self.assertEqual((run.code, run.err), (0, ""))
+        self.assertEqual(self.answers.pending, [])
+        self.assertEqual(len(self.shown_images), 4)  # candidates, preview, candidates, preview
+        self.assertEqual(len(set(self.shown_images)), 4)
+        for path in self.shown_images:
+            self.assertEqual(path.parent, self.runtime)
+            self.assertNotIn(path.name, old)
+        for name, data in old.items():
+            self.assertEqual((self.runtime / name).read_bytes(), data)
+        self.assertIn("3 de 3 prévias ficaram INDISPONÍVEIS", run.out)
+        self.assertEqual(self.saved_selectors()["price_ocr"], NEW_VISUAL)
+
+    def test_a_failed_image_write_can_be_retried_or_skipped(self):
+        marker = chart_images.chart(marker_y=150)
+        real_write = observe.write_preview
+        cases = (
+            # (answer after the failure, images shown, exit code, quote saved)
+            ("", 2, 0, True),  # Enter tries again
+            ("c", 1, 0, True),  # go on without the candidates' image
+            ("-", 0, 0, False),  # give up the visual reading; then - for no quote
+        )
+        for answer, images, code, saved in cases:
+            with self.subTest(answer=answer):
+                failures = [OSError(22, "Invalid argument", str(self.runtime / "cotacao-candidatos-x.png"))]
+
+                def flaky(*args, **kwargs):
+                    if failures:
+                        raise failures.pop()
+                    return real_write(*args, **kwargs)
+
+                choices = [answer, "1", ""] if answer != "-" else ["-", "-"]
+                with mock.patch.object(observe, "write_preview", flaky):
+                    run, _ = self.configure_visual([marker], choices)
+                self.assertEqual(run.code, code, run.err)
+                self.assertEqual(self.answers.pending, [])
+                self.assertIn(
+                    f"AVISO: não foi possível gravar a imagem de conferência em {self.runtime}"
+                    " (OSError: [Errno 22] Invalid argument", run.err,
+                )
+                self.assertNotIn("PARADA", run.err)
+                self.assertEqual(len(self.shown_images), images)
+                self.assertEqual("price_ocr" in self.saved_selectors(), saved)
+
+    def test_a_candidate_without_a_valid_reading_is_refused(self):
+        image = chart_images.chart(marker_y=150, cursor_y=60)
+        engine = chart_images.FakeEngine(answers=[("abc", 0.99), ("abc", 0.99)])  # candidate 1
+        run, _ = self.configure_visual([image], ["1", "2", ""], engine=engine)
+        self.assertEqual((run.code, run.err), (0, ""))
+        self.assertEqual(self.answers.pending, [])
+        self.assertIn("texto lido: nenhuma cotação legível (o OCR leu 'abc' no marcador, que não é uma cotação); não pode ser escolhido", run.out)
+        self.assertIn("O candidato 1 não tem uma cotação legível", run.out)
+        self.assertEqual(self.saved_selectors()["price_ocr"], NEW_VISUAL)  # candidate 2, the marker
+
+    def test_previews_with_an_unavailable_reading_cannot_be_accepted(self):
+        marker, gone = chart_images.chart(marker_y=150), chart_images.chart(marker_y=None)
+        captures = [marker, marker, gone, marker, marker]  # candidates, previews: ok, missing, ok
+        run, _ = self.configure_visual(captures, ["1", "", ""])  # Enter repeats; then Enter accepts
+        self.assertEqual((run.code, run.err), (0, ""))
+        self.assertEqual(self.answers.pending, [])
+        self.assertIn("1 de 3 prévias ficaram INDISPONÍVEIS: a leitura visual não pode ser aceita assim", run.out)
+        self.assertEqual(run.out.count("Prévia 1, relógio local"), 2)  # the first Enter repeated them
+        self.assertEqual(self.saved_selectors()["price_ocr"], NEW_VISUAL)
+
+    def test_previews_show_where_the_time_goes(self):
+        image = chart_images.chart(marker_y=150)
+        timed = observe.Capture(1, True, image, image.width, element_ms=3.0, screenshot_ms=2900.0, decode_ms=12.0)
+        run, _ = self.configure_visual([timed], ["1", ""])
+        self.assertEqual((run.code, run.err), (0, ""))
+        # The fake timer adds 2 ms per reading of the clock; the steps of the capture come
+        # from the session, as PlaywrightSession measures them.
+        self.assertIn(
+            "Prévia 1, relógio local 2026-10-14T12:00:10.000+00:00: 1.26543 (em 14 ms: captura 2 ms"
+            " (elemento 3, tela 2900, decodificação 12), detecção 2 ms, OCR 2 ms)",
+            run.out,
+        )
+
+    def test_a_failed_save_of_the_selectors_can_be_retried(self):
+        real_save = observe.save_selectors
+        failures = [OSError(28, "No space left on device")]
+
+        def flaky(*args, **kwargs):
+            if failures:
+                raise failures.pop()
+            return real_save(*args, **kwargs)
+
+        self.write_selectors(asset="#ativo")
+        session = FakeSession({"#ativo": shown("GBP/USD OTC")})
+        answers = ["", "", "", "-", "-", "", ""]  # login, asset, no quote, no payout, save, retry
+        with mock.patch.object(observe, "save_selectors", flaky):
+            run = self.run_main("--configure", "--count", "1", session=session, answers=answers)
+        self.assertEqual((run.code, self.answers.pending), (0, []))
+        self.assertIn(f"AVISO: não foi possível gravar {self.selectors_path} (OSError: [Errno 28] No space left on device).", run.err)
+        self.assertIn(f"Seletores gravados em {self.selectors_path}.", run.out)
+
     def test_giving_up_the_visual_reading_keeps_the_file(self):
         self.write_selectors(asset="#ativo", price="", payout="#payout", price_ocr=VISUAL)
         original = self.selectors_path.read_bytes()
@@ -1022,6 +1148,30 @@ class ConfigureQuoteTest(ObserveTestCase):
         self.assertIn("Nenhuma caixa com texto apareceu na metade direita do gráfico.", run.out)
         self.assertIn("Leitura visual não configurada.", run.out)
         self.assertEqual(self.selectors_path.read_bytes(), original)
+
+
+@unittest.skipUnless(os.name == "nt", "o mapeamento de arquivo do Windows só existe no Windows")
+class OpenImageOnWindowsTest(ObserveTestCase):
+    """The cause of the [Errno 22] of the validation, reproduced on Windows.
+
+    A viewer maps the image it shows into memory, and Windows refuses to truncate a file
+    with a mapped view (ERROR_USER_MAPPED_FILE), which Python reports as [Errno 22] Invalid
+    argument. mmap stands in for the viewer here.
+    """
+
+    def test_an_image_open_in_a_viewer_is_never_overwritten(self):
+        self.runtime.mkdir(parents=True)
+        shown_before = self.runtime / "cotacao-candidatos.png"
+        shown_before.write_bytes(b"imagem aberta num visualizador")
+        image = chart_images.chart(marker_y=150)
+        with open(shown_before, "rb") as file, mmap.mmap(file.fileno(), 0, access=mmap.ACCESS_READ):
+            with self.assertRaises(OSError) as raised:
+                shown_before.write_bytes(b"nova")  # what the earlier version did
+            self.assertEqual(raised.exception.errno, errno.EINVAL)
+            written = observe.write_preview(context(), observe.CANDIDATES_PREFIX, image, [])
+        self.assertNotEqual(written, shown_before)
+        self.assertEqual(written.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
+        self.assertEqual(shown_before.read_bytes(), b"imagem aberta num visualizador")
 
 
 class PlaywrightSessionTest(ObserveTestCase):

@@ -1,6 +1,6 @@
 # Integração com a Pocket Option: leitura de dados
 
-Pesquisa e testes feitos em 14/10/2026, no branch `feature/progression-core`. No mesmo dia entraram os lançadores do Windows, o modo `--configure` e a espera pelo Playwright.
+Pesquisa e testes feitos em 14/10/2026, no branch `feature/progression-core`. No mesmo dia entraram os lançadores do Windows, o modo `--configure`, a espera pelo Playwright e a leitura visual da cotação. Em 15/10/2026, a detecção e a configuração visual foram corrigidas com base na sua segunda validação (seções 5 e 6).
 
 > **Nenhuma conexão real foi comprovada.** Nada foi lido da plataforma real até agora. A origem dos três campos (ativo, cotação do ativo e payout) continua sem comprovação. Todos os testes usaram objetos falsos ou uma página local de teste, inclusive os do CI no Windows.
 
@@ -57,7 +57,7 @@ Há bibliotecas de terceiros que imitam o WebSocket do site por engenharia rever
 Na sua tela, o DevTools mostra `canvas.layer.plot` sobre o marcador da cotação: o gráfico desenha a cotação em canvas, que não tem texto. Isso não prova que a cotação não exista em outro elemento de texto. Por isso há dois caminhos, e você escolhe com a comparação com a tela:
 
 - **Texto (`buscar`).** O programa procura, no documento principal, os elementos visíveis cujo texto inteiro é um número com casas decimais. Ele lista o valor lido de cada um e um seletor que encontra só aquele elemento, montado pelo id, pelas classes ou pelas classes do elemento pai. A busca usa só o mecanismo de texto do próprio Playwright (`get_by_text`), sem JavaScript próprio, e não alcança iframes nem o conteúdo de canvas. Nenhum resultado é escolhido sozinho.
-- **Leitura visual (`ocr`).** O programa captura só o elemento do gráfico que você indicar, com `page.screenshot(clip=...)`, recortado na caixa do elemento. A imagem fica na memória, e a página não rola. O marcador da cotação atual é escolhido por você entre as caixas com texto da metade direita da captura, numeradas numa imagem. O programa guarda a cor, o tamanho e a distância do marcador até a borda direita, em pixels CSS; **a altura nunca é guardada**, e a cada leitura o marcador é procurado de novo. A leitura fica indisponível quando o marcador falta, é ambíguo (mais de uma caixa igual), está cortado, ou quando o texto não passa nas conferências: número com casas decimais, duas leituras do OCR iguais (em tons de cinza e em preto e branco) e confiança mínima de 0,90 nas duas.
+- **Leitura visual (`ocr`).** O programa captura só o elemento do gráfico que você indicar, com `page.screenshot(clip=...)`, recortado na caixa do elemento. A imagem fica na memória, e a página não rola. O marcador da cotação atual é escolhido por você entre as caixas com texto da metade direita da captura, numeradas numa imagem nova a cada captura; um candidato sem cotação legível não pode ser escolhido. Como a etiqueta é semitransparente, cada região de uma cor só é apenas uma semente: a caixa cresce para os pixels vizinhos até 40 níveis por canal da cor da semente, fora do fundo, e uma linha conta quando os pixels da caixa chegam aos dois lados dela, mesmo nas linhas do texto. O programa guarda as cores do preenchimento (as que ocupam 5% dele ou mais, até 4), o tamanho e a distância do marcador até a borda direita, em pixels CSS; **a altura nunca é guardada**, e a cada leitura o marcador é procurado de novo. A leitura fica indisponível quando o marcador falta, é ambíguo (mais de uma caixa igual), está cortado, ou quando o texto não passa nas conferências: número com casas decimais, duas leituras do OCR iguais (em tons de cinza e em preto e branco) e confiança mínima de 0,90 nas duas. A configuração só aceita a leitura visual quando as 3 prévias leram uma cotação.
 
 O que separa o marcador do que pode confundir:
 
@@ -79,7 +79,7 @@ O OCR é o [RapidOCR](https://github.com/RapidAI/RapidOCR) 3.10.0, com o modelo 
 - **Horário.** Os horários vêm do relógio deste computador, em UTC, com milissegundos: o do início da observação e o de logo antes da captura da cotação. **Nenhum horário é lido da plataforma, e nenhum é o horário do servidor.** O CSV registra também quanto tempo levaram a captura e a leitura da cotação e a observação inteira.
 - **Sem disfarce.** O programa não esconde que o navegador é automatizado.
 
-As colunas do CSV estão no [README](README.md#execução-sem-os-lançadores): as 8 primeiras são as de antes, e as 5 novas são `completeness`, `price_source`, `price_captured_at_utc`, `price_processing_ms` e `observation_ms`.
+As colunas do CSV estão no [README](README.md#execução-sem-os-lançadores). As 13 primeiras são as dos arquivos anteriores; as 3 novas, `price_capture_ms`, `price_detection_ms` e `price_ocr_ms`, dividem o tempo da leitura visual em captura, detecção e OCR.
 
 **Formatos aceitos:**
 
@@ -89,58 +89,87 @@ As colunas do CSV estão no [README](README.md#execução-sem-os-lançadores): a
 
 ## 5. O que foi comprovado
 
-**Na plataforma real**, pela sua validação no Windows, em 14/10/2026:
+**Na plataforma real**, pelas suas duas validações no Windows, informadas em 14/10/2026 e em 15/10/2026:
 
 - a página depois do login foi `https://pocketoption.com/en/cabinet/`;
 - ativo: `span.current-symbol` leu `GBP/USD OTC`, que correspondia à tela;
 - payout: `div.value__val-start` leu 38% na prévia e 36% na primeira observação;
-- cotação: indisponível. O marcador fica em `canvas.layer.plot`, e a leitura visual desta entrega ainda não rodou na sua tela.
+- cotação: **ainda não lida.** Na segunda validação, a calibração visual escolheu uma caixa `#498390` de 46x9 px sem texto legível, as 3 prévias não acharam o marcador, levaram 3486, 2059 e 3023 ms, e o `n` encerrou o programa com `[Errno 22]`. A seção 6 explica as causas e as correções.
 
 **A coleta não está comprovada:** os três campos precisam corresponder à plataforma, e a cotação ainda não foi lida nela.
+
+### O que as duas imagens da validação mostraram
+
+As duas imagens que você enviou, `cotacao-candidatos.png` e `cotacao-previa.png`, foram analisadas fora do Git, na escala 1 (554x871 px). A primeira tem as marcas rosas da configuração por cima; por isso não serviu para medir o OCR, só a forma e as cores da etiqueta fora das marcas.
+
+- **A etiqueta é semitransparente, com cerca de 80% de opacidade.** Sobre o fundo escuro (`#141726`), o preenchimento é `#3f638e`; sobre a vela verde (`#45b734`), é `#498390`. Na calibração, a etiqueta estava sobre a vela verde, com as bordas sobre o fundo.
+- A detecção anterior juntava só pixels de uma cor exata: pegou a parte sobre a vela, 46 px de largura.
+- Ela também exigia que cada linha tivesse 25% da largura coberta por trechos de 3 px ou mais. Nas linhas do texto, os algarismos deixam vãos menores que isso, e a caixa parou no alto do texto: 9 px de altura, sem os algarismos inteiros, portanto sem texto legível.
+- O modelo guardou `#498390`, 46x9 px. Na prévia, a etiqueta estava sobre o fundo (`#3f638e`, a 32 da cor gravada, acima da tolerância de 20) e tinha 55x23 px. Por isso ela não foi achada.
+- **Com a detecção nova**, na mesma imagem da calibração, a caixa tem as 23 linhas da etiqueta. A largura ficou em 48 px, e não 55, porque as marcas rosas cobrem as bordas na metade de cima. Na `cotacao-previa.png`, ela tem 55x23 px e o OCR leu `1.42045`, que é o valor que a imagem mostra. O modelo calibrado na primeira imagem acha a etiqueta na segunda, e o calibrado na segunda acha a da primeira.
+
+### Tempo das prévias
+
+Na `cotacao-previa.png`, medido no Linux remoto:
+
+| Etapa | Tempo |
+|---|---|
+| decodificar o PNG | 10 ms |
+| detecção do marcador | 8 ms (15 ms numa versão ampliada para 150%) |
+| OCR | 15 a 19 ms, depois da primeira leitura; a primeira leva cerca de 80 ms |
+
+Isso não explica 2 a 3,5 s. A suspeita é a captura (`page.screenshot`) no navegador visível do Windows, mas isso não foi medido aí. Num gráfico de teste, com o Chromium sem janela no Linux, a captura levou 6 ms para achar o elemento, 26 ms para a tela e 2 ms para decodificar. Agora cada prévia, cada linha `OBSERVAÇÃO` e o CSV mostram o tempo de cada etapa, para confirmar no seu computador onde está o gargalo.
+
+### Testes
 
 | Item | Com dados simulados ou em página local de teste | Na plataforma real, no seu computador |
 |---|---|---|
 | Só aceitar URLs https de pocketoption.com, inclusive o link digitado no `--configure` | testes em `tests/test_observe.py` | o link aceito levou ao `/en/cabinet/` |
-| Lançadores do Windows | CI `windows-latest`: `preparar_windows.cmd` duas vezes, com o Playwright, o Chromium e o OCR; `observar_windows.cmd --help` e com um link recusado, código 2; `runtime/` igual no fim. O `PreparerOnWindowsTest` roda o `cmd.exe` com um `py` falso que devolve `-1610612730` | a preparação só funcionou depois de `py install 3.12`. A correção do código negativo e o OCR **não foram executados** aí |
+| Lançadores do Windows | CI `windows-latest`: `preparar_windows.cmd` duas vezes, com o Playwright, o Chromium e o OCR; `observar_windows.cmd --help` e com um link recusado, código 2; `runtime/` igual no fim. O `PreparerOnWindowsTest` roda o `cmd.exe` com um `py` falso que devolve `-1610612730` | a preparação funcionou depois de `py install 3.12` |
 | Abrir o navegador visível com o perfil em `runtime/` | Playwright falso: `headless=False` e perfil `runtime/browser-profile`. A janela visível não abriu em nenhum teste | funcionou: você fez o login na janela |
-| Login manual | não se aplica | feito por você |
 | Ativo | objetos falsos e Chromium real em página local | **conferido por você**: `span.current-symbol`, `GBP/USD OTC` |
 | Payout | objetos falsos e Chromium real em página local | lido por `div.value__val-start` (38% e 36%); a comparação com a tela não foi informada |
-| Cotação do ativo, leitura visual | detecção em imagens sintéticas; Chromium real e OCR real num gráfico de teste desenhado em canvas, com etiqueta de cursor e com um número de texto que imita uma cotação. Num experimento fora da suíte, com 450 cotações aleatórias e escalas de tela de 100%, 125% e 150%: 450 certas, nenhuma errada, nenhuma indisponível; captura e leitura com mediana de 64 a 82 ms e no máximo 95 ms | **não executado**: depende da validação abaixo |
-| Cotação do ativo, busca em texto | objetos falsos; Chromium real na página de teste: listou o número de texto com o seletor dele e não listou o Amount inteiro | **não executado** |
-| Ambíguo, ausente, cortado, inválido: INDISPONÍVEL | imagens sintéticas e gráfico de teste: duas caixas iguais, marcador fora da área, cortado, cor diferente, leituras divergentes, confiança baixa, número sem decimais | **não executado** |
+| Cotação, leitura visual | imagens sintéticas com a estrutura medida (etiqueta 80% opaca sobre vela e fundo, algarismos com vãos de 2 px); as suas duas imagens, fora da suíte; Chromium real e OCR real num gráfico de teste com etiqueta semitransparente, calibrada sobre uma vela verde e lida sobre o fundo | **não comprovada**: a calibração falhou na segunda validação |
+| Cotação, busca em texto | objetos falsos; Chromium real na página de teste | **não executado** |
+| Ambíguo, ausente, cortado, inválido: INDISPONÍVEL | imagens sintéticas e gráfico de teste | na segunda validação, as prévias ficaram INDISPONÍVEIS em vez de mostrar um valor errado |
+| Imagens de conferência com nome novo | objetos falsos; no CI Windows, um arquivo mapeado na memória, como um visualizador faz, recusa ser regravado com `[Errno 22]`, e a imagem nova é gravada em outro arquivo | **não executado** |
 | Nenhum clique | teste no código-fonte e página local com botões CALL e PUT que contam cliques: zero cliques | não se aplica |
 | Espera do Playwright entre leituras, Ctrl+C | objetos falsos; Chromium real; SIGINT real no Linux: código 130 e o CSV preservado | **não testado no Windows** |
 
-As páginas de teste são HTML escrito para os testes e servido pelo próprio Playwright para o nome reservado `observe.test`, sem acesso à rede. O gráfico de teste foi desenhado por mim, com cores e fontes escolhidas para o teste; ele **não imita a Pocket Option**. Passar nele, no Linux ou no CI Windows, mostra que a captura, a detecção e o OCR funcionam juntos, mas não diz nada sobre o marcador da plataforma real.
+As páginas de teste são HTML escrito para os testes e servido pelo próprio Playwright para o nome reservado `observe.test`, sem acesso à rede. O gráfico de teste foi desenhado por mim. A etiqueta dele usa a cor e a opacidade medidas nas suas imagens, mas ele **não é a Pocket Option**: passar nele, no Linux ou no CI Windows, não diz nada sobre a plataforma real.
 
 ## 6. Bloqueios e riscos
 
-1. **Cotação na plataforma real.** O marcador real pode ter outra forma: por exemplo, sem caixa preenchida, com gradiente, com transparência ou com outra fonte. Nesse caso a lista de candidatos vem vazia ou a leitura fica indisponível, e a imagem `runtime/cotacao-candidatos.png` mostra o que foi capturado.
-2. **Cor variável.** Se o marcador muda de cor, por exemplo com a direção do preço, cada cor nova precisa ser somada com `n` e `+` na configuração. Até isso, a cotação fica indisponível nessa cor.
-3. **Janela visível.** A captura depende de a janela do navegador estar visível e não minimizada. O gráfico precisa caber inteiro na área visível, e o mouse sobre o gráfico pode criar uma etiqueta de cursor da mesma cor, o que deixa a leitura ambígua.
-4. **Latência.** Cada leitura é um instante: a captura e o OCR levam dezenas de milissegundos, e a cotação pode mudar logo depois.
-5. **Login.** Só você pode fazer. Não tentei login nem pedi credenciais.
-6. **robots.txt veda `*/cabinet*`.** Por isso nada foi aberto na plataforma a partir do servidor.
-7. **Termos de uso.** Os Termos permitem cancelar ou revisar resultados de operações feitas com software robô não autorizado, e o blog diz que o único bot permitido é o do Telegram. Este coletor não opera, mas automatiza o navegador na sua conta. Se a Pocket Option considerar isso uso não autorizado, o risco é seu.
-8. **Situação no Brasil.** Há o alerta da CVM da seção 1. Além disso, em 14/10/2026 o rodapé do blog oficial dizia: "This website does not provide service to residents of the EEA countries, USA, Israel, UK, Philippines, Japan and Brazil".
+1. **`[Errno 22]` ao escolher o marcador de novo.** A imagem dos candidatos tinha nome fixo. A primeira cópia ainda estava aberta no visualizador, que o programa abre com `os.startfile`, e a segunda gravação tentou regravá-la.
+   - Um visualizador mapeia na memória a imagem que mostra, e o Windows recusa truncar um arquivo mapeado (erro `ERROR_USER_MAPPED_FILE`). O Python mostra esse erro como `[Errno 22] Invalid argument`.
+   - O CI Windows reproduz o erro com um mapeamento de memória no lugar do visualizador; o app Fotos não foi testado.
+   - Agora cada captura grava um arquivo novo, criado com `x`, que nunca sobrescreve outro. Uma falha de gravação mostra o motivo e oferece tentar de novo, continuar sem a imagem ou desistir da leitura visual, sem fechar o navegador. A gravação final dos seletores também pode ser repetida.
+2. **Calibração aceita sem leitura válida.** Antes, um candidato sem cotação legível podia ser escolhido, e as prévias podiam ser aceitas mesmo indisponíveis. Agora o candidato é recusado, e Enter só aceita quando as 3 prévias leram uma cotação.
+3. **Etiqueta semitransparente.** A cor da etiqueta muda com o que está atrás. Uma cor conta como da etiqueta até 40 níveis por canal de uma das cores gravadas.
+   - As duas cores medidas diferem em 32, então uma calibração sobre a vela verde cobre também o fundo, e vice-versa.
+   - Sobre uma vela vermelha, a cor calculada para a mesma etiqueta (`#6e6b8d`) fica a 47 de `#3f638e` e a 37 de `#498390`. Uma calibração feita só sobre o fundo deixa a cotação indisponível ali até você somar essa cor com `n` e `+`. Esse caso foi testado só em imagem sintética.
+4. **Tempo de captura.** As prévias levaram de 2 a 3,5 s, e a causa ainda não foi medida no Windows (seção 5).
+5. **Janela visível.** A captura depende de a janela do navegador estar visível e não minimizada. O gráfico precisa caber inteiro na área visível, e o mouse sobre o gráfico pode criar uma etiqueta de cursor que deixa a leitura ambígua.
+6. **Latência.** Cada leitura é um instante, e a cotação pode mudar logo depois.
+7. **Login.** Só você pode fazer. Não tentei login nem pedi credenciais.
+8. **robots.txt veda `*/cabinet*`.** Por isso nada foi aberto na plataforma a partir do servidor.
+9. **Termos de uso.** Os Termos permitem cancelar ou revisar resultados de operações feitas com software robô não autorizado, e o blog diz que o único bot permitido é o do Telegram. Este coletor não opera, mas automatiza o navegador na sua conta. Se a Pocket Option considerar isso uso não autorizado, o risco é seu.
+10. **Situação no Brasil.** Há o alerta da CVM da seção 1. Além disso, em 14/10/2026 o rodapé do blog oficial dizia: "This website does not provide service to residents of the EEA countries, USA, Israel, UK, Philippines, Japan and Brazil".
 
 ## 7. Como validar no seu Windows
 
 Os lançadores estão descritos no [README](README.md#windows-os-dois-lançadores). Se puder, valide primeiro na conta demo.
 
-1. Na pasta `claude`, rode `git pull` e abra `preparar_windows.cmd`. Ele deve terminar com "o OCR local leu 1.26543 numa imagem de teste" e "tudo pronto".
-2. Abra `observar_windows.cmd`, cole o link, faça o login e vá até a tela de operações. Pressione Enter no terminal.
-3. Ativo e payout: pressione Enter para manter os seletores gravados e Enter de novo depois de cada prévia.
-4. Cotação: digite `buscar`. Se um resultado mostrar a mesma cotação da tela e acompanhar as mudanças, digite o número dele. Se nenhum servir, digite `ocr`.
-5. Na leitura visual:
-   - cole o seletor do gráfico (no seu teste, o DevTools mostrou `canvas.layer.plot`);
-   - olhe a imagem que abrir e digite o número do marcador da cotação atual;
-   - compare as 3 prévias com a cotação da tela. Enter aceita; `r` repete; `n` escolhe de novo.
-6. No resumo, confira os três campos e pressione Enter. Compare as 3 linhas `OBSERVAÇÃO` com a tela.
-7. Me envie:
-   - a saída do terminal;
+1. Na pasta `claude`, rode `git pull` e abra `preparar_windows.cmd`. Ele deve terminar com "tudo pronto".
+2. Abra `observar_windows.cmd`, faça o login e pressione Enter. Mantenha ativo e payout com Enter.
+3. Na cotação, digite `ocr` e cole `canvas.layer.plot`.
+4. Tire o mouse do gráfico. Na lista de candidatos, escolha o número cujo "texto lido" é a cotação da tela. Um candidato "não pode ser escolhido" quando não tem cotação legível.
+5. Compare as 3 prévias com a tela e anote o tempo de cada etapa. Se alguma ficar `INDISPONÍVEL`, Enter repete; com as 3 lidas e iguais à tela, Enter aceita.
+6. Teste também o `n`, para escolher o marcador de novo com a imagem anterior ainda aberta: ele deve mostrar outra imagem, sem `PARADA`.
+7. Compare as 3 linhas `OBSERVAÇÃO` com a tela.
+8. Me envie:
+   - a saída do terminal, com os tempos;
    - se cada cotação bateu com a tela;
-   - as imagens `runtime\cotacao-candidatos.png` e `runtime\cotacao-previa.png`, se não mostrarem dados seus.
+   - as imagens `runtime\cotacao-candidatos-...png` e `runtime\cotacao-previa-...png` da execução, se não mostrarem dados seus.
 
 Só com os três campos correspondendo à plataforma a coleta será considerada comprovada.
