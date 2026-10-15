@@ -4,7 +4,9 @@ rem
 rem Usa o Python de .venv, criado por preparar_windows.cmd, para rodar
 rem     python -m pocketautonomo.observe --configure --count 3
 rem O programa pede o link (se voce nao passar --url), abre o navegador para o seu login,
-rem pede os seletores de ativo, preco e payout, com previa, e faz 3 observacoes.
+rem pede as fontes do ativo, da cotacao do ativo e do payout, com previa, e faz 3
+rem observacoes. A cotacao pode vir de um seletor, da busca em texto (buscar) ou da
+rem leitura visual do marcador no grafico, com OCR local (ocr).
 rem Argumentos extras vao para o programa, por exemplo: observar_windows.cmd --interval 10
 rem O coletor nao envia ordens, nao clica em CALL/PUT e reutiliza runtime\ (perfil do
 rem navegador, seletores e CSV) sem apagar nada.

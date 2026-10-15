@@ -25,7 +25,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from pocketautonomo import observe
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # chart_images, next to the tests
+
+import chart_images  # noqa: E402
+from pocketautonomo import observe  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 URL = "https://pocketoption.com/pt/tela-de-teste/"  # invented path, never opened
@@ -41,10 +44,11 @@ FORBIDDEN_ATTRIBUTES = {
     "evaluate", "evaluate_all", "evaluate_handle", "expect_request", "expect_response",
     "expect_websocket", "expose_binding", "expose_function", "fill", "focus", "hover",
     "keyboard", "mouse", "on", "once", "press", "press_sequentially", "request", "route",
-    "route_from_har", "route_web_socket", "screenshot", "select_option", "select_text",
+    "route_from_har", "route_web_socket", "select_option", "select_text",
     "set_checked", "set_extra_http_headers", "set_input_files", "storage_state", "tap",
     "touchscreen", "type", "uncheck",
 }
+# screenshot is allowed only with a clip, to memory: see test_the_collector_has_no_call_that_acts_on_the_page.
 
 # What one main() call returned and printed, with its FakeSession.
 Run = collections.namedtuple("Run", "code out err session")
@@ -67,12 +71,15 @@ class FakeSession:
     each wait and runs wait_actions[n] on the n-th one.
     """
 
-    def __init__(self, elements=None, url=URL, wait_actions=None):
+    def __init__(self, elements=None, url=URL, wait_actions=None, captures=None, texts=None):
         self.elements = dict(elements or {})
         self.url = url
         self.wait_actions = wait_actions or {}
+        self.captures = dict(captures or {})  # chart selector -> RgbImage, Capture or exception
+        self.texts = list(texts or [])  # what find_quote_texts finds
         self.opened = []
         self.reads = []
+        self.capture_calls = []
         self.waits = []
         self.window_closed = False
         self.closes = 0
@@ -94,6 +101,21 @@ class FakeSession:
         if isinstance(answer, BaseException):
             raise answer
         return answer
+
+    def capture(self, selector, timeout_ms):
+        """A Capture at 1 device pixel per CSS pixel, like read() for the chart."""
+        self.capture_calls.append(selector)
+        answer = self.captures[selector]
+        if isinstance(answer, list):
+            answer = answer.pop(0) if len(answer) > 1 else answer[0]
+        if isinstance(answer, BaseException):
+            raise answer
+        if isinstance(answer, observe.Capture):
+            return answer
+        return observe.Capture(1, True, answer, answer.width)
+
+    def find_quote_texts(self, limit):
+        return self.texts[:limit]
 
     def wait(self, seconds):
         self.waits.append(seconds)
@@ -124,6 +146,24 @@ class Answers:
         if isinstance(answer, type) and issubclass(answer, BaseException):
             raise answer
         return answer() if callable(answer) else answer
+
+
+class FakeMonotonic:
+    """Stands in for time.perf_counter: 2 ms later at each call."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        return 100 + 0.002 * self.calls
+
+
+def context(**options):
+    """An observe.Context with the fake clocks, for calls outside main()."""
+    options.setdefault("now", FakeClock())
+    options.setdefault("monotonic", FakeMonotonic())
+    return observe.Context(**options)
 
 
 class FakeClock:
@@ -316,7 +356,7 @@ class ObserveTestCase(unittest.TestCase):
         self.runtime.mkdir(parents=True, exist_ok=True)
         self.selectors_path.write_text(json.dumps(selectors), encoding="utf-8")
 
-    def run_main(self, *args, session=None, answers=("",), url=URL, real_adapter=False):
+    def run_main(self, *args, session=None, answers=("",), url=URL, real_adapter=False, engine=None):
         """Run main() with --url url, unless url is None, and args, capturing what it prints.
 
         answers go, in order, to the questions of the program; the default Enter confirms
@@ -330,7 +370,15 @@ class ObserveTestCase(unittest.TestCase):
             self.profile_dirs.append(profile_dir)
             return session
 
-        options = {"read_line": self.answers, "now": FakeClock()}
+        self.shown_images = []
+        self.engine = chart_images.FakeEngineHolder(engine)
+        options = {
+            "read_line": self.answers,
+            "now": FakeClock(),
+            "monotonic": FakeMonotonic(),
+            "engine": self.engine,
+            "show_image": self.shown_images.append,
+        }
         if not real_adapter:
             options["open_session"] = open_session
         argv = (["--url", url] if url is not None else []) + list(args)
@@ -393,12 +441,12 @@ class SelectorsAndValuesTest(ObserveTestCase):
     def test_values_are_checked_before_being_accepted(self):
         accepted = {
             observe.parse_asset: [("EUR/USD OTC", "EUR/USD OTC"), ("  Ativo   de teste ", "Ativo de teste")],
-            observe.parse_price: [("1.08534", "1.08534"), ("62,345.12", "62,345.12"), (" 100 ", "100")],
+            observe.parse_price: [("1.08534", "1.08534"), ("62,345.12", "62,345.12"), (" 158.123 ", "158.123")],
             observe.parse_payout: [("+92%", "92"), ("92 %", "92"), ("85.5%", "85.5"), ("90\u00a0%", "90")],
         }
         refused = {
             observe.parse_asset: ["", "  ", "1.08534", "EUR/USD\n92%", "A" * 61, "=HYPERLINK(1)", "-teste"],
-            observe.parse_price: ["", "Preço", "1.0853 ▲", "-1.2", "1..2", "1.2%"],
+            observe.parse_price: ["", "Preço", "1.0853 ▲", "-1.2", "1..2", "1.2%", "100", "10", "$10.00"],
             observe.parse_payout: ["", "92", "%", "1000%", "Payout 92%", "-92%"],
         }
         for parse, cases in accepted.items():
@@ -417,18 +465,21 @@ class ObserveOnceTest(ObserveTestCase):
     def test_each_field_comes_only_from_its_own_selector(self):
         selectors = {"asset": "#ativo", "price": "#preco", "payout": None}
         session = FakeSession({"#ativo": shown("EUR/USD OTC"), "#preco": shown("1.08534")})
-        observation = observe.observe_once(session, selectors, FakeClock())
+        observation = observe.observe_once(session, selectors, context())
         self.assertEqual(session.reads, ["#ativo", "#preco"])  # no selector, no reading
         self.assertEqual((observation.captured_at, observation.page), (START, URL))
         self.assertTrue(observation.valid)
         self.assertEqual(
-            observation.readings,
+            {field: (reading.value, reading.status, reading.source) for field, reading in observation.readings.items()},
             {
-                "asset": observe.FieldReading("EUR/USD OTC", "ok: #ativo"),
-                "price": observe.FieldReading("1.08534", "ok: #preco"),
-                "payout": observe.FieldReading(None, "indisponível: sem seletor em observe-selectors.json"),
+                "asset": ("EUR/USD OTC", "ok: #ativo", "texto"),
+                "price": ("1.08534", "ok: #preco", "texto"),
+                "payout": (None, "indisponível: sem seletor em observe-selectors.json", None),
             },
         )
+        price = observation.readings["price"]
+        self.assertEqual((price.captured_at, price.processing_ms), (START + timedelta(seconds=10), 2.0))
+        self.assertEqual((observation.completeness, observation.duration_ms), ("parcial", 10.0))
         failures = (
             (observe.ElementText(0), "o seletor não encontrou nenhum elemento"),
             (observe.ElementText(2), "o seletor encontrou 2 elementos; precisa encontrar exatamente 1"),
@@ -439,14 +490,14 @@ class ObserveOnceTest(ObserveTestCase):
         for answer, reason in failures:
             with self.subTest(reason=reason):
                 session = FakeSession({"#preco": answer})
-                observation = observe.observe_once(session, {"price": "#preco"}, FakeClock())
-                self.assertEqual(observation.readings["price"], observe.FieldReading(None, f"indisponível: {reason}"))
+                observation = observe.observe_once(session, {"price": "#preco"}, context())
+                self.assertEqual(observation.readings["price"].status, f"indisponível: {reason}")
                 self.assertEqual(observation.readings["price"].reason, reason)
                 self.assertFalse(observation.valid)
 
     def test_a_page_outside_pocketoption_is_not_read(self):
         session = FakeSession({"#ativo": shown("EUR/USD OTC")}, url="https://example.org/entrar?ssid=SEGREDO")
-        observation = observe.observe_once(session, {"asset": "#ativo"}, FakeClock())
+        observation = observe.observe_once(session, {"asset": "#ativo"}, context())
         self.assertEqual(session.reads, [])
         self.assertFalse(observation.valid)
         self.assertEqual(observation.page, "https://example.org")
@@ -472,20 +523,25 @@ class MainTest(ObserveTestCase):
         self.assertEqual(session.reads, ["#ativo-teste", "#preco-teste", "#payout-teste"] * 3)
         self.assertEqual(session.waits, [5.0, 5.0])  # the session's wait, between observations only
         ok = ["ok: #ativo-teste", "ok: #preco-teste", "ok: #payout-teste"]
+        # The quote is read after the asset: 5 s later on the fake clock, in 2 ms on the fake
+        # timer; the whole observation took 7 timer steps, 14 ms.
         self.assertEqual(
             self.csv_rows(),
             [
-                [f"2026-10-14T12:00:{second:02d}.000+00:00", URL, "EUR/USD OTC", ok[0], price, ok[1], "92", ok[2]]
-                for second, price in ((0, "1.08534"), (5, "1.08540"), (10, "1.08529"))
+                [
+                    f"2026-10-14T12:00:{start:02d}.000+00:00", URL, "EUR/USD OTC", ok[0], price, ok[1], "92", ok[2],
+                    "completa", "texto", f"2026-10-14T12:00:{start + 10:02d}.000+00:00", "2.0", "14.0",
+                ]
+                for start, price in ((0, "1.08534"), (20, "1.08540"), (40, "1.08529"))
             ],
         )
         self.assertRegex(self.csv_files()[0].name, r"^observations-\d{8}-\d{6}-[0-9a-f]{8}\.csv$")
         self.assertIn(
-            f"OBSERVAÇÃO 1 | 2026-10-14T12:00:00.000+00:00 | {URL} | ativo EUR/USD OTC"
-            " | cotação do ativo 1.08534 | payout 92% | gravada no CSV",
+            f"OBSERVAÇÃO 1 COMPLETA | relógio local 2026-10-14T12:00:00.000+00:00 | {URL} | ativo EUR/USD OTC"
+            " | cotação do ativo 1.08534 (texto, 2 ms) | payout 92% | gravada no CSV",
             run.out,
         )
-        self.assertIn("Concluído: 3 observações, 3 válidas gravadas.", run.out)
+        self.assertIn("Concluído: 3 observações, 3 válidas gravadas (3 completas e 0 parciais).", run.out)
         self.assertIn("Compare as observações com a tela", run.out)
         self.assertIn("Navegador fechado.", run.out)
 
@@ -499,7 +555,7 @@ class MainTest(ObserveTestCase):
         )
         run = self.run_main("--count", "3", "--interval", "1", session=session)
         self.assertEqual((run.code, run.err), (0, ""))
-        self.assertIn("Campos com seletor: ativo, cotação do ativo | sem seletor, ficam indisponíveis: payout", run.out)
+        self.assertIn("Campos com fonte: ativo, cotação do ativo | sem fonte, ficam indisponíveis: payout", run.out)
         rows = self.csv_rows()
         self.assertEqual(len(rows), 2)  # the third observation had no available field
         self.assertEqual(
@@ -508,6 +564,7 @@ class MainTest(ObserveTestCase):
                 "EUR/USD OTC", "ok: #ativo-teste",
                 "", "indisponível: o seletor não encontrou nenhum elemento",
                 "", "indisponível: sem seletor em observe-selectors.json",
+                "parcial", "texto", "2026-10-14T12:00:25.000+00:00", "2.0", "10.0",
             ],
         )
         self.assertIn(
@@ -515,7 +572,9 @@ class MainTest(ObserveTestCase):
             " | payout INDISPONÍVEL (sem seletor em observe-selectors.json) | gravada no CSV",
             run.out,
         )
-        self.assertIn("OBSERVAÇÃO 3 | 2026-10-14T12:00:10.000+00:00", run.out)
+        # The clock is read at the start and before each field with a source: 3 times here.
+        self.assertIn("OBSERVAÇÃO 2 PARCIAL | relógio local 2026-10-14T12:00:15.000+00:00", run.out)
+        self.assertIn("OBSERVAÇÃO 3 SEM CAMPOS | relógio local 2026-10-14T12:00:30.000+00:00", run.out)
         self.assertIn("não gravada: nenhum campo disponível", run.out)
         self.assertEqual(session.waits, [1.0, 1.0])
 
@@ -546,7 +605,7 @@ class MainTest(ObserveTestCase):
         self.assertEqual((run.code, run.err), (130, ""))
         self.assertEqual(len(self.csv_rows()), 1)
         self.assertEqual(session.closes, 1)
-        self.assertIn("Interrompido por Ctrl+C: 1 observação, 1 válida gravada.", run.out)
+        self.assertIn("Interrompido por Ctrl+C: 1 observação, 1 válida gravada (1 completa e 0 parciais).", run.out)
         self.assertIn("CSV preservado:", run.out)
         self.assertIn("Navegador fechado.", run.out)
         # In a terminal, Ctrl+C also stops the Playwright driver, so closing may fail.
@@ -661,7 +720,7 @@ class ConfigureTest(ObserveTestCase):
         self.assertEqual(run.out.count(observe.COMPARE_WITH_SCREEN), 2)  # after each summary
         self.assertEqual(run.out.count(observe.QUOTE_NOTE), 1)  # before the quote's selector
         self.assertIn("Não é o valor da aposta: esse é o campo Amount", observe.QUOTE_NOTE)
-        self.assertIn("Cotação do ativo: ainda sem seletor.", run.out)
+        self.assertIn("Cotação do ativo: ainda sem fonte.", run.out)
         self.assertIn(f"Seletores gravados em {self.selectors_path}.", run.out)
         self.assertEqual(len(self.csv_rows()), 1)
         self.assertNotIn("SEGREDO", run.out + run.err)
@@ -688,7 +747,7 @@ class ConfigureTest(ObserveTestCase):
         self.assertEqual(saved["_nota"], "minha anotação")
         self.assertEqual(saved["_leia_me"], observe.SELECTORS_TEMPLATE["_leia_me"])
         self.assertIn(r'"payout": "#pay\\:out > span[title=\"Payout \\\"atual\\\"\"]"', self.selectors_path.read_text(encoding="utf-8"))
-        self.assertEqual(self.csv_rows()[0][2:], ["EUR/USD OTC", f"ok: {asset}", "1.08534", f"ok: {price}", "92", f"ok: {payout}"])
+        self.assertEqual(self.csv_rows()[0][2:9], ["EUR/USD OTC", f"ok: {asset}", "1.08534", f"ok: {price}", "92", f"ok: {payout}", "completa"])
 
     def test_the_quote_keeps_the_price_key_and_answers_to_its_new_name(self):
         self.write_selectors(asset="#ativo", price="#preco-antigo", payout="#payout")
@@ -758,6 +817,211 @@ class ConfigureTest(ObserveTestCase):
                 self.assertEqual(self.selectors_path.read_bytes(), original)
                 self.assertEqual((session.closes, self.csv_files()), (1, []))
                 self.assertEqual(sorted(path.name for path in self.runtime.iterdir()), [observe.SELECTORS_FILE_NAME])
+
+
+BLUE_MARKER = {"colors": ["#2962ff"], "width": 68.0, "height": 18.0, "right_gap": 1.0, "tolerance": 20}
+VISUAL = {"chart": "#grafico", "marker": BLUE_MARKER}
+
+
+class VisualQuoteTest(ObserveTestCase):
+    """The quote read from a synthetic chart, with FakeEngine in place of the OCR."""
+
+    def test_the_file_keeps_the_visual_source_apart_from_the_price_key(self):
+        self.write_selectors(asset="#ativo", price="", payout="#payout", price_ocr=VISUAL)
+        selectors = observe.load_selectors(self.selectors_path)
+        source = selectors["price"]
+        self.assertIsInstance(source, observe.QuoteOcrSource)
+        self.assertEqual((source.chart, source.marker.to_json()), ("#grafico", BLUE_MARKER))
+        observe.save_selectors(self.selectors_path, selectors, False)
+        saved = self.saved_selectors()
+        self.assertEqual((saved["price"], saved["price_ocr"]), ("", VISUAL))
+        selectors["price"] = "#cotacao"  # back to text: price_ocr leaves the file
+        observe.save_selectors(self.selectors_path, selectors, False)
+        self.assertNotIn("price_ocr", self.saved_selectors())
+        broken = (
+            {"price": "#cotacao", "price_ocr": VISUAL},  # two sources for the quote
+            {"price_ocr": {"chart": "", "marker": BLUE_MARKER}},
+            {"price_ocr": {"chart": "#grafico", "marker": {**BLUE_MARKER, "colors": ["azul"]}}},
+            {"price_ocr": {"chart": "#grafico", "marker": BLUE_MARKER, "y": 150}},
+        )
+        for data in broken:
+            with self.subTest(data=data):
+                self.write_selectors(**data)
+                with self.assertRaises(observe.ConfigError):
+                    observe.load_selectors(self.selectors_path)
+
+    def test_observations_record_the_source_the_moment_and_the_duration(self):
+        self.write_selectors(asset="#ativo", price="", payout="#payout", price_ocr=VISUAL)
+        session = FakeSession(
+            {"#ativo": shown("GBP/USD OTC"), "#payout": shown("92%")},
+            captures={"#grafico": [chart_images.chart(marker_y=150), chart_images.chart(marker_y=None)]},
+        )
+        run = self.run_main("--count", "2", session=session)
+        self.assertEqual((run.code, run.err), (0, ""))
+        rows = self.csv_rows()
+        self.assertEqual(
+            rows[0][2:],
+            [
+                "GBP/USD OTC", "ok: #ativo", "1.26543", "ok: ocr #grafico", "92", "ok: #payout",
+                "completa", "ocr", "2026-10-14T12:00:10.000+00:00", "2.0", "14.0",
+            ],
+        )
+        # Without the marker the quote is unavailable: empty, never zero, nor the earlier value.
+        self.assertEqual(rows[1][4:9], ["", rows[1][5], "92", "ok: #payout", "parcial"])
+        self.assertIn("indisponível: o marcador da cotação não apareceu", rows[1][5])
+        self.assertEqual(rows[1][9], "ocr")
+        self.assertIn("cotação do ativo 1.26543 (leitura visual, 2 ms)", run.out)
+        self.assertIn("OBSERVAÇÃO 2 PARCIAL", run.out)
+        self.assertIn("Campos com fonte: ativo, cotação do ativo (leitura visual), payout", run.out)
+        self.assertEqual(session.capture_calls, ["#grafico", "#grafico"])
+        self.assertEqual(self.engine.gets, 3)  # once before the first observation, then per reading
+
+    def test_capture_problems_are_reasons(self):
+        cases = (
+            (observe.Capture(0), "o seletor do gráfico (#grafico) não encontrou nenhum elemento"),
+            (observe.Capture(2), "encontrou 2 elementos; precisa encontrar exatamente 1"),
+            (observe.Capture(1), "o elemento do gráfico (#grafico) não está visível"),
+            (observe.Capture(1, True, None, 900.0, clipped=True), "não cabe inteiro na área visível da janela"),
+            (observe.ReadError("Error: Timeout 5000ms exceeded"), "a captura do gráfico falhou: Error: Timeout"),
+        )
+        source = observe.QuoteOcrSource("#grafico", observe.quote_reader.MarkerModel.from_json(BLUE_MARKER))
+        for answer, reason in cases:
+            with self.subTest(reason=reason):
+                session = FakeSession(captures={"#grafico": answer})
+                ctx = context(engine=chart_images.FakeEngineHolder())
+                reading = observe.read_field(session, "price", source, ctx)
+                self.assertIsNone(reading.value)
+                self.assertIn(reason, reading.status)
+                self.assertEqual(reading.source, "ocr")
+
+    def test_a_missing_ocr_stops_before_the_first_observation(self):
+        self.write_selectors(asset="#ativo", price="", payout="#payout", price_ocr=VISUAL)
+
+        def missing():
+            raise observe.OcrUnavailable("o OCR local não está instalado neste Python")
+
+        session = FakeSession({"#ativo": shown("GBP/USD OTC"), "#payout": shown("92%")})
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = observe.main(
+                ["--url", URL, "--count", "1"],
+                open_session=lambda profile: session,
+                read_line=Answers([""]),
+                now=FakeClock(),
+                engine=observe.LazyEngine(missing),
+            )
+        self.assertEqual(code, 2)
+        self.assertIn("CONFIGURAÇÃO: o OCR local não está instalado neste Python", err.getvalue())
+        self.assertEqual((session.reads, session.capture_calls, self.csv_files()), ([], [], []))
+
+
+class ConfigureQuoteTest(ObserveTestCase):
+    def test_ocr_lists_candidates_previews_and_saves_the_marker(self):
+        image = chart_images.chart(marker_y=150, cursor_y=60)
+        session = FakeSession(
+            {"#ativo": shown("GBP/USD OTC"), "#payout": shown("92%")},
+            captures={"#grafico": image},
+        )
+        answers = [
+            "",  # Enter after the login
+            "#ativo", "",
+            "ocr",  # the quote, read from the chart
+            "#grafico",  # the chart element
+            "2",  # candidate 2 is the current-quote marker; 1 is the cursor's label
+            "",  # the previews matched the screen: accept
+            "#payout", "",
+            "",  # summary: save
+        ]
+        run = self.run_main("--configure", "--count", "1", session=session, answers=answers)
+        self.assertEqual((run.code, run.err), (0, ""))
+        self.assertEqual(self.answers.pending, [])
+        saved = self.saved_selectors()
+        self.assertEqual(saved["price"], "")
+        self.assertEqual(saved["price_ocr"], VISUAL)  # color, size and right gap; no height
+        candidates, previews = self.runtime / "cotacao-candidatos.png", self.runtime / "cotacao-previa.png"
+        self.assertEqual(self.shown_images, [candidates, previews])
+        for path in (candidates, previews):
+            self.assertEqual(path.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
+        self.assertIn("  1: caixa #4a4f5e de 68x18 px, a 1 px da borda direita; texto lido: 1.26543", run.out)
+        self.assertIn("  2: caixa #2962ff de 68x18 px, a 1 px da borda direita; texto lido: 1.26543", run.out)
+        self.assertEqual(run.out.count("Prévia 1, relógio local"), 1)
+        self.assertIn("Prévia 3, relógio local", run.out)
+        self.assertEqual(session.waits, [1.0, 1.0])  # between the previews, with the session's wait
+        self.assertIn(observe.COMPARE_QUOTE, run.out)
+        self.assertIn("cotação do ativo: 1.26543 (leitura visual (OCR) do marcador #2962ff, no elemento #grafico)", run.out)
+        self.assertEqual(self.csv_rows()[0][4:10], ["1.26543", "ok: ocr #grafico", "92", "ok: #payout", "completa", "ocr"])
+        # Only the two preview images were added to runtime/.
+        self.assertEqual(
+            sorted(path.name for path in self.runtime.iterdir() if not path.name.startswith("observations-")),
+            ["cotacao-candidatos.png", "cotacao-previa.png", "observe-selectors.json"],
+        )
+
+    def test_search_lists_text_candidates_and_uses_the_one_chosen(self):
+        session = FakeSession(
+            {"#ativo": shown("GBP/USD OTC"), "#fechamento": shown("1.26000"), "#payout": shown("92%")},
+            texts=[observe.TextMatch("1.26000", "#fechamento"), observe.TextMatch("62,345.12", None)],
+        )
+        answers = [
+            "",
+            "#ativo", "",
+            "buscar",
+            "2",  # no unique selector
+            "buscar",
+            "1", "",  # the first result, previewed and accepted
+            "#payout", "",
+            "",
+        ]
+        run = self.run_main("--configure", "--count", "1", session=session, answers=answers)
+        self.assertEqual((run.code, run.err), (0, ""))
+        self.assertEqual(self.answers.pending, [])
+        self.assertIn("  1: 1.26000 | seletor #fechamento", run.out)
+        self.assertIn("  2: 62,345.12 | sem seletor único; use o DevTools nele", run.out)
+        self.assertIn("nenhum é escolhido sozinho", run.out)
+        self.assertIn("Esse número não é de um resultado com seletor único.", run.out)
+        self.assertIn("Prévia da cotação do ativo, lida agora: 1.26000. Confira se é o que a tela mostra.", run.out)
+        self.assertEqual(self.saved_selectors()["price"], "#fechamento")
+        self.assertNotIn("price_ocr", self.saved_selectors())
+        # Without results, the search says so and points to ocr. This run reuses the file
+        # saved above: Enter keeps the asset, then buscar, - for no quote, - for no payout.
+        session = FakeSession({"#ativo": shown("GBP/USD OTC")})
+        run = self.run_main("--configure", "--count", "1", session=session, answers=["", "", "", "buscar", "-", "-", ""])
+        self.assertIn("Nenhum elemento de texto visível da página tem um número com casas decimais.", run.out)
+        self.assertIn("Cotação do ativo: sem fonte, o campo fica INDISPONÍVEL.", run.out)
+
+    def test_a_changed_marker_color_can_be_added(self):
+        self.write_selectors(asset="#ativo", price="", payout="#payout", price_ocr=VISUAL)
+        green = chart_images.chart(marker_y=150, marker_color=chart_images.GREEN)
+        session = FakeSession({"#ativo": shown("GBP/USD OTC"), "#payout": shown("92%")}, captures={"#grafico": green})
+        answers = [
+            "",
+            "", "",  # asset kept
+            "",  # the quote's current source kept: previews follow
+            "n",  # the previews were unavailable: choose the marker again
+            "",  # the same chart element
+            "1",  # the green marker
+            "+",  # add its color to the saved one
+            "",  # previews accepted
+            "", "",  # payout kept
+            "",
+        ]
+        run = self.run_main("--configure", "--count", "1", session=session, answers=answers)
+        self.assertEqual((run.code, run.err), (0, ""))
+        self.assertEqual(self.answers.pending, [])
+        self.assertIn("Prévia 1, relógio local 2026-10-14T12:00:", run.out)
+        self.assertIn("INDISPONÍVEL (o marcador da cotação não apareceu", run.out)
+        self.assertEqual(self.saved_selectors()["price_ocr"]["marker"]["colors"], ["#2962ff", "#26a69a"])
+        self.assertEqual(self.csv_rows()[0][4], "1.26543")
+
+    def test_giving_up_the_visual_reading_keeps_the_file(self):
+        self.write_selectors(asset="#ativo", price="", payout="#payout", price_ocr=VISUAL)
+        original = self.selectors_path.read_bytes()
+        session = FakeSession({"#ativo": shown("GBP/USD OTC")}, captures={"#grafico": chart_images.chart(marker_y=None)})
+        answers = ["", "", "", "ocr", "", "-", EOFError]  # no candidate: give up, then stop
+        run = self.run_main("--configure", "--count", "1", session=session, answers=answers)
+        self.assertEqual(run.code, 1)
+        self.assertIn("Nenhuma caixa com texto apareceu na metade direita do gráfico.", run.out)
+        self.assertIn("Leitura visual não configurada.", run.out)
+        self.assertEqual(self.selectors_path.read_bytes(), original)
 
 
 class PlaywrightSessionTest(ObserveTestCase):
@@ -852,12 +1116,26 @@ class PlaywrightSessionTest(ObserveTestCase):
 
 class ReadOnlySourceTest(unittest.TestCase):
     def test_the_collector_has_no_call_that_acts_on_the_page(self):
-        tree = ast.parse((ROOT / "pocketautonomo" / "observe.py").read_text(encoding="utf-8"))
-        attributes = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
-        self.assertEqual(attributes & FORBIDDEN_ATTRIBUTES, set())
-        self.assertNotIn("sleep", attributes)  # the waits go through Playwright, never time.sleep
-        names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
-        self.assertEqual(names & {"getattr", "setattr", "eval", "exec", "__import__"}, set())
+        for name in ("observe.py", "quote_reader.py", "quote_ocr.py"):
+            with self.subTest(module=name):
+                tree = ast.parse((ROOT / "pocketautonomo" / name).read_text(encoding="utf-8"))
+                attributes = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+                self.assertEqual(attributes & FORBIDDEN_ATTRIBUTES, set())
+                self.assertNotIn("sleep", attributes)  # waits go through Playwright, never time.sleep
+                names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+                self.assertEqual(names & {"getattr", "setattr", "eval", "exec", "__import__"}, set())
+                # The only screenshot is the chart's clip, returned to memory: no file, no full page.
+                shots = [
+                    node
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "screenshot"
+                ]
+                self.assertEqual(len(shots), 1 if name == "observe.py" else 0)
+                for call in shots:
+                    keywords = {keyword.arg for keyword in call.keywords}
+                    self.assertEqual(call.args, [])
+                    self.assertIn("clip", keywords)
+                    self.assertEqual(keywords & {"path", "full_page"}, set())
 
     def test_runs_with_python_dash_m(self):
         with tempfile.TemporaryDirectory() as directory:

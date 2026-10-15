@@ -1,10 +1,11 @@
 @echo off
 rem preparar_windows.cmd - prepara o coletor somente leitura do PocketAutonomo no Windows.
 rem
-rem 1. Procura um Python 3.10 ou mais novo, de 64 bits: py -3.12, py -3 e python, nessa ordem.
+rem 1. Procura um Python 3.11 ou mais novo, de 64 bits: py -3.12, py -3 e python, nessa ordem.
 rem 2. Com esse Python, roda "python -m pocketautonomo.setup_observer", que cria ou reutiliza
 rem    .venv, instala a versao do Playwright definida em pocketautonomo\observe.py
-rem    (PLAYWRIGHT_REQUIREMENT) e o Chromium dele, e testa a instalacao.
+rem    (PLAYWRIGHT_REQUIREMENT), o Chromium dele e o OCR local definido em
+rem    pocketautonomo\quote_ocr.py (OCR_REQUIREMENTS), e testa a instalacao.
 rem Um candidato so e aceito se o teste dele terminar com codigo exatamente 0: um codigo
 rem negativo, como o -1610612730 que o py devolve sem o Python pedido, tambem e falha.
 rem Os candidatos e o Python escolhido rodam com "call", para que um py.cmd ou python.bat no
@@ -30,16 +31,16 @@ set "CODIGO=%ERRORLEVEL%"
 goto :fim
 
 :experimentar
-call %* -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) and sys.maxsize > 2**32 else 1)" <nul >nul 2>&1
+call %* -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) and sys.maxsize > 2**32 else 1)" <nul >nul 2>&1
 if "%ERRORLEVEL%"=="0" set "PYTHON_CMD=%*"
 if not "%ERRORLEVEL%"=="0" echo %*: nao serve (codigo %ERRORLEVEL%).
 exit /b 0
 
 :sem_python
 echo.
-echo [ERRO] Nenhum Python 3.10 ou mais novo, de 64 bits, foi encontrado.
+echo [ERRO] Nenhum Python 3.11 ou mais novo, de 64 bits, foi encontrado.
 echo Procurei: py -3.12, py -3 e python.
-echo Instale o Python 3.12 de 64 bits de https://www.python.org/downloads/windows/
+echo Instale o Python 3.12 de 64 bits: "py install 3.12" ou https://www.python.org/downloads/windows/
 echo e rode preparar_windows.cmd de novo.
 goto :fim
 

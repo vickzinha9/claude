@@ -26,8 +26,22 @@ does it write the file, with json, so you never escape backslashes or quotes you
 found by a selector proves nothing by itself: only you, comparing it with the screen, can
 tell whether the selector reads the right element.
 
+The quote of the asset (cotação do ativo, kept under the key "price") can come from text,
+like the other fields, or from the chart: the trading screen draws its current-quote
+marker on a canvas, which has no text. With the visual source, set up by --configure, the
+program captures only the chart element given by a selector you checked, finds the
+current-quote marker in that image with quote_reader and reads it with the local OCR of
+quote_ocr. The image stays in memory; only the configuration's previews are written to
+runtime/. A reading that is missing, ambiguous or does not look like a quote is
+unavailable, with the reason: no zero, no correction, no earlier value. To check whether
+the quote also exists as text, --configure can search the page for visible elements whose
+text looks like a quote.
+
 Each observation carries its capture time, taken from this computer's clock in UTC right
-before the reading; no time is read from the platform. Observations with at least one
+before the reading; no time is read from the platform, and none of these times is the
+server's. The quote also records its source, the moment of its capture and how long the
+capture and the reading took, and each observation is marked complete, when the asset,
+the quote and the payout are all available, or partial. Observations with at least one
 available field are written, line by line, to a new CSV file in runtime/; the others are
 only shown in the terminal. The query and the fragment of a URL are never shown or written.
 Between two observations, the program waits with Playwright's page.wait_for_timeout, not
@@ -47,11 +61,15 @@ import math
 import os
 import re
 import sys
+import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
+
+from pocketautonomo import quote_reader
+from pocketautonomo.quote_ocr import OcrUnavailable, RapidOcrEngine, decode_png
 
 ALLOWED_DOMAIN = "pocketoption.com"
 RUNTIME_DIR = Path("runtime")  # relative to the current directory, like the simulation
@@ -70,23 +88,38 @@ QUOTE_NOTE = (
     " aplicado numa operação."
 )
 CSV_COLUMNS = (
-    "captured_at_utc",
+    # The first 8 columns are those of the earlier CSV files, in the same order.
+    "captured_at_utc",  # this computer's clock, in UTC; not the server's time
     "page",
     "asset",
     "asset_status",
-    "price",
+    "price",  # the quote of the asset (cotação do ativo), never the bet amount
     "price_status",
     "payout_percent",
     "payout_status",
+    "completeness",  # completa: asset, quote and payout available; parcial: not all of them
+    "price_source",  # texto, ocr, or empty without a source
+    "price_captured_at_utc",  # this computer's clock right before the quote was captured
+    "price_processing_ms",  # capture and reading of the quote, in milliseconds
+    "observation_ms",  # the whole observation, in milliseconds
 )
 OK = "ok"
 UNAVAILABLE = "indisponível"
+COMPLETE, PARTIAL, EMPTY = "completa", "parcial", "vazia"
+TEXT_SOURCE, OCR_SOURCE = "texto", "ocr"
+OCR_KEY = "price_ocr"  # the visual source of the quote in observe-selectors.json
 
 DEFAULT_INTERVAL = 5.0
 MIN_INTERVAL = 1.0
 NAVIGATION_TIMEOUT_MS = 60_000
 READ_TIMEOUT_MS = 2_000
+CAPTURE_TIMEOUT_MS = 5_000
 MAX_ASSET_LENGTH = 60
+PREVIEW_READINGS = 3
+SEARCH_RESULTS = 15
+SEARCH_SCAN = 60
+CANDIDATES_IMAGE = "cotacao-candidatos.png"
+PREVIEW_IMAGE = "cotacao-previa.png"
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -94,7 +127,10 @@ EXIT_CONFIG = 2
 EXIT_INTERRUPTED = 130
 
 HOST_PATTERN = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)*" + re.escape(ALLOWED_DOMAIN))
-PRICE_PATTERN = re.compile(r"[0-9]+(?:[.,][0-9]+)*")
+PRICE_PATTERN = quote_reader.QUOTE_PATTERN  # digits with at least one decimal separator
+INTEGER_PATTERN = re.compile(r"[0-9]+")
+# Visible text that looks like a quote, for the search of --configure.
+QUOTE_SEARCH_PATTERN = re.compile(r"^\s*[0-9]+(?:[.,][0-9]+)+\s*$")
 PAYOUT_PATTERN = re.compile(r"\+?([0-9]{1,3}(?:[.,][0-9]+)?)\s*%")
 URL_TAIL_PATTERN = re.compile(r"""([a-z][a-z0-9+.-]*:[^\s?#"'<>]*)[?#][^\s"'<>]*""", re.IGNORECASE)
 FORMULA_PREFIXES = ("=", "+", "-", "@")  # a spreadsheet could run such a cell as a formula
@@ -162,10 +198,18 @@ class ElementText:
 
 @dataclass(frozen=True)
 class FieldReading:
-    """One field of an observation: the value, or None, and "ok: <selector>" or the reason."""
+    """One field of an observation: the value, or None, and "ok: <selector>" or the reason.
+
+    source is texto or ocr; captured_at is this computer's clock, in UTC, right before the
+    capture; processing_ms is how long the capture and the reading took. All three are
+    None when there was nothing to read.
+    """
 
     value: object
     status: str
+    source: object = None
+    captured_at: object = None
+    processing_ms: object = None
 
     @property
     def available(self):
@@ -179,13 +223,99 @@ class FieldReading:
 
 @dataclass(frozen=True)
 class Observation:
-    captured_at: datetime
+    captured_at: datetime  # this computer's clock, in UTC, at the start of the observation
     page: str  # https://host/path, without user, port, query or fragment
     readings: dict  # field -> FieldReading, in the order of FIELDS
+    duration_ms: object = None
 
     @property
     def valid(self):
         return any(reading.available for reading in self.readings.values())
+
+    @property
+    def completeness(self):
+        """completa with asset, quote and payout available, parcial with some, vazia with none."""
+        available = sum(reading.available for reading in self.readings.values())
+        return COMPLETE if available == len(FIELDS) else PARTIAL if available else EMPTY
+
+
+@dataclass(frozen=True)
+class Capture:
+    """What a capture of the chart found: how many elements, visibility, the image."""
+
+    count: int
+    visible: bool = False
+    image: object = None  # quote_reader.RgbImage, in device pixels
+    css_width: float = 0.0  # the element's width in CSS pixels
+    clipped: bool = False  # part of the element was outside the window: no image
+
+    @property
+    def scale(self):
+        return self.image.width / self.css_width
+
+
+@dataclass(frozen=True)
+class QuoteOcrSource:
+    """The visual source of the quote: the chart element and its current-quote marker."""
+
+    chart: str
+    marker: object  # quote_reader.MarkerModel
+
+    def describe(self):
+        colors = ", ".join(quote_reader.color_hex(color) for color in self.marker.colors)
+        return f"leitura visual (OCR) do marcador {colors}, no elemento {self.chart}"
+
+
+@dataclass(frozen=True)
+class TextMatch:
+    """A visible element whose text looks like a quote, from the search of --configure."""
+
+    text: str
+    selector: object  # a selector that finds only this element, or None
+
+
+class LazyEngine:
+    """The OCR engine, created on first use; a missing OCR becomes a ConfigError."""
+
+    def __init__(self, factory=RapidOcrEngine):
+        self._factory = factory
+        self._engine = None
+
+    def get(self):
+        if self._engine is None:
+            try:
+                self._engine = self._factory()
+            except OcrUnavailable as error:
+                raise ConfigError(str(error)) from error
+        return self._engine
+
+
+def show_image_file(path):
+    """Open path in the image viewer of Windows; elsewhere, the path is only shown."""
+    if os.name == "nt":
+        try:
+            os.startfile(path)  # noqa: S606 - opens a file the program itself wrote
+        except OSError as error:
+            warn(f"AVISO: não foi possível abrir {path} ({error}); abra-o você mesmo.")
+
+
+@dataclass
+class Context:
+    """What the readings need besides the session; tests replace any of it."""
+
+    now: object = None  # the UTC clock
+    monotonic: object = time.perf_counter
+    engine: object = None  # LazyEngine
+    show_image: object = show_image_file
+    runtime_dir: object = None
+
+    def __post_init__(self):
+        self.now = utc_now if self.now is None else self.now
+        self.engine = LazyEngine() if self.engine is None else self.engine
+        self.runtime_dir = RUNTIME_DIR if self.runtime_dir is None else self.runtime_dir
+
+    def elapsed_ms(self, start):
+        return round((self.monotonic() - start) * 1000, 1)
 
 
 @dataclass
@@ -194,21 +324,29 @@ class Progress:
 
     observations: int = 0
     valid: int = 0
+    complete: int = 0
     csv: object = None  # the CsvLog, created with the first valid observation
 
 
-def main(argv=None, *, open_session=None, read_line=input, now=None):
+def main(
+    argv=None, *, open_session=None, read_line=input, now=None, monotonic=None, engine=None, show_image=None
+):
     """Run the collector and return its exit code.
 
-    open_session, read_line and now exist for tests. They replace, in this order,
-    open_playwright_session, input and the UTC clock. The wait between two observations is
-    the session's own wait, page.wait_for_timeout in PlaywrightSession, so a fake session
-    brings a fake wait.
+    The keyword arguments exist for tests. They replace, in this order,
+    open_playwright_session, input, the UTC clock, time.perf_counter, the LazyEngine of the
+    OCR and the opening of the preview images. The wait between two observations is the
+    session's own wait, page.wait_for_timeout in PlaywrightSession, so a fake session brings
+    a fake wait.
     """
     args = parse_arguments(argv)
     open_session = open_playwright_session if open_session is None else open_session
-    now = utc_now if now is None else now
-    runtime_dir = RUNTIME_DIR
+    ctx = Context(now=now, engine=engine)
+    if monotonic is not None:
+        ctx.monotonic = monotonic
+    if show_image is not None:
+        ctx.show_image = show_image
+    runtime_dir = ctx.runtime_dir
     profile_dir = runtime_dir / PROFILE_DIR_NAME
     selectors_path = runtime_dir / SELECTORS_FILE_NAME
     progress = Progress()
@@ -239,11 +377,13 @@ def main(argv=None, *, open_session=None, read_line=input, now=None):
         if session.is_closed():
             raise ObserverStopped("a janela do navegador foi fechada antes da confirmação do login")
         if args.configure:
-            selectors = configure_selectors(session, selectors_path, read_line, now)
+            selectors = configure_selectors(session, selectors_path, read_line, ctx)
         else:
             selectors = load_selectors(selectors_path)
         announce_selectors(selectors, selectors_path)
-        run_observations(session, selectors, args, now, runtime_dir, progress)
+        if isinstance(selectors["price"], QuoteOcrSource):
+            ctx.engine.get()  # a missing OCR stops the run before the first observation
+        run_observations(session, selectors, args, ctx, progress)
         return finish(progress)
     except ConfigError as error:
         warn(f"CONFIGURAÇÃO: {error}")
@@ -393,10 +533,12 @@ def create_selectors_file(path):
 
 
 def load_selectors(path):
-    """The selectors in path, as {field: selector or None}; a missing file has none.
+    """The sources in path, as {field: selector or None}; a missing file has none.
 
-    Keys that start with _ are comments. Any other key besides asset, price and payout, a
-    value that is not text or null, or invalid JSON raises ConfigError.
+    The quote's entry is a QuoteOcrSource when the file has price_ocr. Keys that start with
+    _ are comments. Any other key besides asset, price, payout and price_ocr, a value that
+    is not text or null, a price_ocr that is not valid, a price_ocr together with a price
+    selector, or invalid JSON raises ConfigError.
     """
     try:
         text = path.read_text(encoding="utf-8-sig")  # also accepts a BOM from Windows editors
@@ -410,10 +552,12 @@ def load_selectors(path):
         raise ConfigError(f"{path} não é um JSON válido: {error}") from error
     if not isinstance(data, dict):
         raise ConfigError(f'{path} precisa ser um objeto JSON, como {{"asset": "..."}}')
-    unknown = sorted(key for key in data if key not in FIELDS and not key.startswith("_"))
+    known = set(FIELDS) | {OCR_KEY}
+    unknown = sorted(key for key in data if key not in known and not key.startswith("_"))
     if unknown:
         raise ConfigError(
-            f"{path} tem chave desconhecida ({', '.join(unknown)}); use só asset, price e payout"
+            f"{path} tem chave desconhecida ({', '.join(unknown)}); use só asset, price,"
+            f" payout e {OCR_KEY}"
         )
     selectors = {}
     for field in FIELDS:
@@ -421,11 +565,41 @@ def load_selectors(path):
         if value is not None and not isinstance(value, str):
             raise ConfigError(f"{path}: o valor de {field} precisa ser texto")
         selectors[field] = (value or "").strip() or None
+    if data.get(OCR_KEY) is not None:
+        if selectors["price"]:
+            raise ConfigError(
+                f"{path} tem duas fontes para a cotação do ativo, price e {OCR_KEY}; deixe só"
+                " uma, ou rode com --configure para escolher"
+            )
+        selectors["price"] = quote_source_from_json(data[OCR_KEY], path)
     return selectors
 
 
+def quote_source_from_json(data, path):
+    if not isinstance(data, dict) or set(data) - {"chart", "marker"}:
+        raise ConfigError(f'{path}: {OCR_KEY} precisa ser um objeto com "chart" e "marker"')
+    chart = data.get("chart")
+    if not isinstance(chart, str) or not chart.strip():
+        raise ConfigError(f"{path}: {OCR_KEY}.chart precisa ser o seletor do elemento do gráfico")
+    try:
+        marker = quote_reader.MarkerModel.from_json(data.get("marker"))
+    except ValueError as error:
+        raise ConfigError(f"{path}: {OCR_KEY}.marker inválido: {error}") from error
+    return QuoteOcrSource(chart.strip(), marker)
+
+
+def describe_source(source):
+    if isinstance(source, QuoteOcrSource):
+        return source.describe()
+    return f"seletor {source}"
+
+
 def announce_selectors(selectors, selectors_path):
-    configured = [LABELS[field] for field in FIELDS if selectors[field]]
+    configured = [
+        LABELS[field] + (" (leitura visual)" if isinstance(selectors[field], QuoteOcrSource) else "")
+        for field in FIELDS
+        if selectors[field]
+    ]
     missing = [LABELS[field] for field in FIELDS if not selectors[field]]
     if not configured:
         raise ConfigError(
@@ -433,9 +607,9 @@ def announce_selectors(selectors, selectors_path):
             " Rode com --configure (no Windows, observar_windows.cmd) para escolher os"
             " seletores no terminal, ou preencha o arquivo como explica o INTEGRATION.md."
         )
-    line = f"Campos com seletor: {', '.join(configured)}"
+    line = f"Campos com fonte: {', '.join(configured)}"
     if missing:
-        line += f" | sem seletor, ficam indisponíveis: {', '.join(missing)}"
+        line += f" | sem fonte, ficam indisponíveis: {', '.join(missing)}"
     say(line)
 
 
@@ -457,14 +631,20 @@ def parse_asset(text):
 
 
 def parse_price(text):
-    """(price, None) when the text is only digits with . or , between them, or (None, reason).
+    """(quote, None) for digits with at least one decimal separator, or (None, reason).
 
-    The price is kept exactly as shown, because the platform's number format was not
-    verified.
+    The quote is kept exactly as shown, because the platform's number format was not
+    verified. A whole number is refused: quotes have decimals, and a whole number, such as
+    10, may be the bet amount (Amount).
     """
     value = text.strip()
     if PRICE_PATTERN.fullmatch(value):
         return value, None
+    if INTEGER_PATTERN.fullmatch(value):
+        return None, (
+            f"número sem casas decimais ({preview(value)}): a cotação do ativo tem casas"
+            " decimais, como 1.08534, e um valor inteiro pode ser o da aposta (Amount)"
+        )
     return None, f"texto não reconhecido como cotação do ativo: {preview(text)}"
 
 
@@ -487,23 +667,38 @@ def unavailable(reason):
     return FieldReading(None, f"{UNAVAILABLE}: {reason}")
 
 
-def observe_once(session, selectors, now):
+def observe_once(session, selectors, ctx):
     """Read every field once, but only from a page on pocketoption.com."""
-    captured_at = now()
+    start = ctx.monotonic()
+    captured_at = ctx.now()
     url = session.current_url()
     page = display_url(url)
     if url_problem(url) is not None:
         reading = unavailable(
             f"a página atual ({page}) não está em {ALLOWED_DOMAIN}; nada foi lido"
         )
-        return Observation(captured_at, page, {field: reading for field in FIELDS})
-    readings = {field: read_field(session, field, selectors.get(field)) for field in FIELDS}
-    return Observation(captured_at, page, readings)
+        readings = {field: reading for field in FIELDS}
+    else:
+        readings = {field: read_field(session, field, selectors.get(field), ctx) for field in FIELDS}
+    return Observation(captured_at, page, readings, ctx.elapsed_ms(start))
 
 
-def read_field(session, field, selector):
-    if not selector:
+def read_field(session, field, source, ctx):
+    """The FieldReading of field from its source, with the capture moment and duration."""
+    if not source:
         return unavailable(f"sem seletor em {SELECTORS_FILE_NAME}")
+    start = ctx.monotonic()
+    captured_at = ctx.now()
+    if isinstance(source, QuoteOcrSource):
+        reading = read_quote_visually(session, source, ctx)[0]
+        kind = OCR_SOURCE
+    else:
+        reading = read_text_field(session, field, source)
+        kind = TEXT_SOURCE
+    return replace(reading, source=kind, captured_at=captured_at, processing_ms=ctx.elapsed_ms(start))
+
+
+def read_text_field(session, field, selector):
     try:
         element = session.read(selector, READ_TIMEOUT_MS)
     except ReadError as error:
@@ -522,7 +717,44 @@ def read_field(session, field, selector):
     return FieldReading(value, f"{OK}: {selector}")
 
 
-def run_observations(session, selectors, args, now, runtime_dir, progress):
+def capture_chart(session, chart):
+    """(Capture, None) of the chart element, or (None, reason)."""
+    try:
+        capture = session.capture(chart, CAPTURE_TIMEOUT_MS)
+    except ReadError as error:
+        return None, f"a captura do gráfico falhou: {error}"
+    if capture.count == 0:
+        return None, f"o seletor do gráfico ({chart}) não encontrou nenhum elemento"
+    if capture.count > 1:
+        return None, (
+            f"o seletor do gráfico ({chart}) encontrou {capture.count} elementos; precisa"
+            " encontrar exatamente 1"
+        )
+    if capture.clipped:
+        return None, (
+            f"o elemento do gráfico ({chart}) não cabe inteiro na área visível da janela;"
+            " maximize a janela do navegador ou role a página até o gráfico aparecer inteiro"
+        )
+    if not capture.visible or capture.image is None or capture.css_width <= 0:
+        return None, f"o elemento do gráfico ({chart}) não está visível"
+    return capture, None
+
+
+def read_quote_visually(session, source, ctx):
+    """(FieldReading, Capture or None, Box or None) of the quote read from the chart."""
+    capture, problem = capture_chart(session, source.chart)
+    if capture is None:
+        return unavailable(problem), None, None
+    reading = quote_reader.read_quote(capture.image, capture.scale, source.marker, ctx.engine.get())
+    if reading.value is None:
+        return unavailable(reading.reason), capture, reading.box
+    value, problem = parse_price(reading.value)
+    if problem is not None:
+        return unavailable(problem), capture, reading.box
+    return FieldReading(value, f"{OK}: {OCR_SOURCE} {source.chart}"), capture, reading.box
+
+
+def run_observations(session, selectors, args, ctx, progress):
     """Observe until args.count observations were made, the window closes or Ctrl+C.
 
     Between two observations, session.wait waits args.interval seconds. In PlaywrightSession
@@ -535,14 +767,15 @@ def run_observations(session, selectors, args, now, runtime_dir, progress):
             say("A janela do navegador foi fechada; a leitura terminou.")
             return
         number += 1
-        observation = observe_once(session, selectors, now)
+        observation = observe_once(session, selectors, ctx)
         progress.observations += 1
         if observation.valid:
             if progress.csv is None:
-                progress.csv = CsvLog(new_csv_path(runtime_dir))
+                progress.csv = CsvLog(new_csv_path(ctx.runtime_dir))
                 say(f"CSV: {progress.csv.path}")
             progress.csv.write(observation)
             progress.valid += 1
+            progress.complete += observation.completeness == COMPLETE
         say(observation_line(number, observation))
         if args.count is None or number < args.count:
             session.wait(args.interval)
@@ -571,11 +804,23 @@ class CsvLog:
 
 
 def csv_row(observation):
-    row = [observation.captured_at.isoformat(timespec="milliseconds"), observation.page]
+    row = [utc_text(observation.captured_at), observation.page]
     for field in FIELDS:
         reading = observation.readings[field]
         row += [reading.value if reading.available else "", reading.status]
+    price = observation.readings["price"]
+    row += [
+        observation.completeness,
+        price.source or "",
+        utc_text(price.captured_at) if price.captured_at else "",
+        "" if price.processing_ms is None else f"{price.processing_ms:.1f}",
+        "" if observation.duration_ms is None else f"{observation.duration_ms:.1f}",
+    ]
     return row
+
+
+def utc_text(moment):
+    return moment.isoformat(timespec="milliseconds")
 
 
 def new_csv_path(runtime_dir):
@@ -588,14 +833,22 @@ def new_csv_path(runtime_dir):
             return path
 
 
+KIND_LABELS = {COMPLETE: "COMPLETA", PARTIAL: "PARCIAL", EMPTY: "SEM CAMPOS"}
+SOURCE_LABELS = {TEXT_SOURCE: "texto", OCR_SOURCE: "leitura visual"}
+
+
 def observation_line(number, observation):
     parts = [
-        f"OBSERVAÇÃO {number}",
-        observation.captured_at.isoformat(timespec="milliseconds"),
+        f"OBSERVAÇÃO {number} {KIND_LABELS[observation.completeness]}",
+        f"relógio local {utc_text(observation.captured_at)}",
         observation.page,
     ]
     for field in FIELDS:
-        parts.append(f"{LABELS[field]} {shown_value(field, observation.readings[field])}")
+        reading = observation.readings[field]
+        text = f"{LABELS[field]} {shown_value(field, reading)}"
+        if field == "price" and reading.available and reading.source:
+            text += f" ({SOURCE_LABELS[reading.source]}, {reading.processing_ms:.0f} ms)"
+        parts.append(text)
     parts.append("gravada no CSV" if observation.valid else "não gravada: nenhum campo disponível")
     return " | ".join(parts)
 
@@ -614,7 +867,8 @@ def print_plan(url, args, profile_dir, selectors_path):
     plan = "até Ctrl+C" if args.count is None else count(args.count, "observação", "observações")
     say(
         f"Leitura: {plan}, uma a cada {args.interval:g} s; horário de captura em UTC, pelo"
-        " relógio deste computador. Riscos e limitações: INTEGRATION.md."
+        " relógio deste computador, que não é o horário do servidor da Pocket Option."
+        " Riscos e limitações: INTEGRATION.md."
     )
 
 
@@ -666,10 +920,10 @@ def wait_for_login(read_line, selectors_path, configure):
     ask(read_line, prompt, "antes da confirmação do login")
 
 
-def configure_selectors(session, path, read_line, now):
-    """Ask for each field's selector, preview it, and write the file once you confirm.
+def configure_selectors(session, path, read_line, ctx):
+    """Ask for each field's source, preview it, and write the file once you confirm.
 
-    Enter keeps the current selector, so the ones already saved can be reused. Nothing is
+    Enter keeps the current source, so the ones already saved can be reused. Nothing is
     written until the final Enter, and json writes the file, escaping what is needed.
     """
     selectors, invalid = current_selectors(path)
@@ -685,9 +939,9 @@ def configure_selectors(session, path, read_line, now):
         " CALL e PUT: o programa não clica, mas um clique seu fora da inspeção é de verdade."
     )
     for field in FIELDS:
-        selectors[field] = ask_selector(session, field, selectors[field], read_line, now)
+        selectors[field] = ask_source(session, field, selectors[field], read_line, ctx)
     while True:
-        show_summary(session, selectors, now)
+        show_summary(session, selectors, ctx)
         answer = ask(
             read_line,
             "Enter grava os seletores e começa as observações; para corrigir um campo, digite"
@@ -703,7 +957,7 @@ def configure_selectors(session, path, read_line, now):
                 " payout."
             )
             continue
-        selectors[field] = ask_selector(session, field, selectors[field], read_line, now)
+        selectors[field] = ask_source(session, field, selectors[field], read_line, ctx)
     if not any(selectors.values()):
         raise ConfigError(f"nenhum seletor foi escolhido, e {path} não foi alterado")
     save_selectors(path, selectors, invalid)
@@ -723,11 +977,15 @@ def current_selectors(path):
         return {field: None for field in FIELDS}, True
 
 
-def ask_selector(session, field, current, read_line, now):
+def ask_source(session, field, current, read_line, ctx):
+    if field == "price":
+        return ask_quote_source(session, current, read_line, ctx)
+    return ask_selector(session, field, current, read_line, ctx)
+
+
+def ask_selector(session, field, current, read_line, ctx):
     """The selector you accept for field after seeing its preview, or None for none."""
     label, of_label = LABELS[field], OF_LABELS[field]
-    if field == "price":
-        say(QUOTE_NOTE)
     if current:
         say(f"{label.capitalize()}: seletor atual {current}")
         prompt = f"Seletor {of_label} (Enter mantém o atual; - deixa sem seletor): "
@@ -736,7 +994,7 @@ def ask_selector(session, field, current, read_line, now):
         prompt = f"Seletor {of_label} (Enter deixa sem seletor): "
     selector = ask(read_line, prompt, CONFIGURATION_MOMENT).strip() or current
     while selector and selector != "-":
-        reading = preview_reading(session, field, selector, now)
+        reading = preview_reading(session, field, selector, ctx)
         line = f"  Prévia {of_label}, lida agora: {shown_value(field, reading)}"
         if reading.available:
             line += ". Confira se é o que a tela mostra."
@@ -754,34 +1012,297 @@ def ask_selector(session, field, current, read_line, now):
     return None
 
 
-def preview_reading(session, field, selector, now):
+QUOTE_PROMPT = (
+    "Fonte da cotação: cole um seletor, digite buscar para procurar a cotação em texto na"
+    " página, ou ocr para lê-la no gráfico"
+)
+VISUAL_INTRO = (
+    "O programa captura só o elemento do gráfico, procura na metade direita dele as caixas"
+    " com texto, como o marcador da cotação, numera essas caixas numa imagem e lê cada uma"
+    " com o OCR local. Você escolhe a que acompanha a cotação atual. O programa guarda a cor,"
+    " o tamanho e o alinhamento à borda direita desse marcador, nunca a altura dele: a cada"
+    " leitura, o marcador é procurado de novo. Deixe a janela do navegador visível e o mouse"
+    " fora do gráfico, para que a etiqueta do cursor não apareça."
+)
+COMPARE_QUOTE = (
+    "Compare cada prévia com a cotação que a tela mostrava naquele instante. A leitura visual"
+    " não comprova sozinha que o marcador escolhido é o da cotação atual: só essa comparação,"
+    " feita por você, valida o campo."
+)
+MARKER_AGAIN = "marcador"  # review_visual_source: choose the marker again
+
+
+def ask_quote_source(session, current, read_line, ctx):
+    """The quote's source you accept: a selector, a QuoteOcrSource, or None for none."""
+    say(QUOTE_NOTE)
+    if current is None:
+        say("Cotação do ativo: ainda sem fonte.")
+        keep = "Enter deixa sem fonte"
+    else:
+        say(f"Cotação do ativo: fonte atual: {describe_source(current)}.")
+        keep = "Enter mantém a atual; - deixa sem fonte"
+    again = f"{QUOTE_PROMPT} (Enter deixa sem fonte): "
+    answer = ask(read_line, f"{QUOTE_PROMPT} ({keep}): ", CONFIGURATION_MOMENT).strip()
+    choice = answer or current
+    results = []
+    while True:
+        if isinstance(choice, QuoteOcrSource):
+            outcome = review_visual_source(session, choice, read_line, ctx)
+            if outcome == MARKER_AGAIN:
+                outcome = configure_visual_source(session, choice, read_line, ctx)
+            if outcome is not None:
+                return outcome
+            choice = ask(read_line, again, CONFIGURATION_MOMENT).strip()
+            continue
+        if not choice or choice == "-":
+            say("Cotação do ativo: sem fonte, o campo fica INDISPONÍVEL.")
+            return None
+        command = choice.lower()
+        if command == "buscar":
+            results = search_quote_texts(session)
+            follow = f"{QUOTE_PROMPT}, ou o número de um resultado (Enter deixa sem fonte): "
+            choice = ask(read_line, follow if results else again, CONFIGURATION_MOMENT).strip()
+            continue
+        if command == "ocr":
+            previous = current if isinstance(current, QuoteOcrSource) else None
+            source = configure_visual_source(session, previous, read_line, ctx)
+            if source is not None:
+                return source
+            choice = ask(read_line, again, CONFIGURATION_MOMENT).strip()
+            continue
+        if choice.isdigit() and results:
+            number = int(choice)
+            if not 1 <= number <= len(results) or results[number - 1].selector is None:
+                say("  Esse número não é de um resultado com seletor único.")
+                choice = ask(read_line, again, CONFIGURATION_MOMENT).strip()
+                continue
+            choice = results[number - 1].selector
+            say(f"  Seletor do resultado {number}: {choice}")
+        reading = preview_reading(session, "price", choice, ctx)
+        line = f"  Prévia da cotação do ativo, lida agora: {shown_value('price', reading)}"
+        if reading.available:
+            line += ". Confira se é o que a tela mostra."
+        say(line)
+        answer = ask(
+            read_line,
+            "Enter aceita este seletor da cotação do ativo; cole outro, buscar ou ocr para"
+            " trocar; - deixa sem fonte: ",
+            CONFIGURATION_MOMENT,
+        ).strip()
+        if not answer:
+            return choice
+        choice = answer
+
+
+def search_quote_texts(session):
+    """List the visible text elements that look like a quote; nothing is chosen by itself."""
+    try:
+        matches = session.find_quote_texts(SEARCH_RESULTS)
+    except ReadError as error:
+        say(f"  A busca falhou: {error}")
+        return []
+    if not matches:
+        say(
+            "  Nenhum elemento de texto visível da página tem um número com casas decimais."
+            " A busca vale para o documento principal, não para iframes nem para o que é"
+            " desenhado em canvas. Se a cotação só aparece no gráfico, use ocr."
+        )
+        return []
+    say(
+        "  Elementos de texto visíveis com números parecidos com uma cotação, lidos agora."
+        " Compare com a tela; nenhum é escolhido sozinho:"
+    )
+    for number, match in enumerate(matches, 1):
+        where = f"seletor {match.selector}" if match.selector else "sem seletor único; use o DevTools nele"
+        say(f"  {number}: {match.text} | {where}")
+    return matches
+
+
+def configure_visual_source(session, previous, read_line, ctx):
+    """Choose the chart element and its current-quote marker: a QuoteOcrSource, or None."""
+    say("")
+    say("LEITURA VISUAL DA COTAÇÃO")
+    say(VISUAL_INTRO)
+    ctx.engine.get()  # a missing OCR stops here, with the installation hint
+    chart = previous.chart if previous is not None else None
+    keep = f"Enter mantém {chart}; - desiste" if chart else "- desiste"
+    answer = ask(
+        read_line,
+        f"Seletor do elemento do gráfico, o que o DevTools mostra sobre o marcador da cotação ({keep}): ",
+        CONFIGURATION_MOMENT,
+    ).strip()
+    if answer == "-" or not (answer or chart):
+        say("Leitura visual não configurada.")
+        return None
+    chart = answer or chart
+    while True:
+        if session.is_closed():
+            raise ObserverStopped(WINDOW_CLOSED_IN_CONFIGURATION)
+        capture, problem = capture_chart(session, chart)
+        if capture is None:
+            say(f"  {problem}.")
+            answer = ask(
+                read_line,
+                "Enter captura de novo; cole outro seletor do gráfico; - desiste: ",
+                CONFIGURATION_MOMENT,
+            ).strip()
+            if answer == "-":
+                say("Leitura visual não configurada.")
+                return None
+            chart = answer or chart
+            continue
+        boxes = quote_reader.candidate_boxes(capture.image, capture.scale)
+        engine = ctx.engine.get()
+        readings = [quote_reader.read_marker_text(capture.image, box, engine) for box in boxes]
+        path = write_preview(ctx, CANDIDATES_IMAGE, capture.image, list(enumerate(boxes, 1)))
+        say(f"  Imagem da captura do gráfico, com os candidatos numerados: {path}")
+        ctx.show_image(path)
+        if not boxes:
+            say(
+                "  Nenhuma caixa com texto apareceu na metade direita do gráfico. Confira, na"
+                " imagem, se o elemento inclui a borda direita, onde fica o marcador, e se a"
+                " janela do navegador está visível."
+            )
+            answer = ask(
+                read_line,
+                "Enter captura de novo; cole outro seletor do gráfico; - desiste: ",
+                CONFIGURATION_MOMENT,
+            ).strip()
+            if answer == "-":
+                say("Leitura visual não configurada.")
+                return None
+            chart = answer or chart
+            continue
+        say("  Candidatos, de cima para baixo; compare com a tela e com a imagem:")
+        for number, (box, reading) in enumerate(zip(boxes, readings), 1):
+            text = reading.value if reading.value else f"nenhuma cotação legível ({reading.reason})"
+            gap = (capture.image.width - box.x1) / capture.scale
+            cut = "; cortado pela borda" if box.cut else ""
+            say(
+                f"  {number}: caixa {quote_reader.color_hex(box.color)} de"
+                f" {box.width / capture.scale:.0f}x{box.height / capture.scale:.0f} px, a"
+                f" {gap:.0f} px da borda direita{cut}; texto lido: {text}"
+            )
+        answer = ask(
+            read_line,
+            "Número do marcador da cotação atual, o que acompanha a cotação (não o do cursor"
+            " nem o de uma operação). Enter captura de novo; - desiste: ",
+            CONFIGURATION_MOMENT,
+        ).strip()
+        if answer == "-":
+            say("Leitura visual não configurada.")
+            return None
+        if not answer:
+            continue
+        if not (answer.isdigit() and 1 <= int(answer) <= len(boxes)):
+            say(f"  {preview(answer)} não é um dos números da lista.")
+            continue
+        box = boxes[int(answer) - 1]
+        if box.cut:
+            say("  Esse candidato está cortado pela borda da captura; capture de novo com ele inteiro.")
+            continue
+        marker = quote_reader.MarkerModel.from_box(box, capture.image.width, capture.scale)
+        if previous is not None and previous.chart == chart:
+            known = previous.marker.with_color(box.color)
+            if known is not previous.marker:
+                add = ask(
+                    read_line,
+                    "Enter usa só a cor deste marcador; + soma a cor dele às do marcador já"
+                    " gravado, para quando a cor muda: ",
+                    CONFIGURATION_MOMENT,
+                ).strip()
+                if add == "+":
+                    marker = known
+        source = QuoteOcrSource(chart, marker)
+        outcome = review_visual_source(session, source, read_line, ctx)
+        if outcome == MARKER_AGAIN:
+            previous = source
+            continue
+        return outcome
+
+
+def review_visual_source(session, source, read_line, ctx):
+    """Preview source a few times: the source when accepted, None to give up, or MARKER_AGAIN."""
+    while True:
+        say(
+            f"  Prévia da leitura visual: {PREVIEW_READINGS} leituras, uma por segundo. Olhe a"
+            " cotação na tela a cada uma."
+        )
+        last = None
+        for number in range(1, PREVIEW_READINGS + 1):
+            if number > 1:
+                session.wait(1.0)
+            if session.is_closed():
+                raise ObserverStopped(WINDOW_CLOSED_IN_CONFIGURATION)
+            start, moment = ctx.monotonic(), ctx.now()
+            reading, capture, box = read_quote_visually(session, source, ctx)
+            say(
+                f"  Prévia {number}, relógio local {utc_text(moment)}:"
+                f" {shown_value('price', reading)} (em {ctx.elapsed_ms(start):.0f} ms)"
+            )
+            last = capture, box
+        capture, box = last
+        if capture is not None:
+            path = write_preview(ctx, PREVIEW_IMAGE, capture.image, [(1, box)] if box else [])
+            say(f"  Imagem da última prévia, com o marcador lido destacado como 1: {path}")
+            ctx.show_image(path)
+        say(COMPARE_QUOTE)
+        answer = ask(
+            read_line,
+            "Enter aceita a leitura visual; r repete a prévia; n escolhe o marcador de novo;"
+            " - desiste: ",
+            CONFIGURATION_MOMENT,
+        ).strip().lower()
+        if not answer:
+            return source
+        if answer == "r":
+            continue
+        if answer == "n":
+            return MARKER_AGAIN
+        if answer == "-":
+            say("Leitura visual não configurada.")
+            return None
+        say(f"  Resposta não reconhecida: {preview(answer)}.")
+
+
+def write_preview(ctx, name, image, labelled_boxes):
+    """Write a preview PNG in runtime/; the capture stays out of every other file."""
+    ctx.runtime_dir.mkdir(parents=True, exist_ok=True)
+    path = ctx.runtime_dir / name
+    path.write_bytes(quote_reader.annotated_png(image, labelled_boxes))
+    return path
+
+
+def preview_reading(session, field, selector, ctx):
     """One reading of field with selector, under the same rules as an observation."""
     if session.is_closed():
         raise ObserverStopped(WINDOW_CLOSED_IN_CONFIGURATION)
-    return observe_once(session, {field: selector}, now).readings[field]
+    return observe_once(session, {field: selector}, ctx).readings[field]
 
 
-def show_summary(session, selectors, now):
-    """Read every field once more, together, and show the values beside their selectors."""
+def show_summary(session, selectors, ctx):
+    """Read every field once more, together, and show the values beside their sources."""
     if session.is_closed():
         raise ObserverStopped(WINDOW_CLOSED_IN_CONFIGURATION)
-    observation = observe_once(session, selectors, now)
+    observation = observe_once(session, selectors, ctx)
     say("")
     say(
-        f"Resumo, lido agora ({observation.captured_at.isoformat(timespec='milliseconds')}),"
-        f" na página {observation.page}:"
+        f"Resumo, lido agora (relógio local {utc_text(observation.captured_at)}), na página"
+        f" {observation.page}:"
     )
     for field in FIELDS:
-        origin = f" (seletor {selectors[field]})" if selectors[field] else ""
+        source = selectors[field]
+        origin = f" ({describe_source(source)})" if source else ""
         say(f"  {LABELS[field]}: {shown_value(field, observation.readings[field])}{origin}")
     say(COMPARE_WITH_SCREEN)
 
 
 def save_selectors(path, selectors, replace_invalid):
-    """Write the selectors to path with json, which escapes backslashes and quotes itself.
+    """Write the sources to path with json, which escapes backslashes and quotes itself.
 
     The comment keys of a valid file are kept. An invalid file is first renamed to a copy
-    next to it, so that nothing written in it is lost.
+    next to it, so that nothing written in it is lost. The visual source of the quote goes
+    to price_ocr, with price left empty.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {"_leia_me": SELECTORS_TEMPLATE["_leia_me"]}
@@ -798,7 +1319,12 @@ def save_selectors(path, selectors, replace_invalid):
         if isinstance(existing, dict):
             data.update((key, value) for key, value in existing.items() if key.startswith("_"))
         data["_leia_me"] = SELECTORS_TEMPLATE["_leia_me"]
-    data.update((field, selectors[field] or "") for field in FIELDS)
+    for field in FIELDS:
+        source = selectors[field]
+        data[field] = "" if isinstance(source, QuoteOcrSource) or not source else source
+    price = selectors["price"]
+    if isinstance(price, QuoteOcrSource):
+        data[OCR_KEY] = {"chart": price.chart, "marker": price.marker.to_json()}
     temporary = path.with_name(path.name + ".tmp")
     with open(temporary, "w", encoding="utf-8") as file:
         json.dump(data, file, ensure_ascii=False, indent=2)
@@ -806,11 +1332,18 @@ def save_selectors(path, selectors, replace_invalid):
     os.replace(temporary, path)
 
 
-def finish(progress):
-    say(
-        f"Concluído: {count(progress.observations, 'observação', 'observações')},"
-        f" {count(progress.valid, 'válida gravada', 'válidas gravadas')}."
+def written_summary(progress):
+    partial = progress.valid - progress.complete
+    return (
+        f"{count(progress.observations, 'observação', 'observações')},"
+        f" {count(progress.valid, 'válida gravada', 'válidas gravadas')}"
+        f" ({count(progress.complete, 'completa', 'completas')} e"
+        f" {count(partial, 'parcial', 'parciais')})"
     )
+
+
+def finish(progress):
+    say(f"Concluído: {written_summary(progress)}.")
     if progress.csv is None:
         warn(
             "PARADA: nenhuma observação válida, então nenhum CSV foi criado. Confira os"
@@ -826,10 +1359,7 @@ def finish(progress):
 
 
 def report_interruption(progress):
-    say(
-        f"Interrompido por Ctrl+C: {count(progress.observations, 'observação', 'observações')},"
-        f" {count(progress.valid, 'válida gravada', 'válidas gravadas')}."
-    )
+    say(f"Interrompido por Ctrl+C: {written_summary(progress)}.")
     if progress.csv is not None:
         say(f"CSV preservado: {progress.csv.path}")
 
@@ -884,9 +1414,10 @@ class PlaywrightSession:
     """The only code that touches Playwright: it opens one page and reads text from it.
 
     Besides starting and stopping the browser, it calls only goto, url, is_closed, locator,
-    count, is_visible, inner_text and wait_for_timeout. Nothing here clicks, types, presses
-    keys, evaluates JavaScript of its own, reads cookies or storage, or listens to the
-    network.
+    count, is_visible, inner_text, wait_for_timeout, bounding_box, get_by_text, nth,
+    get_attribute and screenshot, which captures only the clip of the chart element and
+    returns the image to memory, never to a file. Nothing here clicks, types, presses keys,
+    evaluates JavaScript of its own, reads cookies or storage, or listens to the network.
     """
 
     def __init__(self, sync_playwright, error_type, profile_dir, headless):
@@ -952,6 +1483,78 @@ class PlaywrightSession:
         except self._error_type as error:
             raise ReadError(describe(error)) from error
 
+    def capture(self, selector, timeout_ms):
+        """Capture of the only visible element of selector: the page clipped to its box.
+
+        page.screenshot with a clip neither scrolls nor touches the page, unlike an element
+        screenshot, and caret="initial" leaves the text caret as it is.
+        """
+        try:
+            locator = self._page.locator(selector)
+            matches = locator.count()
+            if matches != 1:
+                return Capture(matches)
+            if not locator.is_visible():
+                return Capture(1)
+            box = locator.bounding_box(timeout=timeout_ms)
+            if box is None or box["width"] < 1 or box["height"] < 1:
+                return Capture(1)
+            clip = {key: box[key] for key in ("x", "y", "width", "height")}
+            png = self._page.screenshot(clip=clip, caret="initial", timeout=timeout_ms)
+        except self._error_type as error:
+            raise ReadError(describe(error)) from error
+        try:
+            image = decode_png(png)
+        except OcrUnavailable as error:
+            raise ConfigError(str(error)) from error
+        # The screenshot keeps only what is inside the window. A cropped capture has
+        # different scales across and down, and its right edge is not the element's.
+        across, down = image.width / box["width"], image.height / box["height"]
+        if abs(across - down) > 0.02 * max(across, down):
+            return Capture(1, True, None, box["width"], clipped=True)
+        return Capture(1, True, image, box["width"])
+
+    def find_quote_texts(self, limit):
+        """TextMatch of up to limit visible elements whose whole text looks like a quote."""
+        found = []
+        try:
+            matches = self._page.get_by_text(QUOTE_SEARCH_PATTERN)
+            total = matches.count()
+        except self._error_type as error:
+            raise ReadError(describe(error)) from error
+        for index in range(min(total, SEARCH_SCAN)):
+            element = matches.nth(index)
+            try:  # the page keeps changing: an element that went away is skipped
+                if not element.is_visible():
+                    continue
+                text = " ".join(element.inner_text(timeout=READ_TIMEOUT_MS).split())
+                selector = self._unique_selector(element)
+            except self._error_type:
+                continue
+            found.append(TextMatch(text, selector))
+            if len(found) >= limit:
+                break
+        return found
+
+    def _unique_selector(self, element):
+        """A selector by id, by classes or by the parent's classes that finds only element."""
+        candidates = []
+        identifier = element.get_attribute("id", timeout=READ_TIMEOUT_MS)
+        if identifier:
+            candidates.append("#" + css_identifier(identifier))
+        classes = (element.get_attribute("class", timeout=READ_TIMEOUT_MS) or "").split()
+        if classes:
+            own = "".join("." + css_identifier(name) for name in classes)
+            candidates.append(own)
+            parent = element.locator("xpath=..").get_attribute("class", timeout=READ_TIMEOUT_MS)
+            if parent:
+                prefix = "".join("." + css_identifier(name) for name in parent.split())
+                candidates.append(prefix + " > " + own)
+        for selector in candidates:
+            if self._page.locator(selector).count() == 1:
+                return selector
+        return None
+
     def close(self):
         """Close the browser and stop Playwright; BrowserError tells what failed, if anything."""
         problems = []
@@ -975,6 +1578,25 @@ class PlaywrightSession:
             self.close()
         except BrowserError:
             pass
+
+
+def css_identifier(name):
+    """name escaped as a CSS identifier, as CSS.escape does, for selectors by id or class."""
+    out = []
+    for index, char in enumerate(name):
+        if char == "\0":
+            out.append("\ufffd")
+        elif char.isdigit() and (index == 0 or (index == 1 and name[0] == "-")):
+            out.append(f"\\{ord(char):x} ")
+        elif index == 0 and char == "-" and len(name) == 1:
+            out.append("\\-")
+        elif (char.isascii() and char.isalnum()) or char in "-_" or ord(char) >= 0x80:
+            out.append(char)
+        elif ord(char) < 0x20 or ord(char) == 0x7F:
+            out.append(f"\\{ord(char):x} ")
+        else:
+            out.append("\\" + char)
+    return "".join(out)
 
 
 def playwright_hints(error):

@@ -1,6 +1,6 @@
 # Status
 
-Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O estado do coordenador, inclusive o estado de envio de cada reserva, pode ser salvo em SQLite, e só um coordenador por vez opera cada banco; sem banco, tudo fica em memória. O executor envia a ordem de uma reserva e consulta o resultado da ordem pendente, testado com corretoras falsas e com a corretora simulada em memória (item 14). O programa `python3 -m pocketautonomo.local_simulation` roda ciclos completos com essa corretora simulada (item 15). O GitHub Actions roda a suíte e os exemplos finitos em Linux e Windows (item 16). O coletor `python -m pocketautonomo.observe` lê ativo, preço e payout da tela da Pocket Option, somente para leitura, e foi testado só com dados simulados e numa página local de teste (item 17). No Windows, `preparar_windows.cmd` instala o coletor, e `observar_windows.cmd` configura os seletores pelo terminal e faz três observações (item 18). **Ainda não existe conexão comprovada com a corretora:** nenhuma ordem real é enviada nem consultada, e nenhum dado foi lido da plataforma real.
+Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O estado do coordenador, inclusive o estado de envio de cada reserva, pode ser salvo em SQLite, e só um coordenador por vez opera cada banco; sem banco, tudo fica em memória. O executor envia a ordem de uma reserva e consulta o resultado da ordem pendente, testado com corretoras falsas e com a corretora simulada em memória (item 14). O programa `python3 -m pocketautonomo.local_simulation` roda ciclos completos com essa corretora simulada (item 15). O GitHub Actions roda a suíte e os exemplos finitos em Linux e Windows (item 16). O coletor `python -m pocketautonomo.observe` lê ativo, preço e payout da tela da Pocket Option, somente para leitura, e foi testado só com dados simulados e numa página local de teste (item 17). No Windows, `preparar_windows.cmd` instala o coletor, e `observar_windows.cmd` configura os seletores pelo terminal e faz três observações (item 18). A cotação do ativo, que a Pocket Option desenha em canvas, pode ser lida pela imagem do gráfico, com OCR local (item 20). **Ainda não existe conexão comprovada com a corretora:** nenhuma ordem real é enviada nem consultada, e nenhum dado foi lido da plataforma real.
 
 ## Concluído
 
@@ -245,12 +245,40 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
         - com o 3.12 presente, ele continua sendo a primeira escolha.
       - O teste de texto dos lançadores confere a linha `if "%ERRORLEVEL%"=="0" set "PYTHON_CMD=%*"`, a ausência de `errorlevel 1` e a entrada `<nul`.
       - `tests/test_observe.py` ganhou um teste da correção pelo nome novo, `Cotação`, que confere a chave `price` gravada e as colunas `price` do CSV.
+    - **CI:** na execução [38656150762](https://github.com/vickzinha9/claude/actions/runs/38656150762), no commit `b319e60`, os 4 testes de `PreparerOnWindowsTest` passaram no Windows, e foram pulados no Linux.
+20. **Leitura visual da cotação:** `pocketautonomo/quote_reader.py`, `pocketautonomo/quote_ocr.py` e o modo `--configure` de `pocketautonomo/observe.py`. Os testes estão em `tests/test_quote_reader.py`, `tests/test_observe.py`, `tests/test_observe_playwright.py` e `tests/test_setup_observer.py`, e as imagens sintéticas, em `tests/chart_images.py`.
+    - **Fontes da cotação:** um seletor de texto, como antes; `buscar`, que lista os elementos de texto visíveis com um número com casas decimais e o seletor de cada um; ou `ocr`, a leitura visual do marcador no gráfico. No arquivo, a leitura visual fica em `price_ocr`, com `price` vazio, e as duas fontes juntas são recusadas.
+    - **Captura:** `page.screenshot(clip=...)` só da caixa do elemento do gráfico, sem rolar a página e sem gravar arquivo. Uma captura cortada pela janela fica indisponível.
+    - **Marcador:** na configuração, as caixas com texto da metade direita da captura são numeradas em `runtime/cotacao-candidatos.png`, cada uma com o texto que o OCR leu, e você escolhe a do marcador. O programa guarda a cor, o tamanho e a distância até a borda direita, nunca a altura. Uma cor nova pode ser somada com `n` e `+`.
+    - **Leitura:** exatamente uma caixa com a cor, o tamanho e o alinhamento do marcador, inteira. O texto passa por duas leituras do OCR, em tons de cinza e em preto e branco, que precisam ser iguais e ter confiança de 0,90 ou mais, e precisa ser um número com casas decimais. Uma linha sem número, como uma contagem, é ignorada. Em qualquer outro caso, a cotação fica `INDISPONÍVEL (motivo)`, sem zero, sem correção e sem valor anterior.
+    - **OCR local:** `rapidocr==3.10.0`, com o modelo PP-OCRv6 dentro do pacote, e `onnxruntime==1.31.0`. O programa recusa iniciar sem o modelo, e a telemetria do `onnxruntime` fica desligada.
+    - **Preparação:** o `preparar_windows.cmd` instala o OCR e confere que ele lê `1.26543` numa imagem desenhada na hora. O mínimo passou para o Python 3.11, porque o `onnxruntime` 1.31.0 não tem pacote para versões anteriores.
+    - **CSV e terminal:**
+      - as 8 colunas antigas continuam na mesma ordem;
+      - cinco colunas novas: `completeness`, `price_source`, `price_captured_at_utc`, `price_processing_ms` e `observation_ms`;
+      - cada linha do terminal diz `COMPLETA`, `PARCIAL` ou `SEM CAMPOS`, mostra o horário como "relógio local" e traz a fonte e a duração da cotação;
+      - os horários vêm do relógio deste computador, nunca do servidor.
+    - **Cotação de texto:** passou a exigir casas decimais. Um inteiro, como `10`, é recusado, porque pode ser o valor da aposta.
+    - **Testes na suíte:**
+      - `tests/test_quote_reader.py`, 12 testes com imagens sintéticas: candidatos, marcador em qualquer altura, linha tracejada colada, ausente, ambíguo, cortado, desalinhado, cor nova, JSON do marcador, leituras divergentes, confiança baixa, número sem decimais, duas linhas e imagem PNG válida;
+      - `tests/test_observe.py`, 34 testes. Os novos cobrem `price_ocr` no arquivo, as colunas novas, os problemas da captura, o OCR ausente, a configuração visual completa, a busca em texto, a cor somada e a desistência sem alterar o arquivo;
+      - `tests/test_observe_playwright.py`, com o terceiro teste real: o Chromium e o OCR leem um gráfico de teste desenhado em canvas, com etiqueta de cursor e com um número de texto que imita uma cotação. A busca lista esse número, o marcador é escolhido, e as 4 observações só trazem cotações que o gráfico mostrou.
+    - **Verificação avulsa, no Linux:**
+      - a preparação real, numa cópia do projeto, levou 13 s na primeira vez e 3 s na segunda. Ela instalou o OCR, e o OCR leu `1.26543`. `runtime/` ficou idêntico, e nada foi gravado em `~/.cache/Microsoft`;
+      - num experimento com o gráfico de teste, 450 cotações aleatórias a 100%, 125% e 150% de escala deram 450 leituras certas, com mediana de 64 a 82 ms por captura e leitura;
+      - com a etiqueta do cursor sobre o marcador ou logo acima, a leitura continuou certa. Com uma segunda caixa igual alinhada, ficou ambígua; com o marcador fora da área ou com outra cor, ficou indisponível.
+    - **Plataforma real: não executado.** A leitura visual ainda não rodou na sua tela.
 
 ## Testes
 
     python3 -m unittest discover -s tests -v
 
-Último resultado local, em Linux: 191 testes. Com o Playwright 1.64.0, no Python 3.12.14, os 191 passaram. Sem o Playwright, nos Python 3.9.25, 3.10.20, 3.11.15, 3.12.14, 3.13.13 e 3.14.4, passaram 189, e os 2 de `tests/test_observe_playwright.py` foram pulados. No GitHub Actions, na execução 38545427600 (commit `3ffa0b1`), os 191 testes rodaram no Linux (Python 3.12.15) e no Windows (Python 3.12.10): 189 passaram e 2 foram pulados. Os 2 pulados passaram no job `windows-browser`, com o Playwright instalado pelo `preparar_windows.cmd` (item 18).
+Último resultado local, em Linux: 217 testes.
+
+- Com o Playwright 1.64.0 e o OCR, no Python 3.12.14, passaram 213. Os 4 de `PreparerOnWindowsTest`, que só rodam no Windows, foram pulados.
+- Sem o Playwright, nos Python 3.9.25, 3.10.20, 3.11.15, 3.12.14, 3.13.13 e 3.14.4, passaram 210. Também foram pulados os 3 de `tests/test_observe_playwright.py`.
+
+O motor e a simulação continuam rodando no 3.9; só o coletor exige o 3.11. Os resultados do CI estão nos itens 16, 18, 19 e 20.
 
 ## Decisões em vigor
 
@@ -287,7 +315,13 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
 - Nenhum seletor vem no código. Um campo sem seletor conferido por você fica indisponível, com o motivo, e nunca recebe valor inventado.
 - O coletor só abre e só lê páginas https de pocketoption.com ou de um subdomínio.
 - O horário de captura vem do relógio local, em UTC; nenhum horário é lido da plataforma.
-- O Playwright é opcional: só o coletor precisa dele, importado ao abrir o navegador. O job `tests` do CI não o instala; o job `windows-browser` o instala pelo `preparar_windows.cmd`.
+- O Playwright e o OCR são opcionais: só o coletor precisa deles, importados quando usados. O job `tests` do CI não os instala; o job `windows-browser` os instala pelo `preparar_windows.cmd`.
+- A cotação do ativo fica na chave `price` e nas colunas `price` do CSV; ela nunca é o valor da aposta (Amount). Um número inteiro nunca é aceito como cotação.
+- A leitura visual guarda a cor, o tamanho e o alinhamento do marcador, nunca a altura. Ausente, ambígua, cortada ou inválida, a cotação fica indisponível; ela nunca vira zero, não é corrigida e não repete um valor anterior.
+- A captura é só do elemento do gráfico, com `clip`, na memória. Só as duas prévias da configuração são gravadas em `runtime/`.
+- O OCR roda no computador, com o modelo do pacote, sem baixar modelos e com a telemetria do `onnxruntime` desligada.
+- Todo horário do CSV e do terminal é do relógio local, em UTC, e é chamado assim; nenhum é apresentado como horário do servidor.
+- Um candidato do `preparar_windows.cmd` só é aceito com código de saída exatamente 0.
 - A versão do Playwright vem só de `PLAYWRIGHT_REQUIREMENT`, em `observe.py`; a preparação e a mensagem de instalação usam essa constante.
 - Entre duas leituras, o coletor espera com o Playwright (`page.wait_for_timeout`), nunca com `time.sleep`.
 - Os lançadores nunca apagam `.venv`, não mexem em `runtime/` e só têm texto ASCII, para não depender da página de código do console.
@@ -299,8 +333,13 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
 - **Pendência deixada pela simulação:** depois de um Ctrl+C ou de uma parada com reserva pendente, o banco fica recusado pela simulação, porque a corretora simulada daquela execução deixou de existir. Não há ferramenta para resolver essa pendência; o caminho é usar um banco novo.
 - A simulação não grava arquivo de log: a saída aparece só no terminal, e o histórico fica no banco.
 - O id de uma aceitação que não pôde ser gravada só existe no `SubmissionReport`. Quem chama `submit` precisa guardá-lo ou registrá-lo em log até a recuperação; senão, a reserva fica SUBMITTING sem id.
-- **Leitura da Pocket Option: não comprovada.** O coletor está pronto para a validação no seu Windows, com `preparar_windows.cmd` e `observar_windows.cmd` (item 18), seguindo os passos do `INTEGRATION.md`. Faltam o link da tela de operações, o login e a comparação dos três campos com a tela. Nenhuma ordem real é enviada nem consultada; a estratégia e o executor real ficam para os pacotes seguintes.
-- **Coletor no seu Windows: não testado.** O CI do Windows roda os lançadores e os 2 testes com Chromium sem janela, numa página local de teste. No seu computador, faltam os lançadores com dois cliques, a janela visível, o DevTools, o login, o `--configure` digitado por você e um Ctrl+C de verdade.
+- **Coleta na Pocket Option: não comprovada.** O ativo foi conferido por você, e o payout foi lido (item 19). Falta a cotação: a leitura visual (item 20) precisa rodar na sua tela, e a cotação precisa ser comparada com ela, seguindo a seção 7 do `INTEGRATION.md`. Nenhuma ordem real é enviada nem consultada.
+- **Pendentes depois da coleta comprovada:**
+  - a varredura automática dos favoritos e dos demais ativos;
+  - o filtro inicial de payout de 90% ou mais;
+  - a análise local de CALL/PUT, avaliada em dados separados dos usados para desenvolvê-la;
+  - o uso das quatro tentativas de R$ 5, R$ 10, R$ 20 e R$ 40, que já existem no motor.
+- **Coletor no seu Windows: em parte testado.** Funcionaram, por você, a instalação (depois de `py install 3.12`), a janela visível, o login e a leitura do ativo e do payout. Faltam a correção do lançador sem o Python 3.12, a instalação do OCR, a leitura visual, a busca em texto e um Ctrl+C de verdade.
 - Reservas UNVERIFIED ou SUBMITTING sem id ficam em `NO_ORDER_ID`, porque a consulta só usa o id vinculado. Falta decidir como recuperá-las.
 - UNKNOWN não tem prazo: o bloqueio dura até chegar um resultado definitivo.
 - **Windows no computador do usuário: não testado.** O CI cobre `windows-latest` com PowerShell 7 e `python` (item 16). Faltam o lançador `py -3`, o Python 3.9 no Windows, o console interativo, um Ctrl+C de verdade, o modo `--forever` e a saída redirecionada sem `PYTHONIOENCODING=utf-8`.

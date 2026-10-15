@@ -7,7 +7,7 @@ Núcleo em desenvolvimento para controlar ciclos de entradas com progressão fix
 ## Requisitos
 
 - Python 3.9 ou mais novo. O motor, a simulação e os testes usam só a biblioteca padrão; não há nada para instalar com `pip`. Versões já testadas: 3.9.25 localmente, em Linux, e 3.12 no GitHub Actions, em Linux e Windows (veja a seção Integração contínua, abaixo).
-- Só para o coletor: Python 3.10 ou mais novo, de 64 bits no Windows, e o Playwright. No Windows, o `preparar_windows.cmd` instala o Playwright e o Chromium dele (veja a seção do coletor).
+- Só para o coletor: Python 3.11 ou mais novo, de 64 bits no Windows, o Playwright e o OCR local. No Windows, o `preparar_windows.cmd` instala o Playwright, o Chromium dele e o OCR (veja a seção do coletor).
 - Git, para baixar o código.
 
 ## Instalação
@@ -39,7 +39,7 @@ Rode todos os comandos abaixo na raiz do repositório, a pasta `claude`. No Wind
 
 No GitHub, o workflow [`.github/workflows/tests.yml`](.github/workflows/tests.yml) roda essa suíte e os dois exemplos finitos abaixo em Linux e Windows a cada push e pull request. As execuções ficam na [aba Actions](https://github.com/vickzinha9/claude/actions/workflows/tests.yml).
 
-Os testes do coletor em `tests/test_observe.py` e os da preparação e dos lançadores em `tests/test_setup_observer.py` usam objetos falsos no lugar do navegador, do `pip` e do `venv`, e não precisam do Playwright. Os dois de `tests/test_observe_playwright.py` abrem um Chromium de verdade, sem janela, numa página local de teste, que não é a Pocket Option. Sem o Playwright eles aparecem como `skipped`, a menos que a variável `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1` exista: aí falham, como o job de navegador do CI exige.
+Os testes do coletor em `tests/test_observe.py`, os da leitura visual em `tests/test_quote_reader.py` e os da preparação e dos lançadores em `tests/test_setup_observer.py` usam objetos falsos no lugar do navegador, do OCR, do `pip` e do `venv`, e imagens sintéticas de gráfico. Eles não precisam do Playwright nem do OCR. Os 4 testes de `PreparerOnWindowsTest` só rodam no Windows. Os 3 de `tests/test_observe_playwright.py` abrem um Chromium de verdade, sem janela, em páginas locais de teste, que não são a Pocket Option; um deles lê a cotação de um gráfico desenhado em canvas, com o OCR de verdade. Sem o Playwright ou o OCR eles aparecem como `skipped`, a menos que a variável `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1` exista: aí falham, como o job de navegador do CI exige.
 
 ## Simulação local
 
@@ -143,11 +143,11 @@ Os 2 testes pulados ali são os do coletor com Chromium de verdade, porque o job
 
 Nos dois sistemas, os acentos da saída apareceram corretos no log. Os testes de exclusividade do banco também passaram, inclusive no Windows, onde a trava usa `msvcrt.locking`.
 
-O job `windows-browser` roda só em `windows-latest` e testa o coletor numa **página local de teste**, servida pelo próprio Playwright para o nome reservado `observe.test`. Ele não acessa a Pocket Option, então passar nele não valida nada na plataforma real. Os passos são estes:
+O job `windows-browser` roda só em `windows-latest` e testa o coletor em **páginas locais de teste**, servidas pelo próprio Playwright para o nome reservado `observe.test`; uma delas é um gráfico desenhado em canvas pelo próprio teste. Ele não acessa a Pocket Option, então passar nele não valida nada na plataforma real. Os passos são estes:
 
 1. cria em `runtime/` um arquivo no perfil do navegador e um `observe-selectors.json`, que precisam continuar iguais no fim;
-2. roda `preparar_windows.cmd` duas vezes, pelo `cmd`: a primeira cria `.venv` e instala o Playwright e o Chromium, e a segunda reutiliza `.venv`;
-3. roda, com o Python de `.venv`, os dois testes de `tests/test_observe_playwright.py`, que usam o Chromium de verdade, sem janela. Com `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1`, eles falham em vez de ser pulados;
+2. roda `preparar_windows.cmd` duas vezes, pelo `cmd`: a primeira cria `.venv` e instala o Playwright, o Chromium e o OCR local, e a segunda reutiliza `.venv`;
+3. roda, com o Python de `.venv`, os testes de `tests/test_observe_playwright.py`, que usam o Chromium de verdade, sem janela, e o OCR de verdade. Com `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1`, eles falham em vez de ser pulados;
 4. roda `observar_windows.cmd --help` e `observar_windows.cmd --url http://example.org/`, que precisa terminar com código 2. Nenhum dos dois abre o navegador;
 5. confere que os dois arquivos de `runtime/` não mudaram.
 
@@ -167,20 +167,22 @@ O CI roda numa máquina virtual do GitHub, com o `python` instalado pelo `setup-
 - o console interativo e um Ctrl+C de verdade;
 - o modo `--forever`, que só termina com Ctrl+C;
 - a saída redirecionada para arquivo sem `PYTHONIOENCODING=utf-8`;
-- no coletor: os lançadores abertos com dois cliques, a pausa no fim, a janela visível do navegador, o DevTools, o login, o `--configure` com você digitando e um Ctrl+C de verdade.
+- no coletor, o que você ainda não testou: a correção do lançador sem o Python 3.12, a instalação do OCR, a leitura visual e a busca em texto da cotação, e um Ctrl+C de verdade. A janela visível, o login, o `--configure` e a leitura do ativo e do payout já funcionaram no seu computador.
 
 ## Coletor somente leitura da Pocket Option
 
-`python -m pocketautonomo.observe` abre a tela de operações num Chromium visível, espera você fazer o login e lê ativo, cotação do ativo e payout com os seletores que você conferiu. A cotação do ativo é o preço do ativo no gráfico, como `1.08534`; não é o valor da aposta, o campo **Amount** da Pocket Option. Nos arquivos, a cotação continua na chave `price`. **Não envia ordens, não clica em CALL/PUT e não faz operações financeiras.** A pesquisa, o método, o que foi comprovado e os passos de validação estão no [INTEGRATION.md](INTEGRATION.md).
+`python -m pocketautonomo.observe` abre a tela de operações num Chromium visível, espera você fazer o login e lê ativo, cotação do ativo e payout com as fontes que você conferiu. A cotação do ativo é o preço do ativo no gráfico, como `1.08534`; não é o valor da aposta, o campo **Amount** da Pocket Option. Nos arquivos, a cotação continua na chave `price`. Como o gráfico da Pocket Option desenha a cotação em canvas, sem texto, ela pode ser lida pela imagem do gráfico, com um OCR local (veja [Cotação do ativo](#cotação-do-ativo-texto-ou-leitura-visual)). **Não envia ordens, não clica em CALL/PUT e não faz operações financeiras.** A pesquisa, o método, o que foi comprovado e os passos de validação estão no [INTEGRATION.md](INTEGRATION.md).
 
 ### Windows: os dois lançadores
 
 Na raiz do projeto, a pasta `claude`, ficam dois arquivos. Abra-os nesta ordem, com dois cliques no Explorador de Arquivos ou pelo terminal (`.\preparar_windows.cmd` no PowerShell). Os dois entram sozinhos na pasta onde estão e esperam uma tecla no fim, para a janela não fechar antes de você ler.
 
-1. **`preparar_windows.cmd`** procura um Python 3.10 ou mais novo, de 64 bits, nesta ordem: `py -3.12`, `py -3` e `python`. Um candidato só é aceito se o teste dele terminar com código exatamente 0. Um código negativo, como o `-1610612730` que o `py` devolve quando falta o Python pedido, também é falha: o lançador mostra `py -3.12: nao serve (codigo -1610612730).` e tenta o próximo. Com o Python escolhido, ele roda `python -m pocketautonomo.setup_observer`, que:
+1. **`preparar_windows.cmd`** procura um Python 3.11 ou mais novo, de 64 bits, nesta ordem: `py -3.12`, `py -3` e `python`. Um candidato só é aceito se o teste dele terminar com código exatamente 0. Um código negativo, como o `-1610612730` que o `py` devolve quando falta o Python pedido, também é falha: o lançador mostra `py -3.12: nao serve (codigo -1610612730).` e tenta o próximo. Com o Python escolhido, ele roda `python -m pocketautonomo.setup_observer`, que:
    - cria `.venv` ou reutiliza a que já existe, se o Python dela servir;
-   - instala o `playwright==1.64.0`, a versão fixada em `pocketautonomo/observe.py`, e o Chromium dele;
-   - confere que `.venv` importa essa versão e que o Chromium abre, sem janela, uma página em branco.
+   - instala o `playwright==1.64.0`, a versão fixada em `pocketautonomo/observe.py`, o OCR local fixado em `pocketautonomo/quote_ocr.py` (`rapidocr==3.10.0`, que traz os modelos, e `onnxruntime==1.31.0`) e o Chromium do Playwright;
+   - confere que `.venv` importa essa versão do Playwright, que o Chromium abre, sem janela, uma página em branco, e que o OCR lê `1.26543` numa imagem desenhada na hora.
+
+   O mínimo é o Python 3.11 porque o `onnxruntime` 1.31.0 não tem pacote para versões anteriores. Sem o Python 3.12, instale-o com `py install 3.12`.
 
    Se uma etapa falhar, ele para com `FALHA: ...` ou `[ERRO] ...` e diz o que fazer. Ele nunca apaga `.venv` e não mexe em `runtime/`. Pode rodar de novo quantas vezes quiser.
 2. **`observar_windows.cmd`** usa o Python de `.venv` para rodar `python -m pocketautonomo.observe --configure --count 3`. Argumentos extras vão para o programa, como em `observar_windows.cmd --interval 10`.
@@ -193,12 +195,40 @@ Se você apertar Ctrl+C, o `cmd` pergunta se quer finalizar o arquivo em lotes (
 
 1. sem `--url`, o programa pede o link no terminal e o confere com a mesma regra de `--url`. O link recusado não é repetido na tela;
 2. abre o navegador para o seu login e espera Enter;
-3. pede o seletor do ativo, da cotação do ativo e do payout. Você cola o seletor como o DevTools copiou, sem escapar barras nem aspas. Enter mantém o seletor já gravado, e `-` deixa o campo sem seletor;
+3. pede o seletor do ativo, a fonte da cotação do ativo (seção abaixo) e o seletor do payout. Você cola o seletor como o DevTools copiou, sem escapar barras nem aspas. Enter mantém o que já está gravado, e `-` deixa o campo sem fonte;
 4. lê cada seletor na hora e mostra a prévia: o valor encontrado ou `INDISPONÍVEL (motivo)`. Enter aceita o seletor; colar outro troca;
 5. mostra um resumo dos três campos, lidos juntos. Digite `ativo`, `cotação` ou `payout` para corrigir um campo, ou Enter para gravar;
 6. grava `runtime/observe-selectors.json` com o módulo `json`, que faz os escapes, e faz as observações. Antes de você gravar, nada muda no arquivo; um arquivo inválido é guardado como cópia (`observe-selectors.invalido-...json`).
 
 **Texto encontrado não valida o campo.** O programa não sabe se o elemento escolhido é o certo: compare cada prévia e cada observação com o que a tela mostra.
+
+### Cotação do ativo: texto ou leitura visual
+
+Na pergunta da cotação, há três caminhos:
+
+- **um seletor**, como nos outros campos, se a cotação existir em texto;
+- **`buscar`**: o programa lista os elementos de texto visíveis cujo texto inteiro parece uma cotação, um número com casas decimais, com o valor lido na hora e um seletor que encontra só aquele elemento. Nenhum é escolhido sozinho: compare com a tela e digite o número do que mostra a cotação. A busca vale para o documento principal, não para iframes nem para o que é desenhado em canvas. Um número inteiro, como o valor da aposta, não aparece;
+- **`ocr`**: a leitura visual do marcador da cotação atual, na borda direita do gráfico. É o caminho para quando a cotação só existe no gráfico.
+
+Na leitura visual:
+
+1. você informa o seletor do elemento do gráfico, o que o DevTools mostra sobre o marcador da cotação;
+2. o programa captura só esse elemento, procura na metade direita da imagem as caixas com texto dentro (as etiquetas de preço) e lê cada uma com o OCR local. A escala de preços, que é texto sem caixa, e as velas, que são caixas sem texto, ficam de fora. O campo Amount e o resto da página nem entram na captura;
+3. ele grava `runtime/cotacao-candidatos.png`, com as caixas numeradas, abre essa imagem e lista cada candidato com a cor, o tamanho e o texto lido;
+4. você digita o número do marcador que acompanha a cotação atual, e não o da etiqueta do cursor nem o de uma operação aberta;
+5. o programa guarda a cor, o tamanho e a distância desse marcador até a borda direita do elemento. **A altura dele nunca é guardada**: a cada leitura, o marcador é procurado de novo, onde estiver;
+6. ele faz 3 prévias, uma por segundo, com o relógio local e a duração de cada uma, e grava `runtime/cotacao-previa.png` com o marcador lido em destaque. Compare cada prévia com a tela. Enter aceita, `r` repete, `n` escolhe o marcador de novo e `-` desiste. Se a cor do marcador mudar, por exemplo de azul para verde, escolha-o de novo com `n` e digite `+` para somar a cor nova às gravadas.
+
+**Regras da leitura visual.** A cotação fica `INDISPONÍVEL (motivo)`, e nunca vira zero, nem é corrigida, nem repete um valor anterior, quando:
+
+- nenhuma caixa tem a cor, o tamanho e o alinhamento do marcador;
+- mais de uma caixa tem: a leitura é ambígua;
+- a caixa está cortada pela borda da captura, ou o gráfico não cabe inteiro na janela;
+- o texto do marcador não é um número com casas decimais;
+- as duas leituras do OCR, em tons de cinza e em preto e branco, divergem, ou uma delas tem confiança abaixo de 0,90;
+- o marcador tem mais de uma linha com número.
+
+Uma linha sem número, como uma contagem `00:42`, é ignorada. O OCR roda no seu computador: o modelo vem dentro do pacote `rapidocr`, o programa não baixa modelos e desliga a telemetria do `onnxruntime`. A imagem do gráfico fica na memória; só as duas prévias da configuração são gravadas em `runtime/`. Deixe a janela do navegador visível, sem minimizar, e o mouse fora do gráfico.
 
 ### Espera entre leituras
 
@@ -208,7 +238,7 @@ Entre uma observação e a próxima, o coletor espera com `page.wait_for_timeout
 
 ```powershell
 py -3.12 -m venv .venv
-.venv\Scripts\python -m pip install playwright==1.64.0
+.venv\Scripts\python -m pip install playwright==1.64.0 rapidocr==3.10.0 onnxruntime==1.31.0
 .venv\Scripts\python -m playwright install chromium
 .venv\Scripts\python -m pocketautonomo.observe --configure --count 3
 ```
@@ -218,22 +248,38 @@ Rode na pasta `claude`, porque a pasta `runtime/` é relativa à pasta atual. Se
 | Opção | Significado |
 |---|---|
 | `--url LINK` | link `https://` de pocketoption.com ou de um subdomínio dele; obrigatório sem `--configure` |
-| `--configure` | pede no terminal o link (sem `--url`) e os seletores, com prévia, e grava o arquivo de seletores antes das observações |
+| `--configure` | pede no terminal o link (sem `--url`) e as fontes, com prévia, inclusive a busca em texto e a leitura visual da cotação, e grava o arquivo de seletores antes das observações |
 | `--interval S` | segundos entre uma leitura e a próxima (padrão 5, mínimo 1) |
 | `--count N` | quantas observações fazer; sem esta opção, lê até Ctrl+C |
 
 | Arquivo, em `runtime/` | Conteúdo |
 |---|---|
 | `browser-profile/` | perfil do navegador, com a sua sessão; não compartilhe |
-| `observe-selectors.json` | seletores de `asset`, `price` e `payout`, gravados pelo `--configure` ou criados vazios sem ele |
+| `observe-selectors.json` | seletores de `asset`, `price` e `payout`, gravados pelo `--configure` ou criados vazios sem ele. Com a leitura visual, `price` fica vazio e `price_ocr` guarda o seletor do gráfico e o marcador |
+| `cotacao-candidatos.png`, `cotacao-previa.png` | imagens do gráfico da configuração visual: os candidatos numerados e a última prévia. Não as compartilhe se mostrarem dados seus |
 | `observe-selectors.invalido-<data>-<hora>-<sufixo>.json` | cópia de um arquivo de seletores inválido, guardada pelo `--configure` antes de gravar o novo |
-| `observations-<data>-<hora>-<sufixo>.csv` | um arquivo novo por execução, com as observações válidas |
+| `observations-<data>-<hora>-<sufixo>.csv` | um arquivo novo por execução, com as observações válidas; colunas na tabela abaixo |
+
+As 8 primeiras colunas do CSV são as de antes, na mesma ordem. As 5 últimas são novas. **Todos os horários vêm do relógio deste computador, em UTC; nenhum é o horário do servidor da Pocket Option.**
+
+| Coluna | Conteúdo |
+|---|---|
+| `captured_at_utc` | relógio local no início da observação |
+| `page` | página lida, sem parâmetros nem fragmento |
+| `asset`, `asset_status` | ativo; `ok: <seletor>` ou `indisponível: <motivo>` |
+| `price`, `price_status` | cotação do ativo, como exibida; `ok: <seletor>`, `ok: ocr <seletor do gráfico>` ou `indisponível: <motivo>` |
+| `payout_percent`, `payout_status` | número do payout; mesmo formato de status |
+| `completeness` | `completa` com ativo, cotação e payout disponíveis; `parcial` quando falta algum |
+| `price_source` | `texto`, `ocr` ou vazio, sem fonte |
+| `price_captured_at_utc` | relógio local logo antes da captura da cotação |
+| `price_processing_ms` | milissegundos da captura e da leitura da cotação |
+| `observation_ms` | milissegundos da observação inteira |
 
 | Código | Situação |
 |---|---|
 | 0 | terminou com pelo menos uma observação válida |
 | 1 | falhou, ou terminou sem nenhuma observação válida |
-| 2 | argumento, link ou configuração inválidos, inclusive nenhum seletor e Playwright ausente |
+| 2 | argumento, link ou configuração inválidos, inclusive nenhum seletor, Playwright ausente e OCR ausente com leitura visual |
 | 130 | interrompido por Ctrl+C; as linhas já gravadas ficam no CSV |
 
 ## Situação

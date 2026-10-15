@@ -75,11 +75,12 @@ jobs:
           Write-Output "exit code: $code"
           exit $code
 
-  # The collector's Windows launchers and its two real-browser tests. Chromium opens only
-  # the local test page that the tests serve themselves, for the reserved name observe.test:
-  # nothing here reaches the Pocket Option, so passing says nothing about the real platform.
+  # The collector's Windows launchers and its real-browser tests, with the local OCR.
+  # Chromium opens only the local test pages that the tests serve themselves, for the
+  # reserved name observe.test, one of them a canvas chart drawn by the test: nothing here
+  # reaches the Pocket Option, so passing says nothing about the real platform.
   windows-browser:
-    name: windows-latest / launchers and Chromium on a local test page
+    name: windows-latest / launchers, Chromium and OCR on local test pages
     runs-on: windows-latest
     timeout-minutes: 20
     env:
@@ -104,7 +105,7 @@ jobs:
           Set-Content -NoNewline -Path runtime\observe-selectors.json -Value '{"asset": "#sentinel", "price": "", "payout": ""}'
           Get-FileHash runtime\browser-profile\sentinel.txt, runtime\observe-selectors.json | Format-Table Hash, Path -AutoSize
 
-      - name: "preparar_windows.cmd: create .venv, install Playwright and Chromium"
+      - name: "preparar_windows.cmd: create .venv, install Playwright, Chromium and the local OCR"
         shell: cmd
         run: call preparar_windows.cmd < NUL
 
@@ -112,10 +113,10 @@ jobs:
         shell: cmd
         run: call preparar_windows.cmd < NUL
 
-      - name: Real Chromium tests on the local test page, not the Pocket Option
+      - name: Real Chromium and OCR tests on local test pages, not the Pocket Option
         shell: cmd
         env:
-          POCKETAUTONOMO_REQUIRE_BROWSER_TESTS: "1" # fail instead of skipping without Playwright
+          POCKETAUTONOMO_REQUIRE_BROWSER_TESTS: "1" # fail instead of skipping without Playwright or OCR
         run: .venv\Scripts\python -m unittest -v tests.test_observe_playwright
 
       - name: "observar_windows.cmd --help: no browser opens"

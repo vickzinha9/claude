@@ -22,6 +22,7 @@ from pocketautonomo import setup_observer as setup
 
 ROOT = Path(__file__).resolve().parent.parent
 PY312 = setup.Interpreter((3, 12, 10), 64, "C:/Python312/python.exe")
+STEPS = ["pip", "ocr-pip", "chromium", "playwright", "launch", "ocr"]
 
 
 def kind_of(command):
@@ -32,9 +33,10 @@ def kind_of(command):
             setup.INTERPRETER_CHECK: "interpreter",
             setup.PLAYWRIGHT_CHECK: "playwright",
             setup.CHROMIUM_CHECK: "launch",
+            setup.OCR_CHECK: "ocr",
         }[code]
     if command[1:3] == ["-m", "pip"]:
-        return "pip"
+        return "ocr-pip" if setup.OCR_REQUIREMENTS[0] in command else "pip"
     if command[1:4] == ["-m", "playwright", "install"]:
         return "chromium"
     raise AssertionError(f"comando inesperado: {command}")
@@ -52,6 +54,8 @@ class FakeRun:
         "chromium": (0, "", ""),
         "playwright": (0, f"{setup.PLAYWRIGHT_VERSION}\n", ""),
         "launch": (0, "", ""),
+        "ocr-pip": (0, "", ""),
+        "ocr": (0, "1.26543 0.999\n", ""),
     }
 
     def __init__(self, **answers):
@@ -119,9 +123,11 @@ class SetupObserverTest(unittest.TestCase):
         python = str(python)
         return [
             [python, "-m", "pip", "install", "--disable-pip-version-check", "playwright==1.64.0"],
+            [python, "-m", "pip", "install", "--disable-pip-version-check", "rapidocr==3.10.0", "onnxruntime==1.31.0"],
             [python, "-m", "playwright", "install", "chromium"],
             [python, "-c", setup.PLAYWRIGHT_CHECK],
             [python, "-c", setup.CHROMIUM_CHECK],
+            [python, "-c", setup.OCR_CHECK],
         ]
 
     def test_creates_the_venv_and_installs_the_pinned_playwright_and_chromium(self):
@@ -150,22 +156,25 @@ class SetupObserverTest(unittest.TestCase):
         self.assertIn(f"Reutilizando {self.venv}, com o Python 3.13.1 de 64 bits.", out)
 
     def test_each_failing_step_stops_with_a_clear_message(self):
-        old = setup.Interpreter((3, 9, 25), 64, "C:/Python39/python.exe")
+        old = setup.Interpreter((3, 10, 11), 64, "C:/Python310/python.exe")
         bits32 = setup.Interpreter((3, 12, 10), 32, "C:/Python312-32/python.exe")
         traceback = "Traceback (most recent call last):\nplaywright._impl._errors.Error: BrowserType.launch: Executable doesn't exist\n"
         # (case, interpreter, windows, existing .venv, FakeRun answers, message, steps run)
         cases = (
-            ("old Python", old, False, None, {}, "exige Python 3.10 ou mais novo", []),
+            ("old Python", old, False, None, {}, "exige Python 3.11 ou mais novo", []),
             ("32-bit Python on Windows", bits32, True, None, {}, "só tem pacote pronto de 64 bits", []),
             (".venv without Python", PY312, False, "empty", {}, "já existe, mas não tem", []),
             (".venv whose Python fails", PY312, False, "python", {"interpreter": (1, "", "erro")}, "o Python dela não funciona", ["interpreter"]),
             (".venv whose Python does not start", PY312, False, "python", {"interpreter": OSError("sem Python")}, "o Python dela não funciona", ["interpreter"]),
-            (".venv with Python 3.9", PY312, False, "python", {"interpreter": (0, "3.9.25 64\n", "")}, "usa o Python 3.9.25 de 64 bits, e o Playwright 1.64.0 exige", ["interpreter"]),
+            (".venv with Python 3.10", PY312, False, "python", {"interpreter": (0, "3.10.11 64\n", "")}, "usa o Python 3.10.11 de 64 bits, e o coletor exige Python 3.11", ["interpreter"]),
             ("pip fails", PY312, False, None, {"pip": (1, "", "")}, "a instalação de playwright==1.64.0 falhou (código 1)", ["pip"]),
             ("pip does not start", PY312, False, None, {"pip": OSError("sem pip")}, "a instalação de playwright==1.64.0 falhou (sem pip)", ["pip"]),
-            ("Chromium download fails", PY312, False, None, {"chromium": (1, "", "")}, "a instalação do Chromium do Playwright falhou (código 1)", ["pip", "chromium"]),
-            ("another Playwright", PY312, False, None, {"playwright": (0, "1.63.0\n", "")}, "não importa o Playwright 1.64.0 (encontrado: 1.63.0", ["pip", "chromium", "playwright"]),
-            ("Chromium does not start", PY312, False, None, {"launch": (1, "", traceback)}, "o Chromium do Playwright não abriu (playwright._impl._errors.Error: BrowserType.launch: Executable doesn't exist)", ["pip", "chromium", "playwright", "launch"]),
+            ("OCR pip fails", PY312, False, None, {"ocr-pip": (1, "", "")}, "a instalação do OCR local falhou (código 1)", ["pip", "ocr-pip"]),
+            ("Chromium download fails", PY312, False, None, {"chromium": (1, "", "")}, "a instalação do Chromium do Playwright falhou (código 1)", ["pip", "ocr-pip", "chromium"]),
+            ("another Playwright", PY312, False, None, {"playwright": (0, "1.63.0\n", "")}, "não importa o Playwright 1.64.0 (encontrado: 1.63.0", ["pip", "ocr-pip", "chromium", "playwright"]),
+            ("Chromium does not start", PY312, False, None, {"launch": (1, "", traceback)}, "o Chromium do Playwright não abriu (playwright._impl._errors.Error: BrowserType.launch: Executable doesn't exist)", ["pip", "ocr-pip", "chromium", "playwright", "launch"]),
+            ("OCR misreads", PY312, False, None, {"ocr": (0, "1.26548 0.91\n", "")}, "o OCR local não leu 1.26543 na imagem de teste (leu '1.26548')", STEPS),
+            ("OCR DLL missing", PY312, False, None, {"ocr": (1, "", "ImportError: DLL load failed while importing onnxruntime_pybind11_state\n")}, "Microsoft Visual C++ Redistributable", STEPS),
         )
         for case, interpreter, windows, existing, answers, message, steps in cases:
             with self.subTest(case=case):
@@ -214,7 +223,7 @@ class LaunchersTest(unittest.TestCase):
         for candidate in ("py -3.12", "py -3", "python"):
             self.assertIn(f"call :experimentar {candidate}", " ".join(prepare))
         self.assertIn("call %PYTHON_CMD% -m pocketautonomo.setup_observer", prepare)
-        self.assertIn("sys.version_info >= (3, 10) and sys.maxsize > 2**32", " ".join(prepare))
+        self.assertIn("sys.version_info >= (3, 11) and sys.maxsize > 2**32", " ".join(prepare))
         # A candidate is accepted only with exit code exactly 0: "if not errorlevel 1" also
         # accepted negative codes, such as the -1610612730 of py without Python 3.12.
         self.assertIn('if "%ERRORLEVEL%"=="0" set "PYTHON_CMD=%*"', prepare)
@@ -317,7 +326,7 @@ class PreparerOnWindowsTest(unittest.TestCase):
         code, out = self.run_preparer(["-3.12", "-3"], python_on_path=False)
         self.assertEqual(code, 1, out)
         self.assertIn("python: nao serve (codigo ", out)  # not on the PATH
-        self.assertIn("[ERRO] Nenhum Python 3.10 ou mais novo, de 64 bits, foi encontrado.", out)
+        self.assertIn("[ERRO] Nenhum Python 3.11 ou mais novo, de 64 bits, foi encontrado.", out)
         self.assertNotIn("Python escolhido", out)
         self.assertNotIn("SETUP FALSO", out)
         self.assertIn("preparar_windows.cmd falhou com codigo 1.", out)
