@@ -39,7 +39,7 @@ Rode todos os comandos abaixo na raiz do repositório, a pasta `claude`. No Wind
 
 No GitHub, o workflow [`.github/workflows/tests.yml`](.github/workflows/tests.yml) roda essa suíte e os dois exemplos finitos abaixo em Linux e Windows a cada push e pull request. As execuções ficam na [aba Actions](https://github.com/vickzinha9/claude/actions/workflows/tests.yml).
 
-Os testes do coletor em `tests/test_observe.py`, os da leitura visual em `tests/test_quote_reader.py`, os da varredura dos favoritos em `tests/test_scan.py` e os da preparação e dos lançadores em `tests/test_setup_observer.py` usam objetos falsos no lugar do navegador, do OCR, do `pip` e do `venv`, e imagens sintéticas de gráfico. Eles não precisam do Playwright nem do OCR. Os 4 testes de `PreparerOnWindowsTest`, o de `OpenImageOnWindowsTest` e o de `ScanLauncherOnWindowsTest` só rodam no Windows. Os 4 de `tests/test_observe_playwright.py` abrem um Chromium de verdade, sem janela, em páginas locais de teste, que não são a Pocket Option; dois deles leem a cotação de um gráfico desenhado em canvas, com o OCR de verdade, e um desses varre uma barra de favoritos de teste, com cliques de verdade. Sem o Playwright ou o OCR eles aparecem como `skipped`, a menos que a variável `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1` exista: aí falham, como o job de navegador do CI exige.
+Os testes do coletor em `tests/test_observe.py`, os da leitura visual em `tests/test_quote_reader.py`, os da varredura dos favoritos em `tests/test_scan.py` e os da preparação e dos lançadores em `tests/test_setup_observer.py` usam objetos falsos no lugar do navegador, do OCR, do `pip` e do `venv`, e imagens sintéticas de gráfico. Eles não precisam do Playwright nem do OCR. Os 4 testes de `PreparerOnWindowsTest`, o de `OpenImageOnWindowsTest` e o de `ScanLauncherOnWindowsTest` só rodam no Windows. Dos 5 de `tests/test_observe_playwright.py`, 4 abrem um Chromium de verdade, sem janela, em páginas locais de teste, que não são a Pocket Option; dois deles leem a cotação de um gráfico desenhado em canvas, com o OCR de verdade, e um desses varre uma barra de favoritos de teste, com cliques de verdade. O quinto confere a leitura de aquecimento do OCR de verdade. Sem o Playwright ou o OCR eles aparecem como `skipped`, a menos que a variável `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1` exista: aí falham, como o job de navegador do CI exige.
 
 ## Simulação local
 
@@ -221,7 +221,7 @@ Na leitura visual:
 3. ele grava uma imagem nova, `runtime/cotacao-candidatos-<data>-<hora>-<sufixo>.png`, com as caixas numeradas, abre essa imagem e lista cada candidato com a cor, o tamanho e o texto lido pelo OCR. **Um candidato sem cotação legível não pode ser escolhido**;
 4. você digita o número do marcador que acompanha a cotação atual, e não o da etiqueta do cursor nem o de uma operação aberta;
 5. o programa guarda as cores do preenchimento desse marcador (cada uma que ocupe 5% dele ou mais, até 4), o tamanho e a distância até a borda direita do elemento. **A altura dele nunca é guardada**: a cada leitura, o marcador é procurado de novo, onde estiver;
-6. ele faz 3 prévias, uma por segundo, com o relógio local e o tempo de cada etapa: captura (elemento, tela e decodificação), detecção e OCR. A imagem da última prévia, com o marcador lido em destaque, vai para outro arquivo novo, `runtime/cotacao-previa-<data>-<hora>-<sufixo>.png`. Compare cada prévia com a tela. **A leitura visual só pode ser aceita quando as 3 prévias leram uma cotação.** Com todas lidas, Enter aceita; `r` repete, `n` escolhe o marcador de novo e `-` desiste. Com alguma `INDISPONÍVEL`, Enter repete a prévia. Se a cor do marcador mudar, por exemplo sobre uma vela vermelha, escolha-o de novo com `n` e digite `+` para somar as cores novas às gravadas.
+6. ele faz 3 prévias, uma por segundo, com o relógio local e o tempo de cada etapa: captura (elemento, tela e decodificação), detecção e OCR. A partir das prévias, cada leitura captura só a **faixa direita** do gráfico, da largura que a busca do marcador usa (cerca de 150 px CSS para um marcador de 78 px), e não o gráfico inteiro: a leitura é a mesma, de uma imagem menor. A imagem da última prévia, com o marcador lido em destaque, vai para outro arquivo novo, `runtime/cotacao-previa-<data>-<hora>-<sufixo>.png`, e mostra essa faixa. Compare cada prévia com a tela. **A leitura visual só pode ser aceita quando as 3 prévias leram uma cotação.** Com todas lidas, Enter aceita; `r` repete, `n` escolhe o marcador de novo e `-` desiste. Com alguma `INDISPONÍVEL`, Enter repete a prévia. Se a cor do marcador mudar, por exemplo sobre uma vela vermelha, escolha-o de novo com `n` e digite `+` para somar as cores novas às gravadas.
 
 **Regras da leitura visual.** A cotação fica `INDISPONÍVEL (motivo)`, e nunca vira zero, nem é corrigida, nem repete um valor anterior, quando:
 
@@ -232,7 +232,7 @@ Na leitura visual:
 - as duas leituras do OCR, em tons de cinza e em preto e branco, divergem, ou uma delas tem confiança abaixo de 0,90;
 - o marcador tem mais de uma linha com número.
 
-Uma linha sem número, como uma contagem `00:42`, é ignorada. O OCR roda no seu computador: o modelo vem dentro do pacote `rapidocr`, o programa não baixa modelos e desliga a telemetria do `onnxruntime`. A imagem do gráfico fica na memória; só as imagens de conferência da configuração são gravadas em `runtime/`, cada uma num arquivo novo. Nenhuma imagem é sobrescrita: no Windows, uma imagem aberta num visualizador não pode ser regravada, e foi isso que encerrou a sua validação com `[Errno 22] Invalid argument`. Se uma imagem não puder ser gravada, o programa mostra o motivo e oferece tentar de novo (Enter), continuar sem a imagem (`c`) ou desistir da leitura visual (`-`); a configuração não termina. Deixe a janela do navegador visível, sem minimizar, e o mouse fora do gráfico.
+Uma linha sem número, como uma contagem `00:42`, é ignorada. O OCR roda no seu computador: o modelo vem dentro do pacote `rapidocr`, o programa não baixa modelos e desliga a telemetria do `onnxruntime`. O motor do OCR é carregado uma vez por execução e reaproveitado em todas as leituras; logo depois de carregar, ele faz uma leitura de aquecimento na amostra `1.26543`, desenhada na hora, porque a primeira leitura do `onnxruntime` é várias vezes mais lenta que as seguintes. O terminal mostra `OCR local pronto: carregado em ... ms; leitura de aquecimento em ... ms, ...: leu '1.26543'`. A imagem do gráfico fica na memória; só as imagens de conferência da configuração são gravadas em `runtime/`, cada uma num arquivo novo. Nenhuma imagem é sobrescrita: no Windows, uma imagem aberta num visualizador não pode ser regravada, e foi isso que encerrou a sua validação com `[Errno 22] Invalid argument`. Se uma imagem não puder ser gravada, o programa mostra o motivo e oferece tentar de novo (Enter), continuar sem a imagem (`c`) ou desistir da leitura visual (`-`); a configuração não termina. Deixe a janela do navegador visível, sem minimizar, e o mouse fora do gráfico.
 
 ### Espera entre leituras
 
@@ -263,6 +263,7 @@ Rode na pasta `claude`, porque a pasta `runtime/` é relativa à pasta atual. Se
 | `cotacao-candidatos-<data>-<hora>-<sufixo>.png`, `cotacao-previa-<data>-<hora>-<sufixo>.png` | imagens do gráfico da configuração visual, uma nova a cada captura: os candidatos numerados e a última prévia. As antigas não são apagadas; apague-as você mesmo, depois de fechá-las. Não as compartilhe se mostrarem dados seus |
 | `observe-selectors.invalido-<data>-<hora>-<sufixo>.json` | cópia de um arquivo de seletores inválido, guardada pelo `--configure` antes de gravar o novo |
 | `observations-<data>-<hora>-<sufixo>.csv` | um arquivo novo por execução, com as observações válidas; colunas na tabela abaixo |
+| `tempos-observations-<data>-<hora>-<sufixo>.csv` | os tempos de cada leitura da cotação dessa execução, etapa por etapa (veja [Tempos de cada leitura](#tempos-de-cada-leitura-da-cotação)) |
 
 As 13 primeiras colunas do CSV são as dos arquivos anteriores, na mesma ordem; as 3 últimas são novas. **Todos os horários vêm do relógio deste computador, em UTC; nenhum é o horário do servidor da Pocket Option.**
 
@@ -289,6 +290,31 @@ As 13 primeiras colunas do CSV são as dos arquivos anteriores, na mesma ordem; 
 | 2 | argumento, link ou configuração inválidos, inclusive nenhum seletor, Playwright ausente e OCR ausente com leitura visual |
 | 130 | interrompido por Ctrl+C; as linhas já gravadas ficam no CSV |
 
+### Tempos de cada leitura da cotação
+
+O coletor e a varredura gravam, ao lado do CSV principal, um arquivo com o mesmo nome depois de `tempos-`, com uma linha por leitura da cotação, inclusive as que a varredura não aproveitou. No fim, e depois de Ctrl+C, o terminal mostra a mediana e o máximo de cada etapa, em ms, por momento da leitura, como neste trecho de um teste numa página local, que não é a Pocket Option:
+
+```
+Tempos da leitura da cotação, mediana/máximo em ms, por momento da leitura:
+  sem troca (2 leituras, 2 com cotação, 1 aceita nas conferências): total 62/69, elemento 12/14, tela 21/22, decodificação 3/4, detecção 5/5, OCR 22/25
+  referência antes da troca (5 leituras, 5 com cotação, 5 aceitas nas conferências): total 57/75, elemento 6/7, tela 22/36, decodificação 1/1, detecção 6/6, OCR 24/27
+  depois da troca (15 leituras, 15 com cotação, 5 aceitas nas conferências): total 60/71, elemento 11/13, tela 23/30, decodificação 1/1, detecção 5/5, OCR 24/25
+```
+
+| Coluna | Conteúdo |
+|---|---|
+| `captured_at_utc` | relógio local logo antes da leitura |
+| `moment` | `observação` (coletor), `sem troca`, `referência antes da troca` ou `depois da troca` (varredura) |
+| `cycle`, `favorite_position`, `asset` | ciclo e favorito da varredura; o ativo na tela no início da leitura |
+| `since_click_ms` | varredura, depois de uma troca: milissegundos do clique ao início da leitura |
+| `attempt` | número da tentativa, antes da troca, ou da leitura dos dados, na visita |
+| `result`, `quote`, `reason` | `ok` com a cotação lida, ou `indisponível` com o motivo |
+| `verdict` | varredura: `aceita`, ou `recusada: <motivo>` quando as conferências não aproveitaram a cotação lida |
+| `source`, `total_ms` | `texto` ou `ocr`; milissegundos da leitura inteira |
+| `element_ms`, `count_ms`, `visible_ms`, `box_ms` | achar o elemento do gráfico: contagem, visibilidade e posição, cada uma uma ida ao navegador |
+| `screenshot_ms`, `decode_ms`, `detection_ms`, `ocr_ms` | captura da tela, decodificação da imagem, detecção do marcador e OCR |
+| `image_px`, `png_bytes`, `strip_css` | tamanho da imagem capturada, em pixels do dispositivo, e do PNG; largura da faixa direita capturada, em px CSS |
+
 ## Varredura dos favoritos
 
 `python -m pocketautonomo.scan` passa pelos seus ativos favoritos da Pocket Option, um de cada vez. Em cada um, ela clica no favorito, confere o ativo selecionado, espera os dados e lê ativo, cotação e payout com o leitor e as fontes do coletor, de `runtime/observe-selectors.json`. **O único clique é num favorito, para selecioná-lo: a varredura não envia ordens, nunca clica em BUY, SELL, CALL ou PUT e não mexe no Amount.** O método e os riscos estão nas seções 4 e 6 do [INTEGRATION.md](INTEGRATION.md).
@@ -306,20 +332,22 @@ O último continua até Ctrl+C. O programa pede o link, abre o navegador para o 
 Cada favorito gera duas linhas, como estas, de um teste numa página local, que não é a Pocket Option:
 
 ```
-CICLO 1 | favorito 2 de 3, GBP/USD OTC | COMPLETA | ativo GBP/USD OTC | cotação do ativo 1.27343 | payout 90% | ELEGÍVEL (payout ≥ 90%) | gravada no CSV
-  tempos: troca confirmada em 513 ms | dados em 1201 ms, 3 leituras | cotação 72 ms (captura 48 ms (elemento 5, tela 42, decodificação 2), detecção 3 ms, OCR 21 ms) | relógio local 2026-10-15T07:47:21.499+00:00
+CICLO 1 | favorito 2 de 3, GBP/USD OTC | COMPLETA | ativo GBP/USD OTC | cotação do ativo 1.27343 | payout 90% | payout ELEGÍVEL (≥ 90%) | dados para análise: SIM (completos e atuais) | gravada no CSV
+  tempos: troca confirmada em 519 ms | cotação antes da troca 1.08533 em 1 tentativa, 59 ms | dados em 1209 ms, 3 leituras | cotação 47 ms (captura 23 ms (elemento 12, tela 10, decodificação 1), detecção 5 ms, OCR 19 ms) | relógio local 2026-10-15T22:01:37.326+00:00
 ```
 
-No fim de cada ciclo aparecem os elegíveis; no fim da varredura, ou depois de Ctrl+C, um resumo por ativo.
+No fim de cada ciclo aparecem, separados, os ativos com payout elegível e dados para análise e os que só têm o payout elegível; no fim da varredura, ou depois de Ctrl+C, um resumo por ativo e os [tempos das leituras](#tempos-de-cada-leitura-da-cotação).
 
-**Elegível** quer dizer payout numérico de 90% ou mais: é o critério para uma futura primeira entrada, **não a probabilidade de vitória**. Os ativos abaixo de 90% também são gravados.
+**Payout elegível** quer dizer payout numérico de 90% ou mais: é o critério para uma futura primeira entrada, **não a probabilidade de vitória**, e não diz nada sobre a qualidade dos dados. Os ativos abaixo de 90% também são gravados.
+
+**Dados para análise** é outra coisa: `SIM` só quando a visita tem ativo, cotação e payout, lidos juntos na última leitura, com o ativo conferido antes e depois, cada valor igual ao da leitura anterior e, depois de uma troca, a cotação longe da do ativo anterior; e quando a cotação foi capturada no máximo 5 s antes de a visita ser gravada. Senão, `NÃO`, com o motivo, como `falta a cotação do ativo`. Um ativo pode ter o payout elegível e dados que não servem para análise; o resumo do ciclo lista esses casos à parte. O resumo por ativo mostra a última leitura completa e atual, com o ciclo e o relógio local: a cotação e o payout dela são da mesma leitura, e nunca uma cotação antiga ao lado de um payout novo.
 
 **Regras contra misturar dois ativos.** Depois do clique, o nome do ativo, o payout e o gráfico mudam em momentos diferentes. Por isso:
 
 1. a troca só vale quando o campo do ativo mostra o nome do favorito, comparado só por letras e algarismos;
 2. depois da confirmação, a varredura espera 1 s e lê, a cada 0,5 s, o ativo, a cotação, o payout e o ativo de novo;
 3. um campo só é aceito quando duas leituras seguidas concordam: o mesmo ativo antes e depois, o mesmo payout e cotações a menos de 1% uma da outra;
-4. depois de uma troca, a cotação também precisa estar a mais de 0,1% da que o gráfico mostrava antes do clique, no ativo anterior. Sem essa cotação anterior, ela fica indisponível;
+4. depois de uma troca, a cotação também precisa estar a mais de 0,1% da que o gráfico mostrava antes do clique, no ativo anterior. Essa cotação anterior é lida antes do clique, em até 3 tentativas curtas, com 0,3 s entre elas e nenhuma começando mais de 2,5 s depois da primeira; cada tentativa só vale se o ativo na tela continuar o mesmo depois dela. Sem essa cotação, a cotação nova fica indisponível, com o **motivo original** de cada tentativa, como `a cotação do ativo anterior não pôde ser lida antes da troca (em 3 tentativas: o marcador da cotação não apareceu: ...)`;
 5. o que não estabilizar até `--load-timeout` segundos depois do clique fica `INDISPONÍVEL (motivo)`, e a linha é gravada assim mesmo.
 
 Três trocas seguidas sem confirmação encerram o ciclo, sem clicar nos favoritos que faltam. A varredura para, com código 1 e sem clicar, quando o seletor encontra também um elemento com palavra de botão financeiro ou de dinheiro (BUY, SELL, CALL, PUT, COMPRAR, VENDER, Amount e outras), um campo de formulário ou mais de 30 elementos, quando a página sai de pocketoption.com, quando um clique abre outra aba e quando o favorito clicado some da lista. Só uma varredura roda por vez.
@@ -336,9 +364,10 @@ Três trocas seguidas sem confirmação encerram o ciclo, sem clicar nos favorit
 |---|---|
 | `scan-selectors.json` | o seletor dos favoritos (`favorites`), gravado pelo `--configure`; um arquivo inválido é guardado como `scan-selectors.invalido-<data>-<hora>-<sufixo>.json` antes de ser substituído |
 | `scan-<data>-<hora>-<sufixo>.csv` | um arquivo novo por execução, com uma linha por favorito por ciclo, gravada assim que a visita termina |
+| `tempos-scan-<data>-<hora>-<sufixo>.csv` | uma linha por leitura da cotação dessa execução, inclusive as tentativas antes de cada clique e as leituras recusadas, com o tempo de cada etapa (veja [Tempos de cada leitura](#tempos-de-cada-leitura-da-cotação)) |
 | `scan.lock` | a trava que impede duas varreduras ao mesmo tempo; pode ficar na pasta depois do fim |
 
-O CSV da varredura tem as 16 colunas do coletor, descritas acima, e mais estas:
+O CSV da varredura tem as 16 colunas do coletor, descritas acima, e mais estas; as 6 últimas são novas:
 
 | Coluna | Conteúdo |
 |---|---|
@@ -350,7 +379,12 @@ O CSV da varredura tem as 16 colunas do coletor, descritas acima, e mais estas:
 | `switch_ms` | milissegundos do clique até a confirmação do ativo |
 | `load_ms` | milissegundos da confirmação até os dados estáveis, ou até o limite |
 | `polls` | quantas leituras dos dados a visita fez |
-| `payout_eligible` | `sim` com payout de 90% ou mais, `não` abaixo disso, `indisponível` sem payout |
+| `payout_eligible` | `sim` com payout de 90% ou mais, `não` abaixo disso, `indisponível` sem payout; só o payout, não a qualidade dos dados |
+| `previous_quote_status` | `ok: <fonte>` ou `indisponível: <motivo original de cada tentativa>`, da cotação do ativo anterior lida antes do clique; vazio sem clique |
+| `previous_quote_attempts`, `previous_quote_ms` | tentativas dessa leitura, de 1 a 3, e milissegundos de todas elas |
+| `analysis_ready` | `sim` com dados completos e atuais, utilizáveis para análise; `não` nos outros casos |
+| `analysis_note` | o motivo de `não`, ou o que faz os dados utilizáveis |
+| `data_age_ms` | milissegundos da captura da cotação à gravação da visita |
 
 | Código | Situação |
 |---|---|

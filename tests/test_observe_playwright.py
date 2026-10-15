@@ -229,6 +229,17 @@ window.startCycling = () => setInterval(() => { index = (index + 1) % SEQUENCE.l
 
 
 @unittest.skipUnless(HAVE_OCR or REQUIRED, "Playwright e OCR local (rapidocr) não estão instalados neste Python")
+class RealOcrWarmUpTest(unittest.TestCase):
+    def test_the_real_ocr_reads_its_sample_when_warmed_up(self):
+        from pocketautonomo.quote_ocr import WARM_UP_SAMPLE, RapidOcrEngine
+
+        warm = RapidOcrEngine().warm_up()
+        self.assertEqual(warm.text, WARM_UP_SAMPLE)
+        self.assertGreaterEqual(warm.score, 0.9)
+        self.assertGreater(warm.ms, 0)
+
+
+@unittest.skipUnless(HAVE_OCR or REQUIRED, "Playwright e OCR local (rapidocr) não estão instalados neste Python")
 class RealVisualQuoteTest(unittest.TestCase):
     """The visual reading of the quote, with real Chromium and the real OCR, on a local chart."""
 
@@ -329,6 +340,25 @@ class RealVisualQuoteTest(unittest.TestCase):
             capture, detection, ocr = (float(value) for value in row[13:16])
             self.assertTrue(capture > 0 and detection > 0 and ocr > 0, row)
         self.assertGreater(len({row[4] for row in rows}), 1)  # the quote changed between readings
+        # The OCR was warmed up on its sample before the first reading, and every reading
+        # after the candidates captured only the chart's right strip, read with real Chromium.
+        self.assertRegex(text, r"OCR local pronto: carregado em \d+ ms; leitura de aquecimento em \d+ ms, antes de qualquer cotação, na amostra 1\.26543: leu '1\.26543'")
+        marker = observe.quote_reader.MarkerModel.from_json(saved["price_ocr"]["marker"])
+        strip = observe.quote_reader.strip_width(marker)
+        [timings] = self.runtime.glob("tempos-observations-*.csv")
+        self.assertEqual(timings.name, "tempos-" + path.name)
+        with open(timings, newline="", encoding="utf-8") as file:
+            header, *lines = list(csv.reader(file))
+        lines = [dict(zip(header, line)) for line in lines]
+        self.assertEqual([line["quote"] for line in lines], [row[4] for row in rows])
+        for line in lines:
+            self.assertEqual((line["moment"], line["strip_css"], line["result"]), ("observação", f"{strip:.1f}", "ok"))
+            width, height = (int(value) for value in line["image_px"].split("x"))
+            self.assertEqual((width, height), (int(strip), 360))  # the strip, not the 700 px of the chart
+            self.assertGreater(int(line["png_bytes"]), 0)
+            for step in ("count_ms", "visible_ms", "box_ms", "screenshot_ms", "decode_ms", "detection_ms", "ocr_ms"):
+                self.assertGreaterEqual(float(line[step]), 0, step)
+        self.assertIn("  observação (4 leituras, 4 com cotação): total ", text)
 
 
 # The favorites page: three favorites, the asset and payout fields, a canvas chart with an
@@ -482,10 +512,30 @@ class RealScanTest(unittest.TestCase):
             self.assertEqual(row["payout_percent"], str(payout), row)
             self.assertEqual(row["payout_eligible"], "sim" if payout >= 90 else "não")
             self.assertEqual((row["price_source"], row["price_status"]), ("ocr", "ok: ocr #plot"))
+            # Complete and current: usable for analysis, apart from the payout's eligibility.
+            self.assertEqual((row["analysis_ready"], row["data_age_ms"] != ""), ("sim", True), row)
             if row["switch"] == "confirmada":
                 self.assertLess(abs(float(row["previous_quote"]) - bases[row["previous_asset"]]), 0.0005, row)
                 self.assertGreaterEqual(int(row["polls"]), 2)
+                self.assertEqual(row["previous_quote_status"], "ok: ocr #plot")
+                self.assertGreaterEqual(int(row["previous_quote_attempts"]), 1)
         self.assertNotIn("SEGREDO", text + path.read_text(encoding="utf-8"))
+        # Every reading of the quote is in the timings file: the attempts before each click,
+        # on the previous asset's chart, and the readings after it, with the time since it.
+        [timings] = self.runtime.glob("tempos-scan-*.csv")
+        with open(timings, newline="", encoding="utf-8") as file:
+            header, *lines = list(csv.reader(file))
+        lines = [dict(zip(header, line)) for line in lines]
+        moments = {line["moment"] for line in lines}
+        self.assertEqual(moments, {"sem troca", "referência antes da troca", "depois da troca"})
+        after = [line for line in lines if line["moment"] == "depois da troca"]
+        self.assertGreater(len(after), 5)  # some read the previous chart and were not kept
+        self.assertTrue(all(float(line["since_click_ms"]) > 1000 for line in after))
+        refused = [line["verdict"] for line in after if line["verdict"].startswith("recusada: a cotação lida")]
+        self.assertTrue(refused, after)  # the previous asset's chart, still on the screen, was refused
+        self.assertEqual(sum(line["verdict"] == "aceita" for line in after) >= 5, True)
+        self.assertTrue(all(line["strip_css"] for line in lines))
+        self.assertIn("Tempos da leitura da cotação, mediana/máximo em ms, por momento da leitura:", text)
 
 
 if __name__ == "__main__":

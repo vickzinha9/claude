@@ -31,7 +31,9 @@ Finding the marker:
 - locate_marker accepts exactly one box whose pixels are within the tolerance of the
   model's colors, with its size and alignment, fully inside the capture. No box, more than
   one, or a box cut by the edge of the capture makes the reading unavailable, with the
-  reason.
+  reason. It looks only at the columns within marker_reach of the right edge, so a capture
+  of the right strip given by strip_width holds every pixel that it looks at, and reads the
+  same as a capture of the whole chart.
 
 Reading the text: the box is cropped, turned into dark text on white and split into text
 lines. Each line is read twice, in gray and in black and white. A value is accepted only
@@ -41,6 +43,7 @@ unavailable, with the reason: nothing is replaced by zero, no digit is corrected
 earlier value is reused.
 """
 
+import math
 import re
 import struct
 import zlib
@@ -71,6 +74,9 @@ TEXT_RATIO_RANGE = (0.03, 0.65)  # share of the box interior taken by contrastin
 ALIGN_TOLERANCE = 8
 WIDTH_RANGE = (0.6, 1.6)
 HEIGHT_RANGE = (0.7, 1.4)
+# CSS pixels added to the left of marker_reach in a strip capture, so that the strip always
+# holds every column that locate_marker looks at, whatever the rounding to device pixels.
+STRIP_MARGIN = 16
 
 
 @dataclass(frozen=True)
@@ -491,14 +497,28 @@ def fill_colors(image, box):
     return tuple(kept) or (tuple(box.color),)
 
 
+def marker_reach(model):
+    """How far from the right edge, in CSS pixels, locate_marker looks for the marker."""
+    return model.right_gap + model.width * WIDTH_RANGE[1] + ALIGN_TOLERANCE + 4
+
+
+def strip_width(model):
+    """The width, in CSS pixels, of the right strip of the chart that a reading needs.
+
+    The strip holds every column within marker_reach of the right edge, plus STRIP_MARGIN,
+    so locate_marker finds in it exactly what it finds in a capture of the whole chart.
+    """
+    return float(math.ceil(marker_reach(model)) + STRIP_MARGIN)
+
+
 def locate_marker(image, scale, model):
     """(box, None) for the only box that matches the model, or (None, reason).
 
     Every pixel within the tolerance of any of the model's colors belongs to the marker's
     fill, so a label partly over a candle and partly over the background stays one box.
+    Only the columns within marker_reach of the right edge are searched.
     """
-    reach = model.right_gap + model.width * WIDTH_RANGE[1] + ALIGN_TOLERANCE + 4
-    x0 = max(0, int(image.width - reach * scale))
+    x0 = max(0, int(image.width - marker_reach(model) * scale))
 
     def classify(color):
         return 0 if model.matches(color) else None

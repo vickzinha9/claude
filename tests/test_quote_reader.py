@@ -127,6 +127,64 @@ class LocateTest(unittest.TestCase):
                 qr.MarkerModel.from_json(value)
 
 
+class StripTest(unittest.TestCase):
+    """A capture of the right strip of strip_width reads exactly as the whole chart."""
+
+    def readings(self, image, model, scale=1.0):
+        """(value, reason, box gap to the right edge, box size) on the whole image and on its strip."""
+        strip = chart_images.right_strip(image, qr.strip_width(model) * scale)
+        out = []
+        for capture in (image, strip):
+            reading = qr.read_quote(capture, scale, model, FakeEngine())
+            box = reading.box
+            where = None if box is None else (capture.width - box.x0, capture.width - box.x1, box.y0, box.y1, box.color)
+            out.append((reading.value, reading.reason, where))
+        return out, strip
+
+    def test_every_case_reads_the_same_on_the_strip(self):
+        model = model_from(chart(marker_y=150))
+        cases = {
+            "marcador": chart(marker_y=150, cursor_y=60),
+            "ausente": chart(marker_y=None),
+            "ambíguo": chart(marker_y=150, extra=[(WIDTH - 69, 60, MARKER)]),
+            "cortado": chart(marker_y=290),
+            "desalinhado": chart(marker_y=None, extra=[(WIDTH - 110, 100, MARKER)]),
+            "longe do eixo": chart(marker_y=150, extra=[(150, 60, MARKER)]),
+        }
+        for name, image in cases.items():
+            with self.subTest(case=name):
+                (whole, part), strip = self.readings(image, model)
+                self.assertEqual(whole, part)
+                self.assertLess(strip.width, image.width)
+                self.assertEqual(strip.height, image.height)
+
+    def test_the_translucent_marker_and_a_scaled_capture_read_the_same(self):
+        image = chart_images.translucent_chart(label_y=150, candle=(140, 200))
+        [box] = qr.candidate_boxes(image, 1.0)
+        model = qr.MarkerModel.from_box(box, image, 1.0)
+        for label_y in (30, 150, 240):
+            with self.subTest(label_y=label_y):
+                (whole, part), _ = self.readings(chart_images.translucent_chart(label_y=label_y), model)
+                self.assertEqual(whole, part)
+                self.assertEqual(whole[0], "1.26543")
+        canvas = chart_images.Canvas(800, 600)
+        canvas.fill(800 - 140, 300, 800 - 2, 336, MARKER)
+        canvas.strokes(800 - 130, 308, 7, chart_images.TEXT, height=20)
+        scaled = canvas.image()
+        model = qr.MarkerModel.from_box(qr.candidate_boxes(scaled, 2.0)[0], scaled, 2.0)
+        (whole, part), strip = self.readings(scaled, model, scale=2.0)  # 2 device pixels per CSS pixel
+        self.assertEqual(whole, part)
+        self.assertEqual(whole[0], "1.26543")
+        self.assertEqual(strip.width, int(qr.strip_width(model) * 2))
+
+    def test_the_strip_holds_every_column_the_search_looks_at(self):
+        model = qr.MarkerModel(((41, 98, 255),), 78.0, 18.0, 1.0)
+        reach = qr.marker_reach(model)
+        self.assertEqual(reach, 1.0 + 78.0 * qr.WIDTH_RANGE[1] + qr.ALIGN_TOLERANCE + 4)
+        self.assertGreaterEqual(qr.strip_width(model), reach + qr.STRIP_MARGIN)
+        self.assertLess(qr.strip_width(model), reach + qr.STRIP_MARGIN + 1)
+
+
 class ReadTextTest(unittest.TestCase):
     def setUp(self):
         self.image = chart(marker_y=150)

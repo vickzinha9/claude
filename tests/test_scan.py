@@ -69,6 +69,12 @@ class FakePlatform:
         self.url = URL
         self.suggestions = {}  # selector -> what ScanSession.class_suggestions finds
         self.other_lists = {}  # selector other than FAVORITES -> the FakeItems it finds
+        self.quote_reads = 0  # readings of the quote so far
+        # quote_override(n), when given, may answer the n-th reading of the quote instead of
+        # the chart: an ElementText, or None to read the chart.
+        self.quote_override = None
+        self.quote_delay = 0.0  # seconds that each reading of the quote takes
+        self.payout_delay = 0.0  # seconds that each reading of the payout takes
 
     def now(self):
         return START + timedelta(seconds=self.t)
@@ -140,18 +146,29 @@ class FakeScanSession:
         if selector == ASSET:
             return shown(platform.assets[platform.named][0])
         if selector == QUOTE:
+            platform.advance(platform.quote_delay)
+            platform.quote_reads += 1
+            if platform.quote_override is not None:
+                override = platform.quote_override(platform.quote_reads)
+                if override is not None:
+                    return override
             text = platform.quote(platform.drawn)
             return observe.ElementText(0) if text is None else shown(text)
         if selector == PAYOUT:
+            platform.advance(platform.payout_delay)
             payout = platform.assets[platform.paid][1]
             return observe.ElementText(0) if payout is None else shown(payout)
         return observe.ElementText(0)
 
-    def capture(self, selector, timeout_ms):
+    def capture(self, selector, timeout_ms, strip=None):
         self.platform.advance(0.05)
-        self.calls.append(("capture", selector))
+        self.calls.append(("capture", selector, strip))
         image = chart_images.chart(marker_y=150)
-        return observe.Capture(1, True, image, image.width, element_ms=3.0, screenshot_ms=40.0, decode_ms=5.0)
+        if strip is not None:
+            image = chart_images.right_strip(image, strip)
+        return observe.Capture(
+            1, True, image, image.width, element_ms=3.0, screenshot_ms=40.0, decode_ms=5.0, strip_css=strip
+        )
 
     def favorite_items(self, selector, limit):
         self.platform.advance(0.01)
@@ -284,12 +301,25 @@ class SwitchTest(ScanTestCase):
         self.assertIn(
             f"CICLO 1 | favorito 2 de 3, {GBP[0]} | COMPLETA | ativo {GBP[0]} | cotação do ativo", self.out
         )
-        self.assertIn("payout 90% | ELEGÍVEL (payout ≥ 90%) | gravada no CSV", self.out)
-        self.assertIn("payout 85% | não elegível (payout < 90%) | gravada no CSV", self.out)
+        ready = "dados para análise: SIM (completos e atuais) | gravada no CSV"
+        self.assertIn(f"payout 90% | payout ELEGÍVEL (≥ 90%) | {ready}", self.out)
+        self.assertIn(f"payout 85% | payout não elegível (< 90%) | {ready}", self.out)
         self.assertIn("  tempos: troca confirmada em ", self.out)
-        self.assertIn("Elegíveis (payout ≥ 90%): EUR/USD OTC, GBP/USD OTC.", self.out)
+        self.assertRegex(self.out, r"\| cotação antes da troca 1\.085\d\d em 1 tentativa, \d+ ms \|")
+        self.assertIn("Payout elegível (≥ 90%) e dados para análise: EUR/USD OTC, GBP/USD OTC.", self.out)
+        self.assertNotIn("SEM dados para análise", self.out)
         self.assertIn("não é probabilidade de vitória", self.out.lower())
         self.assertIn("Concluído: 2 ciclos, 6 visitas a favoritos, 5 cliques em favoritos", self.out)
+        self.assertIn("6 leituras completas e 0 parciais, 6 com dados para análise.", self.out)
+        # The previous asset's quote, read before each click, and the analysis columns.
+        self.assertEqual(rows[0]["previous_quote_status"], "")  # no click: no reference read
+        for row in rows[1:]:
+            self.assertEqual((row["previous_quote_status"], row["previous_quote_attempts"]), (f"ok: {QUOTE}", "1"))
+            self.assertGreater(float(row["previous_quote_ms"]), 0)
+        for row in rows:
+            self.assertEqual(row["analysis_ready"], "sim", row)
+            self.assertEqual(row["analysis_note"], "ativo, cotação e payout lidos juntos, conferidos e atuais")
+            self.assertLess(float(row["data_age_ms"]), scan.MAX_DATA_AGE_SECONDS * 1000)
         self.assertEqual(self.session.closes, 1)
 
     def test_a_slow_switch_never_mixes_the_previous_asset(self):
@@ -376,8 +406,25 @@ class SwitchTest(ScanTestCase):
         self.assertEqual(code, 0, self.err)
         second = self.rows()[1]
         self.assertEqual((second["asset"], second["previous_quote"], second["price"]), (GBP[0], "", ""))
-        self.assertEqual(second["price_status"], f"indisponível: {scan.NO_REFERENCE}")
-        self.assertEqual(second["payout_percent"], "90")
+        # The original reason of the failure, from each of the attempts, stays in the message.
+        reason = "em 3 tentativas: o seletor não encontrou nenhum elemento"
+        self.assertEqual(
+            second["price_status"], f"indisponível: {scan.NO_REFERENCE} ({reason}); {scan.NO_PROOF}"
+        )
+        self.assertEqual(second["previous_quote_status"], f"indisponível: {reason}")
+        self.assertEqual(second["previous_quote_attempts"], "3")
+        # The payout is eligible, but the data is not usable for analysis: two different things.
+        self.assertEqual((second["payout_percent"], second["payout_eligible"]), ("90", "sim"))
+        self.assertEqual((second["analysis_ready"], second["analysis_note"]), ("não", "falta a cotação do ativo"))
+        self.assertIn(
+            "payout 90% | payout ELEGÍVEL (≥ 90%) | dados para análise: NÃO (falta a cotação do ativo)", self.out
+        )
+        self.assertIn(
+            f"Payout elegível (≥ 90%) e dados para análise: nenhum. Payout elegível, mas SEM dados para análise:"
+            f" {EUR[0]} (falta a cotação do ativo); {GBP[0]} (falta a cotação do ativo).",
+            self.out,
+        )
+        self.assertIn("cotação antes da troca INDISPONÍVEL em 3 tentativas", self.out)
 
     def test_the_visual_reading_of_the_quote_goes_into_the_scan(self):
         self.write_sources(price="", price_ocr={"chart": CHART, "marker": BLUE_MARKER})
@@ -390,6 +437,175 @@ class SwitchTest(ScanTestCase):
             self.assertEqual((row["price_source"], row["price_status"]), ("ocr", f"ok: ocr {CHART}"))
             self.assertGreater(float(row["price_capture_ms"]), 0)
         self.assertRegex(self.out, r"cotação \d+ ms \(captura \d+ ms \(elemento 3, tela 40, decodificação 5\), detecção \d+ ms, OCR \d+ ms\)")
+
+
+def starting_off_the_favorites(assets=(EUR, GBP, AUD)):
+    """A platform whose asset on the screen, the first of assets, is not a favorite.
+
+    The favorites are the other assets, so the first visit already clicks: the first
+    readings of the quote are the ones of the previous asset, before that click.
+    """
+    platform = FakePlatform(assets=assets)
+    del platform.items[0]
+    return platform
+
+
+class ReferenceTest(ScanTestCase):
+    """The previous asset's quote, read before the click, in short attempts that keep their reason."""
+
+    def timing_rows(self):
+        files = sorted(self.runtime.glob("tempos-scan-*.csv"))
+        self.assertEqual(len(files), 1, files)
+        with open(files[0], newline="", encoding="utf-8") as file:
+            header, *rows = list(csv.reader(file))
+        self.assertEqual(tuple(header), observe.quote_timings.TIMING_COLUMNS)
+        return [dict(zip(header, row)) for row in rows]
+
+    def test_a_failed_reading_is_tried_again_on_the_previous_asset_before_the_click(self):
+        platform = starting_off_the_favorites()
+        platform.quote_override = lambda n: observe.ElementText(2) if n == 1 else None  # one bad reading
+        code = self.run_scan("--cycles", "1", platform=platform)
+        self.assertEqual((code, self.err), (0, ""), self.out)
+        first = self.rows()[0]
+        self.assertEqual((first["asset"], first["switch"], first["completeness"]), (GBP[0], "confirmada", "completa"))
+        self.assertEqual((first["previous_quote_status"], first["previous_quote_attempts"]), (f"ok: {QUOTE}", "2"))
+        self.assertTrue(in_range(first["previous_quote"], EUR[2]))
+        self.assertTrue(in_range(first["price"], GBP[2]))
+        self.assertEqual(first["analysis_ready"], "sim")
+        # Both attempts read the quote before the click, so on the previous asset's chart, and
+        # the asset was read again after the attempt that counted.
+        calls = self.session.calls
+        click_at = calls.index(("click", 0))
+        quotes = [index for index, call in enumerate(calls) if call == ("read", QUOTE)]
+        self.assertEqual(len([index for index in quotes if index < click_at]), 2)
+        self.assertEqual(calls[quotes[1] + 1], ("read", ASSET))
+        self.assertEqual(self.session.waits[0], scan.REFERENCE_RETRY_SECONDS)  # the short pause between them
+        # The timings file has both attempts, the failed one with its reason, and the readings
+        # after the switch, with the time since the click.
+        rows = self.timing_rows()
+        reference = [row for row in rows if row["moment"] == "referência antes da troca"]
+        self.assertEqual(
+            [(row["attempt"], row["result"], row["verdict"]) for row in reference[:2]],
+            [("1", "indisponível", ""), ("2", "ok", "aceita")],
+        )
+        self.assertEqual(reference[0]["reason"], "o seletor encontrou 2 elementos; precisa encontrar exatamente 1")
+        self.assertEqual((reference[0]["asset"], reference[0]["since_click_ms"]), (EUR[0], ""))
+        after = [row for row in rows if row["moment"] == "depois da troca" and row["favorite_position"] == "2"]
+        self.assertGreaterEqual(len(after), 2)
+        self.assertTrue(all(float(row["since_click_ms"]) >= scan.SETTLE_SECONDS * 1000 for row in after))
+        # The first reading after the switch has nothing to be compared with; the last is kept.
+        self.assertEqual(
+            after[0]["verdict"], "recusada: falta uma segunda leitura da cotação, para conferir que ela não saltou"
+        )
+        self.assertEqual(after[-1]["verdict"], "aceita")
+        self.assertIn("  referência antes da troca (", self.out)
+        self.assertRegex(self.out, r"  depois da troca \(\d+ leituras, \d+ com cotação, \d+ aceitas? nas conferências\)")
+
+    def test_every_original_reason_is_kept_when_all_attempts_fail(self):
+        platform = starting_off_the_favorites(assets=(EUR, GBP))
+        answers = {1: observe.ElementText(2), 2: observe.ElementText(0), 3: observe.ElementText(2)}
+        platform.quote_override = answers.get
+        code = self.run_scan("--cycles", "1", "--load-timeout", "5", platform=platform)
+        self.assertEqual(code, 0, self.err)
+        [row] = self.rows()
+        reason = (
+            "em 3 tentativas: o seletor encontrou 2 elementos; precisa encontrar exatamente 1"
+            " / o seletor não encontrou nenhum elemento"
+        )
+        self.assertEqual(row["previous_quote_status"], f"indisponível: {reason}")
+        self.assertEqual(row["price_status"], f"indisponível: {scan.NO_REFERENCE} ({reason}); {scan.NO_PROOF}")
+        self.assertEqual((row["previous_quote"], row["previous_quote_attempts"]), ("", "3"))
+        # The attempts are bounded: three, then the click, and no more readings before it.
+        calls = self.session.calls
+        click_at = calls.index(("click", 0))
+        self.assertEqual(calls[:click_at].count(("read", QUOTE)), scan.REFERENCE_ATTEMPTS)
+        self.assertEqual((row["asset"], row["payout_eligible"], row["analysis_ready"]), (GBP[0], "sim", "não"))
+
+    def test_the_attempts_stop_at_the_time_limit(self):
+        platform = starting_off_the_favorites(assets=(EUR, GBP))
+        platform.quote_delay = 1.5  # each reading of the quote takes 1.5 s
+        platform.quote_override = lambda n: observe.ElementText(0) if n <= 3 else None
+        code = self.run_scan("--cycles", "1", platform=platform)
+        self.assertEqual(code, 0, self.err)
+        [row] = self.rows()
+        # 1.5 s, the pause and 1.5 s more pass the 2.5 s limit: no third attempt.
+        self.assertEqual(row["previous_quote_attempts"], "2")
+        self.assertEqual(row["previous_quote_status"], "indisponível: em 2 tentativas: o seletor não encontrou nenhum elemento")
+        self.assertLess(float(row["previous_quote_ms"]), (scan.REFERENCE_BUDGET_SECONDS + 1.6) * 1000)
+
+    def test_a_quote_read_while_the_asset_changed_does_not_count(self):
+        platform = starting_off_the_favorites()
+
+        def the_asset_changes(n):
+            if n == 1:
+                platform.named = 2  # the name on the screen changes during the first reading
+            return None
+
+        platform.quote_override = the_asset_changes
+        code = self.run_scan("--cycles", "1", "--load-timeout", "5", platform=platform)
+        self.assertEqual(code, 0, self.err)
+        first = self.rows()[0]
+        self.assertEqual(
+            first["previous_quote_status"],
+            f"indisponível: em 3 tentativas: o ativo na tela mudou de {EUR[0]} para {AUD[0]} durante a leitura da cotação",
+        )
+        self.assertEqual(first["previous_quote"], "")
+
+
+class AnalysisReadinessTest(ScanTestCase):
+    """Payout eligibility and data usable for analysis are told apart."""
+
+    def test_complete_but_old_data_is_not_usable_for_analysis(self):
+        platform = FakePlatform(assets=(EUR,))
+        platform.payout_delay = 6.0  # the payout takes 6 s to read, after the quote
+        code = self.run_scan("--cycles", "1", "--load-timeout", "30", platform=platform)
+        self.assertEqual(code, 0, self.err)
+        [row] = self.rows()
+        self.assertEqual((row["completeness"], row["payout_eligible"]), ("completa", "sim"))
+        self.assertEqual(row["analysis_ready"], "não")
+        self.assertRegex(
+            row["analysis_note"],
+            r"^a cotação foi capturada 6(,\d)? s antes da gravação, mais que o limite de 5 s: não é atual$",
+        )
+        self.assertGreater(float(row["data_age_ms"]), 5000)
+        self.assertIn("Payout elegível, mas SEM dados para análise: EUR/USD OTC (a cotação foi capturada", self.out)
+
+    def test_unconfirmed_switches_and_missing_fields_are_not_usable(self):
+        platform = FakePlatform(assets=(EUR, GBP, ("USD/JPY OTC", None, 151.235)))
+        platform.ignored.add(1)  # the click on GBP/USD OTC changes nothing
+        code = self.run_scan("--cycles", "1", "--load-timeout", "5", platform=platform)
+        self.assertEqual(code, 0, self.err)
+        _, unconfirmed, no_payout = self.rows()
+        self.assertEqual(
+            (unconfirmed["analysis_ready"], unconfirmed["analysis_note"]),
+            ("não", "a troca de ativo não foi confirmada, e nada foi lido"),
+        )
+        self.assertEqual((no_payout["analysis_ready"], no_payout["analysis_note"]), ("não", "falta o payout"))
+        self.assertEqual(no_payout["payout_eligible"], "indisponível")
+
+    def test_the_summary_never_puts_a_quote_beside_the_payout_of_another_visit(self):
+        platform = FakePlatform(assets=(EUR, GBP))
+
+        def second_cycle(seconds):
+            if seconds == 3:  # the pause between the two cycles
+                platform.assets[1][1] = "+93%"
+                platform.assets[1][2] = None  # GBP/USD OTC's chart stops showing a quote
+
+        code = self.run_scan("--cycles", "2", "--interval", "3", "--load-timeout", "5", platform=platform, on_wait=second_cycle)
+        self.assertEqual(code, 0, self.err)
+        rows = self.rows()
+        first_gbp, second_gbp = [row for row in rows if row["favorite_position"] == "2"]
+        self.assertEqual((first_gbp["analysis_ready"], second_gbp["analysis_ready"]), ("sim", "não"))
+        self.assertEqual(second_gbp["payout_percent"], "93")
+        [line] = [line for line in self.out.splitlines() if line.startswith(f"  {GBP[0]}: ")]
+        self.assertRegex(
+            line,
+            rf"^  {GBP[0]}: 2 visitas, 1 completa, 1 com dados para análise; última leitura completa e atual, do"
+            r" ciclo 1 \(relógio local [0-9T:.+-]+\): cotação 1\.273\d\d e payout 90%, payout ELEGÍVEL \(≥ 90%\);"
+            r" última visita, do ciclo 2: PARCIAL, dados para análise: NÃO \(falta a cotação do ativo\)$",
+        )
+        self.assertIn(first_gbp["captured_at_utc"][:19], line)  # the time of the reading it shows
+        self.assertNotIn("93%", line)
 
 
 class EligibilityTest(unittest.TestCase):
@@ -544,7 +760,11 @@ class RunTest(ScanTestCase):
         self.assertEqual(code, 130)
         self.assertEqual([row["asset"] for row in self.rows()], [EUR[0]])  # written before Ctrl+C
         self.assertIn("Interrompido por Ctrl+C: 1 ciclo, 1 visita a favoritos, 1 clique em favoritos", self.out)
-        self.assertIn(f"  {EUR[0]}: 1 visita, 1 completa; última cotação 1.085", self.out)
+        self.assertRegex(
+            self.out,
+            rf"  {EUR[0]}: 1 visita, 1 completa, 1 com dados para análise; última leitura completa e atual, do"
+            r" ciclo 1 \(relógio local [0-9T:.+-]+\): cotação 1\.085\d\d e payout 92%, payout ELEGÍVEL \(≥ 90%\)",
+        )
         self.assertEqual(self.session.closes, 1)
         scan.ScanLock(self.runtime / scan.LOCK_FILE_NAME).release()  # the lock was released
 

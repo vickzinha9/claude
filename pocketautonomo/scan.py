@@ -58,7 +58,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 
-from pocketautonomo import observe
+from pocketautonomo import observe, quote_timings
 from pocketautonomo.observe import (
     COMPLETE,
     EXIT_CONFIG,
@@ -103,6 +103,15 @@ SETTLE_SECONDS = 1.0  # after the switch is confirmed, before the first reading 
 POLL_SECONDS = 0.5  # between two readings of the data
 QUOTE_JUMP = 0.01  # two readings in a row of one asset never move 1% apart
 PREVIOUS_QUOTE_GAP = 0.001  # closer than 0.1% to the previous asset's quote: maybe its chart
+# The quote of the previous asset, read before the click: a few short attempts, all of them
+# before the click, so on the previous asset's chart. No attempt starts later than
+# REFERENCE_BUDGET_SECONDS after the first one.
+REFERENCE_ATTEMPTS = 3
+REFERENCE_RETRY_SECONDS = 0.3
+REFERENCE_BUDGET_SECONDS = 2.5
+# Data for analysis: a complete visit whose quote was captured at most this long before the
+# visit was recorded. Older data is never presented as current.
+MAX_DATA_AGE_SECONDS = 5.0
 MAX_FAVORITES = 30
 MAX_FAVORITE_WIDTH, MAX_FAVORITE_HEIGHT = 400, 120  # CSS pixels: a favorite is a small label
 CLICK_TIMEOUT_MS = 5_000
@@ -116,6 +125,14 @@ NOT_CONFIRMED = "não confirmada"
 NOT_CLICKED = "não clicado"
 # The value of the payout_eligible column.
 ELIGIBLE, NOT_ELIGIBLE, UNKNOWN_ELIGIBILITY = "sim", "não", "indisponível"
+# The value of the analysis_ready column: data complete and current, usable for analysis.
+READY, NOT_READY = "sim", "não"
+# The moments of the readings in the timings file.
+TIMING_REFERENCE = "referência antes da troca"
+TIMING_AFTER_SWITCH = "depois da troca"
+TIMING_NO_SWITCH = "sem troca"
+# The verdict column of the timings file: whether the scan's checks kept a quote it read.
+ACCEPTED, REFUSED = quote_timings.ACCEPTED, quote_timings.REFUSED
 
 SCAN_COLUMNS = observe.CSV_COLUMNS + (
     # The scan's own columns, after the 16 of observe's CSV.
@@ -129,6 +146,13 @@ SCAN_COLUMNS = observe.CSV_COLUMNS + (
     "load_ms",  # from the confirmed asset to the settled data, or to the time limit
     "polls",  # readings of the data in this visit
     "payout_eligible",  # sim: payout >= ELIGIBLE_PAYOUT%; não: below; indisponível: no payout
+    # Added after the first validation of the scan; the columns above keep their order.
+    "previous_quote_status",  # ok: <source>, or indisponível: <the original reason>
+    "previous_quote_attempts",  # attempts to read the previous asset's quote before the click
+    "previous_quote_ms",  # the time of those attempts, in milliseconds
+    "analysis_ready",  # sim: complete and current data, usable for analysis; não otherwise
+    "analysis_note",  # why the data is not usable for analysis, or what makes it usable
+    "data_age_ms",  # from the capture of the quote to the recording of the visit
 )
 
 # Words of the trade buttons, of the Amount and of money operations, in English and in
@@ -174,10 +198,19 @@ FAVORITES_INTRO = (
     " :nth-child. O Copy selector do DevTools costuma dar o seletor de um elemento só."
 )
 CONFIGURATION_MOMENT = "durante a configuração dos favoritos; nada foi gravado"
-NO_REFERENCE = (
-    "a cotação do ativo anterior não pôde ser lida antes da troca, então nada mostra que o"
-    " gráfico já é o deste ativo"
-)
+NO_REFERENCE = "a cotação do ativo anterior não pôde ser lida antes da troca"
+NO_PROOF = "sem ela, nada mostra que o gráfico já é o deste ativo"
+
+
+def no_reference(reference):
+    """Why a quote after a switch is unavailable when the previous asset's quote is missing.
+
+    The original reason of each failed attempt stays in the message, so that the cause can
+    be found and fixed; it is never replaced by a generic text.
+    """
+    if reference is None or not reference.reasons:
+        return f"{NO_REFERENCE}; {NO_PROOF}"
+    return f"{NO_REFERENCE} ({reference.reason}); {NO_PROOF}"
 
 
 class ScanBusy(Exception):
@@ -259,6 +292,41 @@ class Poll:
 
 
 @dataclass(frozen=True)
+class Reference:
+    """The previous asset's quote, read on its chart before the click, or why it is missing.
+
+    reasons keeps the original reason of every failed attempt, in order.
+    """
+
+    value: object  # the quote, or None
+    status: str  # "ok: <source>" or "indisponível: <reason>"
+    attempts: int
+    ms: float  # the time of all the attempts
+    reasons: tuple = ()
+
+    @property
+    def available(self):
+        return self.value is not None
+
+    @property
+    def reason(self):
+        """The reasons of the failed attempts, each said once, in order, after how many failed."""
+        if not self.reasons:
+            return None
+        distinct = list(dict.fromkeys(self.reasons))
+        return f"em {count(len(self.reasons), 'tentativa', 'tentativas')}: " + " / ".join(distinct)
+
+
+@dataclass(frozen=True)
+class Analysis:
+    """Whether a visit's data is complete and current, so usable for analysis, and why."""
+
+    ready: bool
+    note: str
+    age_ms: object = None  # from the capture of the quote to the recording of the visit
+
+
+@dataclass(frozen=True)
 class Visit:
     """One favorite in one cycle: how it was selected and what was read."""
 
@@ -272,10 +340,16 @@ class Visit:
     switch_ms: object = None
     load_ms: object = None
     polls: int = 0
+    reference: object = None  # Reference, when the previous asset's quote was read for a click
+    recorded_at: object = None  # this computer's clock, in UTC, when the visit ended
 
     @property
     def eligibility(self):
         return eligibility(self.observation.readings["payout"])
+
+    @property
+    def analysis(self):
+        return analysis_of(self)
 
 
 @dataclass
@@ -283,8 +357,9 @@ class AssetSummary:
     name: str
     visits: int = 0
     complete: int = 0
-    last_quote: object = None
-    last_payout: object = None
+    ready: int = 0  # visits with data complete and current, usable for analysis
+    last_ready: object = None  # the last such Visit: its quote and payout were read together
+    last_visit: object = None  # the last Visit, whatever its data
 
 
 @dataclass
@@ -293,8 +368,11 @@ class ScanProgress:
     visits: int = 0
     valid: int = 0
     complete: int = 0
+    ready: int = 0
     clicks: int = 0
     csv: object = None  # ScanCsv, created with the first visit
+    csv_path: object = None  # its path, chosen when the scan starts
+    timings: object = None  # quote_timings.TimingRecorder of every reading of the quote
     assets: dict = field(default_factory=dict)  # asset key -> AssetSummary
 
 
@@ -377,6 +455,7 @@ def main(argv=None, *, open_session=None, read_line=input, now=None, monotonic=N
         favorites_selector, invalid = current_favorites_selector(scan_path, args.configure)
         if isinstance(selectors["price"], QuoteOcrSource):
             ctx.engine.get()  # a missing OCR stops here, before the browser opens
+            observe.announce_ocr(ctx)
         lock = ScanLock(runtime_dir / LOCK_FILE_NAME)
         url = args.url
         if url is None:
@@ -410,6 +489,8 @@ def main(argv=None, *, open_session=None, read_line=input, now=None, monotonic=N
     finally:
         if progress.csv is not None:
             progress.csv.close()
+        if progress.timings is not None:
+            progress.timings.close()
         observe.close_session(session, interrupted)
         if lock is not None:
             lock.release()
@@ -802,6 +883,8 @@ def suggest_selectors(session, selector):
 def run_scan(session, scan, args, ctx):
     """Visit every favorite once per cycle, until args.cycles cycles, the window closes or Ctrl+C."""
     progress = scan.progress
+    progress.csv_path = new_scan_csv_path(ctx.runtime_dir)
+    progress.timings = quote_timings.TimingRecorder(quote_timings.timing_path(progress.csv_path), warn)
     streak = 0  # cycles in a row without any complete reading
     while args.cycles is None or progress.cycles < args.cycles:
         if session.is_closed():
@@ -893,22 +976,20 @@ def visit_favorite(session, scan, favorite, cycle, total, ctx):
     check_window(session)
     ensure_on_platform(session)
     start = ctx.monotonic()
+    where = {"cycle": cycle, "favorite_position": favorite.position}
     before = observe.read_field(session, "asset", selectors["asset"], ctx)
-    previous_asset = previous_quote = switch_ms = None
+    previous_asset = previous_quote = switch_ms = reference = clicked_at = None
     if on_favorite(before, favorite):
         switch = ALREADY
     else:
         previous_asset = before.value if before.available else None
-        if selectors["price"]:
-            quote = observe.read_field(session, "price", selectors["price"], ctx)
-            previous_quote = quote.value if quote.available else None
+        reference = read_reference(session, scan, before, ctx, where)
+        previous_quote = reference.value if reference is not None else None
         problem = click(session, scan, favorite)
         if problem is not None:
             reason = f"o favorito não foi clicado: {problem}"
-            return failed_visit(
-                session, cycle, favorite, total, NOT_CLICKED, reason, previous_asset, previous_quote, ctx
-            )
-        start = ctx.monotonic()
+            return failed_visit(session, cycle, favorite, total, NOT_CLICKED, reason, previous_asset, reference, ctx)
+        start = clicked_at = ctx.monotonic()
         reading = observe.read_field(session, "asset", selectors["asset"], ctx)
         while not on_favorite(reading, favorite) and ctx.monotonic() - start < scan.load_timeout:
             check_window(session)
@@ -923,21 +1004,29 @@ def visit_favorite(session, scan, favorite, cycle, total, ctx):
                 f" o ativo na tela continuou {shown}"
             )
             return failed_visit(
-                session, cycle, favorite, total, NOT_CONFIRMED, reason, previous_asset, previous_quote, ctx,
-                switch_ms,
+                session, cycle, favorite, total, NOT_CONFIRMED, reason, previous_asset, reference, ctx, switch_ms
             )
         switch = CONFIRMED
         session.wait(SETTLE_SECONDS)
     switched = switch == CONFIRMED
+    moment = TIMING_AFTER_SWITCH if switched else TIMING_NO_SWITCH
     load_start = ctx.monotonic()
     previous, polls = None, 0
     while True:
         check_window(session)
+        poll_start = ctx.monotonic()
         poll = read_poll(session, selectors, ctx)
         if poll.outside:
             ensure_on_platform(session)
         polls += 1
-        readings, settled = judge(favorite, previous, poll, previous_quote, switched, scan.sources)
+        readings, settled = judge(favorite, previous, poll, reference, switched, scan.sources)
+        extra = {"asset": poll.asset_before.value if poll.asset_before.available else None}
+        if clicked_at is not None:
+            extra["since_click_ms"] = round((poll_start - clicked_at) * 1000, 1)
+        if poll.price.available:
+            judged = readings["price"]
+            extra["verdict"] = ACCEPTED if judged.available else f"{REFUSED}: {judged.reason}"
+        record_timing(scan, moment, poll.price, where, polls, **extra)
         if settled or ctx.monotonic() - start >= scan.load_timeout:
             break
         previous = poll
@@ -947,8 +1036,59 @@ def visit_favorite(session, scan, favorite, cycle, total, ctx):
     observation = observe.Observation(poll.captured_at, poll.page, readings, poll.duration_ms)
     return Visit(
         cycle, favorite, total, switch, observation, previous_asset, previous_quote, switch_ms,
-        ctx.elapsed_ms(load_start), polls,
+        ctx.elapsed_ms(load_start), polls, reference, ctx.now(),
     )
+
+
+def read_reference(session, scan, before, ctx, where):
+    """The previous asset's quote, read on its own chart before the click; None without a source.
+
+    A few short attempts, all before the click, so all on the previous asset's chart: they
+    stop at the first quote read, after REFERENCE_ATTEMPTS, or when REFERENCE_BUDGET_SECONDS
+    have passed since the first one. Each attempt reads the quote and then the asset again,
+    and the quote counts only when the asset is still the one read before (before). The
+    original reason of each failed attempt is kept in the Reference, never replaced by a
+    generic message.
+    """
+    source = scan.selectors["price"]
+    if not source:
+        return None
+    start = ctx.monotonic()
+    asset = before.value if before.available else None
+    reasons, attempt = [], 0
+    while attempt < REFERENCE_ATTEMPTS:
+        if attempt:
+            if ctx.monotonic() - start >= REFERENCE_BUDGET_SECONDS:
+                break
+            check_window(session)
+            session.wait(REFERENCE_RETRY_SECONDS)
+            ensure_on_platform(session)
+        attempt += 1
+        quote = observe.read_field(session, "price", source, ctx)
+        if not quote.available:
+            record_timing(scan, TIMING_REFERENCE, quote, where, attempt, asset=asset)
+            reasons.append(quote.reason)
+            continue
+        if before.available:
+            after = observe.read_field(session, "asset", scan.selectors["asset"], ctx)
+            if not (after.available and asset_key(after.value) == asset_key(before.value)):
+                shown = after.value if after.available else f"INDISPONÍVEL ({after.reason})"
+                problem = f"o ativo na tela mudou de {before.value} para {shown} durante a leitura da cotação"
+                record_timing(scan, TIMING_REFERENCE, quote, where, attempt, asset=asset, verdict=f"{REFUSED}: {problem}")
+                reasons.append(problem)
+                continue
+        record_timing(scan, TIMING_REFERENCE, quote, where, attempt, asset=asset, verdict=ACCEPTED)
+        return Reference(quote.value, quote.status, attempt, ctx.elapsed_ms(start), tuple(reasons))
+    missing = Reference(None, "", attempt, ctx.elapsed_ms(start), tuple(reasons))
+    return replace(missing, status=f"{UNAVAILABLE}: {missing.reason}")
+
+
+def record_timing(scan, moment, reading, where, attempt, **extra):
+    """One line of the timings file for a reading of the quote that has a source."""
+    timings = scan.progress.timings
+    if timings is None or reading.source is None:
+        return
+    timings.add(moment, observe.timing_row(reading, attempt=attempt, **where, **extra))
 
 
 def check_window(session):
@@ -1041,9 +1181,10 @@ def refuse(reading, reason):
 def judge(favorite, previous, poll, reference, switched, sources):
     """(readings, settled): the fields to keep from poll, and whether all of them are final.
 
-    previous is the reading before poll, or None. reference is the quote read before the
-    click, or None; switched tells whether this visit clicked. A field without a source is
-    final as it is; the others need two readings in a row on favorite's asset that agree.
+    previous is the reading before poll, or None. reference is the Reference of the quote
+    read before the click, or None; switched tells whether this visit clicked. A field
+    without a source is final as it is; the others need two readings in a row on
+    favorite's asset that agree.
     """
     problem = asset_problem(favorite, poll)
     if problem is not None:
@@ -1060,13 +1201,14 @@ def judge(favorite, previous, poll, reference, switched, sources):
     return {"asset": poll.asset_after, "price": price, "payout": payout}, price_final and payout_final
 
 
-def judge_price(reading, prior, reference, switched, sourced):
+def judge_price(reading, prior, previous_reference, switched, sourced):
     if not sourced:
         return reading, True
     if not reading.available:
         return reading, False
-    if switched and reference is None:
-        return refuse(reading, NO_REFERENCE), True  # waiting brings no proof
+    if switched and (previous_reference is None or not previous_reference.available):
+        return refuse(reading, no_reference(previous_reference)), True  # waiting brings no proof
+    reference = previous_reference.value if previous_reference is not None else None
     value = quote_number(reading.value)
     if value is None:
         return refuse(reading, f"a cotação {reading.value} não pôde ser comparada"), False
@@ -1169,34 +1311,77 @@ def payout_eligibility(payout):
 
 
 def failed_visit(
-    session, cycle, favorite, total, switch, reason, previous_asset, previous_quote, ctx, switch_ms=None
+    session, cycle, favorite, total, switch, reason, previous_asset, reference, ctx, switch_ms=None
 ):
     """A visit without data: the favorite was not clicked, or its switch was not confirmed."""
     captured_at = ctx.now()
     page = observe.display_url(session.current_url())
     readings = {name: unavailable(reason if name == "asset" else f"não lida: {reason}") for name in FIELDS}
     observation = observe.Observation(captured_at, page, readings, None)
-    return Visit(cycle, favorite, total, switch, observation, previous_asset, previous_quote, switch_ms, None, 0)
+    previous_quote = reference.value if reference is not None else None
+    return Visit(
+        cycle, favorite, total, switch, observation, previous_asset, previous_quote, switch_ms, None, 0,
+        reference, captured_at,
+    )
+
+
+ARTICLES = {"asset": "o ativo", "price": "a cotação do ativo", "payout": "o payout"}
+
+
+def analysis_of(visit):
+    """Analysis of visit: are its data complete and current, so usable for analysis?
+
+    Complete: the asset, the quote and the payout available. In a visit, that means that
+    the three were read in its last reading, with the asset confirmed on the screen before
+    and after it, each value equal to the reading before and, after a switch, the quote
+    away from the one read on the previous asset's chart before the click. Current: the
+    quote was captured at most MAX_DATA_AGE_SECONDS before the visit was recorded. A
+    payout of ELIGIBLE_PAYOUT% or more (payout_eligible) proves none of this: it only says
+    that the payout allows a first entry on that asset.
+    """
+    if visit.switch == NOT_CLICKED:
+        return Analysis(False, "o favorito não foi clicado, e nada foi lido")
+    if visit.switch == NOT_CONFIRMED:
+        return Analysis(False, "a troca de ativo não foi confirmada, e nada foi lido")
+    readings = visit.observation.readings
+    missing = [ARTICLES[name] for name in FIELDS if not readings[name].available]
+    if missing:
+        verb = "falta" if len(missing) == 1 else "faltam"
+        joined = missing[0] if len(missing) == 1 else ", ".join(missing[:-1]) + " e " + missing[-1]
+        return Analysis(False, f"{verb} {joined}")
+    price = readings["price"]
+    if price.captured_at is None or visit.recorded_at is None:
+        return Analysis(False, "sem o horário de captura da cotação, a idade dos dados é desconhecida")
+    age_ms = round((visit.recorded_at - price.captured_at).total_seconds() * 1000, 1)
+    if age_ms > MAX_DATA_AGE_SECONDS * 1000:
+        return Analysis(
+            False,
+            f"a cotação foi capturada {seconds_text(round(age_ms / 1000, 1))} s antes da gravação, mais que o"
+            f" limite de {seconds_text(MAX_DATA_AGE_SECONDS)} s: não é atual",
+            age_ms,
+        )
+    return Analysis(True, "ativo, cotação e payout lidos juntos, conferidos e atuais", age_ms)
 
 
 def record(visit, progress, ctx):
     """Write visit to the CSV, count it and show it."""
     if progress.csv is None:
-        progress.csv = ScanCsv(new_scan_csv_path(ctx.runtime_dir))
+        progress.csv = ScanCsv(progress.csv_path or new_scan_csv_path(ctx.runtime_dir))
         say(f"CSV: {progress.csv.path}")
     progress.csv.write(visit)
     observation = visit.observation
+    ready = visit.analysis.ready
     progress.visits += 1
     progress.valid += observation.valid
     progress.complete += observation.completeness == COMPLETE
+    progress.ready += ready
     summary = progress.assets.setdefault(visit.favorite.key, AssetSummary(visit.favorite.name))
     summary.visits += 1
     summary.complete += observation.completeness == COMPLETE
-    price, payout = observation.readings["price"], observation.readings["payout"]
-    if price.available:
-        summary.last_quote = price.value
-    if payout.available:
-        summary.last_payout = payout.value
+    summary.ready += ready
+    summary.last_visit = visit
+    if ready:
+        summary.last_ready = visit  # its quote and payout were read together, never mixed with older ones
     for line in visit_lines(visit):
         say(line)
 
@@ -1237,6 +1422,15 @@ def scan_row(visit):
         str(visit.polls),
         visit.eligibility,
     ]
+    reference, analysis = visit.reference, visit.analysis
+    row += [
+        reference.status if reference is not None else "",
+        str(reference.attempts) if reference is not None else "",
+        f"{reference.ms:.1f}" if reference is not None else "",
+        READY if analysis.ready else NOT_READY,
+        analysis.note,
+        "" if analysis.age_ms is None else f"{analysis.age_ms:.1f}",
+    ]
     return row
 
 
@@ -1256,10 +1450,16 @@ def new_scan_csv_path(runtime_dir):
 
 
 ELIGIBILITY_TEXT = {
-    ELIGIBLE: f"ELEGÍVEL (payout ≥ {ELIGIBLE_PAYOUT}%)",
-    NOT_ELIGIBLE: f"não elegível (payout < {ELIGIBLE_PAYOUT}%)",
+    ELIGIBLE: f"payout ELEGÍVEL (≥ {ELIGIBLE_PAYOUT}%)",
+    NOT_ELIGIBLE: f"payout não elegível (< {ELIGIBLE_PAYOUT}%)",
     UNKNOWN_ELIGIBILITY: "elegibilidade indisponível (sem payout)",
 }
+
+
+def analysis_text(analysis):
+    if analysis.ready:
+        return "dados para análise: SIM (completos e atuais)"
+    return f"dados para análise: NÃO ({analysis.note})"
 
 
 def cycle_heading(cycle, favorites):
@@ -1283,8 +1483,11 @@ def visit_lines(visit):
     else:
         parts += [f"{LABELS[name]} {observe.shown_value(name, observation.readings[name])}" for name in FIELDS]
         parts.append(ELIGIBILITY_TEXT[visit.eligibility])
+        parts.append(analysis_text(visit.analysis))
     parts.append("gravada no CSV")
     times = [switch_text(visit)]
+    if visit.reference is not None:
+        times.append(reference_text(visit.reference))
     if visit.load_ms is not None:
         times.append(f"dados em {visit.load_ms:.0f} ms, {count(visit.polls, 'leitura', 'leituras')}")
     price = observation.readings["price"]
@@ -1295,6 +1498,13 @@ def visit_lines(visit):
         times.append(detail)
     times.append(f"relógio local {utc_text(observation.captured_at)}")
     return " | ".join(parts), "  tempos: " + " | ".join(times)
+
+
+def reference_text(reference):
+    attempts = count(reference.attempts, "tentativa", "tentativas")
+    if reference.available:
+        return f"cotação antes da troca {reference.value} em {attempts}, {reference.ms:.0f} ms"
+    return f"cotação antes da troca INDISPONÍVEL em {attempts}, {reference.ms:.0f} ms"
 
 
 def switch_text(visit):
@@ -1309,15 +1519,23 @@ def switch_text(visit):
 
 def cycle_summary(cycle, visits, seconds):
     complete = sum(visit.observation.completeness == COMPLETE for visit in visits)
-    eligible = [visit.favorite.name for visit in visits if visit.eligibility == ELIGIBLE]
+    ready = sum(visit.analysis.ready for visit in visits)
     duration = f"{seconds:.1f}".replace(".", ",")
     line = (
         f"CICLO {cycle} concluído em {duration} s: {count(len(visits), 'favorito visitado', 'favoritos visitados')},"
-        f" {count(complete, 'leitura completa', 'leituras completas')}."
+        f" {count(complete, 'leitura completa', 'leituras completas')},"
+        f" {count(ready, 'com dados para análise', 'com dados para análise')}."
     )
     if visits:
-        names = ", ".join(eligible) if eligible else "nenhum"
-        line += f" Elegíveis (payout ≥ {ELIGIBLE_PAYOUT}%): {names}."
+        usable = [visit.favorite.name for visit in visits if visit.eligibility == ELIGIBLE and visit.analysis.ready]
+        only_payout = [
+            f"{visit.favorite.name} ({visit.analysis.note})"
+            for visit in visits
+            if visit.eligibility == ELIGIBLE and not visit.analysis.ready
+        ]
+        line += f" Payout elegível (≥ {ELIGIBLE_PAYOUT}%) e dados para análise: {', '.join(usable) or 'nenhum'}."
+        if only_payout:
+            line += f" Payout elegível, mas SEM dados para análise: {'; '.join(only_payout)}."
     return line
 
 
@@ -1327,25 +1545,42 @@ def written_summary(progress):
         f"{count(progress.cycles, 'ciclo', 'ciclos')}, {count(progress.visits, 'visita', 'visitas')} a"
         f" favoritos, {count(progress.clicks, 'clique', 'cliques')} em favoritos,"
         f" {count(progress.complete, 'leitura completa', 'leituras completas')} e"
-        f" {count(partial, 'parcial', 'parciais')}"
+        f" {count(partial, 'parcial', 'parciais')},"
+        f" {count(progress.ready, 'com dados para análise', 'com dados para análise')}"
     )
 
 
 def report(progress):
-    """The per-asset summary and the CSV of what the scan recorded so far."""
+    """The per-asset summary, the times of the readings and the files of the scan so far.
+
+    The quote and the payout shown for an asset come from the same reading, the last one
+    usable for analysis, with its cycle and clock: a quote of one visit is never shown
+    beside the payout of another.
+    """
     if progress.assets:
         say("Por ativo:")
         for summary in progress.assets.values():
-            quote = summary.last_quote or "INDISPONÍVEL"
-            if summary.last_payout is None:
-                payout = "INDISPONÍVEL"
-            else:
-                payout = f"{summary.last_payout}%, {ELIGIBILITY_TEXT[payout_eligibility(summary.last_payout)]}"
-            say(
+            line = (
                 f"  {summary.name}: {count(summary.visits, 'visita', 'visitas')},"
-                f" {count(summary.complete, 'completa', 'completas')}; última cotação {quote};"
-                f" último payout {payout}"
+                f" {count(summary.complete, 'completa', 'completas')},"
+                f" {count(summary.ready, 'com dados para análise', 'com dados para análise')}"
             )
+            ready = summary.last_ready
+            if ready is None:
+                line += "; nenhuma leitura completa e atual"
+            else:
+                readings = ready.observation.readings
+                line += (
+                    f"; última leitura completa e atual, do ciclo {ready.cycle} (relógio local"
+                    f" {utc_text(readings['price'].captured_at)}): cotação {readings['price'].value} e"
+                    f" payout {readings['payout'].value}%, {ELIGIBILITY_TEXT[ready.eligibility]}"
+                )
+            last = summary.last_visit
+            if last is not None and last is not ready:
+                kind = observe.KIND_LABELS[last.observation.completeness]
+                line += f"; última visita, do ciclo {last.cycle}: {kind}, {analysis_text(last.analysis)}"
+            say(line)
+    observe.report_timings(progress.timings)
     if progress.csv is not None:
         say(f"CSV: {progress.csv.path}")
 

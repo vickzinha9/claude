@@ -6,11 +6,18 @@ Runtime's telemetry is turned off before it loads (ORT_DISABLE_TELEMETRY and
 disable_telemetry_events). The packages are imported only when the engine is created, so
 the rest of the collector works without them; OCR_REQUIREMENTS lists the pinned versions
 that setup_observer installs.
+
+The first recognition of a new engine is several times slower than the next ones, because
+ONNX Runtime prepares the model then (85 to 95 ms against 7 to 10 ms, measured on Linux).
+warm_up makes that first recognition on WARM_UP_SAMPLE, drawn on the spot, before any
+reading of the chart, so that no quote pays for it; it also tells what the OCR read there.
 """
 
 import io
 import logging
 import os
+import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from pocketautonomo.quote_reader import GrayImage, RgbImage
@@ -18,6 +25,20 @@ from pocketautonomo.quote_reader import GrayImage, RgbImage
 OCR_REQUIREMENTS = ("rapidocr==3.10.0", "onnxruntime==1.31.0")
 REC_MODEL = "PP-OCRv6_rec_small.onnx"
 UPSCALE_HEIGHT = 48  # the recognizer's input height; smaller lines are enlarged first
+WARM_UP_SAMPLE = "1.26543"  # the same sample as the check of setup_observer
+
+
+@dataclass(frozen=True)
+class WarmUp:
+    """The first recognition of an engine: what it read in WARM_UP_SAMPLE, and how long it took."""
+
+    text: str
+    score: float
+    ms: float
+
+    @property
+    def read_sample(self):
+        return self.text == WARM_UP_SAMPLE
 
 
 class OcrUnavailable(Exception):
@@ -71,6 +92,17 @@ class RapidOcrEngine:
             raise OcrUnavailable(f"o OCR não iniciou ({type(error).__name__}: {error})") from error
         self._numpy = numpy
         self._image = Image
+
+    def warm_up(self):
+        """WarmUp: the first recognition, on WARM_UP_SAMPLE drawn here, so no quote pays for it."""
+        from PIL import ImageDraw, ImageFont
+
+        picture = self._image.new("L", (180, 40), 255)
+        font = ImageFont.load_default(size=24)
+        ImageDraw.Draw(picture).text((10, 20), WARM_UP_SAMPLE, font=font, fill=0, anchor="lm")
+        start = time.perf_counter()
+        text, score = self.recognize(GrayImage(picture.width, picture.height, picture.tobytes()))
+        return WarmUp("".join(text.split()), score, round((time.perf_counter() - start) * 1000, 1))
 
     def recognize(self, gray):
         """The text of one line and its confidence, from 0 to 1."""

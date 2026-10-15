@@ -1,8 +1,8 @@
 # Integração com a Pocket Option: leitura de dados e varredura dos favoritos
 
-Pesquisa e testes feitos em 14/10/2026, no branch `feature/progression-core`. No mesmo dia entraram os lançadores do Windows, o modo `--configure`, a espera pelo Playwright e a leitura visual da cotação. Em 15/10/2026, a detecção e a configuração visual foram corrigidas com base na sua segunda validação (seções 5 e 6), e entrou a varredura dos favoritos (seção 4).
+Pesquisa e testes feitos em 14/10/2026, no branch `feature/progression-core`. No mesmo dia entraram os lançadores do Windows, o modo `--configure`, a espera pelo Playwright e a leitura visual da cotação. Em 15/10/2026, a detecção e a configuração visual foram corrigidas com base na sua segunda validação (seções 5 e 6), e entrou a varredura dos favoritos (seção 4). Ainda em 15/10/2026, depois da sua primeira varredura, entraram a releitura da cotação anterior à troca com o motivo original, a captura só da faixa direita do gráfico, o aquecimento do OCR, o arquivo de tempos de cada leitura e a separação entre payout elegível e dados para análise.
 
-> **Na plataforma real**, a sua terceira validação, informada em 15/10/2026, terminou com três observações completas de GBP/USD OTC (seção 5). A varredura dos favoritos ainda não rodou na sua tela, e nenhum seletor dos favoritos foi conferido nela. Os demais testes usaram objetos falsos ou páginas locais de teste, inclusive os do CI no Windows.
+> **Na plataforma real**, a sua terceira validação do coletor terminou com três observações completas de GBP/USD OTC, e a sua primeira varredura, com oito favoritos, teve 14 leituras completas e duas parciais em 16 visitas (seção 5). A correspondência de cada valor com a tela não foi conferida. As correções feitas depois da varredura ainda não rodaram na sua tela: foram testadas com objetos falsos e em páginas locais de teste.
 
 ## Resumo
 
@@ -96,10 +96,10 @@ A varredura passa pelos seus ativos favoritos, um de cada vez, e lê cada um com
 2. **Seletor recusado inteiro.** O seletor não pode ser usado se encontrar mais de 30 elementos, um campo de formulário (como o Amount) ou um elemento com uma palavra de botão financeiro ou de dinheiro: buy, sell, call, put, compra(r), venda/vender, amount, valor, deposit(ar), depósito, saque/sacar, withdraw, trade, operar e outras. Se isso aparecer durante a varredura, ela para sem clicar.
 3. **O único clique.** Antes de cada clique, a página precisa estar em pocketoption.com, e a lista é lida de novo. O elemento do favorito é lido mais uma vez logo antes do clique e precisa ter o mesmo nome de ativo, estar visível, não ter campo de formulário e ter no máximo 400x120 px. O clique é o `click` do Playwright, com as conferências dele (elemento visível, estável, habilitado e que recebe o clique) e sem nenhuma opção mudada. Um teste confere no código-fonte que é a única chamada que age na página.
 4. **Confirmação da troca.** Depois do clique, o ativo é lido a cada 0,25 s até mostrar o nome do favorito, comparado só por letras e algarismos (`GBP/USD OTC` e `GBPUSD OTC` contam como iguais). Sem confirmação dentro do limite (`--load-timeout`, padrão 20 s), a linha fica sem dados, com o motivo. Três trocas seguidas sem confirmação encerram o ciclo, sem clicar nos favoritos que faltam.
-5. **Espera dos dados.** Confirmado o ativo, a varredura espera 1 s e lê, a cada 0,5 s: ativo, cotação, payout e ativo de novo. Um campo só fica disponível quando duas leituras seguidas concordam: o mesmo ativo antes e depois, o mesmo payout e cotações a menos de 1% uma da outra. Depois de uma troca, a cotação também precisa estar a mais de 0,1% da cotação lida no gráfico do ativo anterior logo antes do clique; mais perto que isso, o gráfico pode ainda ser o do ativo anterior. Sem essa cotação anterior, nada mostra que o gráfico mudou, e a cotação fica indisponível. O payout é lido depois da cotação, então um payout aceito foi lido depois que o gráfico já tinha mudado. O que não estabilizar até o limite fica indisponível, com o motivo e o limite.
+5. **Espera dos dados.** Confirmado o ativo, a varredura espera 1 s e lê, a cada 0,5 s: ativo, cotação, payout e ativo de novo. Um campo só fica disponível quando duas leituras seguidas concordam: o mesmo ativo antes e depois, o mesmo payout e cotações a menos de 1% uma da outra. Depois de uma troca, a cotação também precisa estar a mais de 0,1% da cotação lida no gráfico do ativo anterior logo antes do clique; mais perto que isso, o gráfico pode ainda ser o do ativo anterior. Essa cotação anterior é lida antes do clique em até 3 tentativas, com 0,3 s entre elas e nenhuma começando mais de 2,5 s depois da primeira, todas no gráfico do ativo anterior; cada uma só vale se o ativo continuar o mesmo depois dela. Sem essa cotação anterior, nada mostra que o gráfico mudou, e a cotação fica indisponível, com o motivo original de cada tentativa na mensagem e na coluna `previous_quote_status`. O payout é lido depois da cotação, então um payout aceito foi lido depois que o gráfico já tinha mudado. O que não estabilizar até o limite fica indisponível, com o motivo e o limite.
 6. **Uma navegação por vez.** O próximo clique só acontece depois do fim da visita atual. A trava `runtime/scan.lock` impede uma segunda varredura ao mesmo tempo. Se um clique abrir outra aba, ou se o favorito clicado sumir da lista, a varredura termina sem novos cliques.
-7. **Elegibilidade.** `payout_eligible` é `sim` quando o payout numérico é 90% ou mais, `não` abaixo disso e `indisponível` sem payout. É o critério para uma futura primeira entrada; **não é probabilidade de vitória**, e os ativos abaixo de 90% também são gravados.
-8. **Gravação.** Cada visita vai, assim que termina, para um CSV novo por execução, `runtime/scan-<data>-<hora>-<sufixo>.csv`: as 16 colunas do coletor e as da varredura (ciclo, favorito, troca, ativo e cotação antes do clique, tempos e elegibilidade). As colunas estão no [README](README.md#varredura-dos-favoritos).
+7. **Elegibilidade e dados para análise.** `payout_eligible` é `sim` quando o payout numérico é 90% ou mais, `não` abaixo disso e `indisponível` sem payout. É o critério para uma futura primeira entrada; **não é probabilidade de vitória**, e os ativos abaixo de 90% também são gravados. `analysis_ready` é independente dele: `sim` só com ativo, cotação e payout lidos juntos e conferidos (itens 4 e 5) e com a cotação capturada no máximo 5 s antes da gravação da visita; senão `não`, com o motivo em `analysis_note`.
+8. **Gravação.** Cada visita vai, assim que termina, para um CSV novo por execução, `runtime/scan-<data>-<hora>-<sufixo>.csv`: as 16 colunas do coletor e as da varredura (ciclo, favorito, troca, ativo e cotação antes do clique, tempos, elegibilidade, a leitura da cotação anterior e os dados para análise). Cada leitura da cotação, aproveitada ou não, vai para `runtime/tempos-scan-<data>-<hora>-<sufixo>.csv`, com o tempo de cada etapa. As colunas estão no [README](README.md#varredura-dos-favoritos).
 9. **Ciclos.** `--cycles N` faz N ciclos; sem ele, a varredura continua até Ctrl+C. Entre dois ciclos, a espera é `--interval` (padrão 10 s). Depois de um ciclo sem nenhuma leitura completa, ela dobra a cada ciclo assim, até 120 s, e volta ao normal com uma leitura completa.
 
 ## 5. O que foi comprovado
@@ -112,7 +112,9 @@ A varredura passa pelos seus ativos favoritos, um de cada vez, e lê cada um com
 - cotação: na segunda validação, a calibração visual escolheu uma caixa `#498390` de 46x9 px sem texto legível, as 3 prévias não acharam o marcador, levaram 3486, 2059 e 3023 ms, e o `n` encerrou o programa com `[Errno 22]` (causas e correções na seção 6);
 - **terceira validação:** com a leitura visual corrigida, o `observar_windows.cmd` terminou com código 0 e três observações COMPLETAS de GBP/USD OTC, com as cotações 1.42582, 1.42586 e 1.42604 e o payout de 92%. A configuração ficou gravada em `runtime/observe-selectors.json`.
 
-**A coleta de GBP/USD OTC:** os três campos foram lidos juntos nas três observações, e você deu a validação por concluída; a comparação de cada valor com a tela não foi descrita. Outros ativos e a varredura dos favoritos não rodaram na plataforma.
+**A coleta de GBP/USD OTC:** os três campos foram lidos juntos nas três observações, e você deu a validação por concluída; a comparação de cada valor com a tela não foi descrita.
+
+**Primeira varredura**, informada em 15/10/2026: `varrer_windows.cmd --cycles 2` terminou com código 0, com oito favoritos, 16 visitas, 14 leituras completas e duas parciais, em ciclos de 48 a 53 s, com os seletores `span.current-symbol`, `div.value__val-start`, `canvas.layer.plot` e `#js-assets-favorites-slider div.assets-favorites-item`. Nas duas parciais, EUR/GBP no ciclo 1 e EUR/USD no ciclo 2, a cotação anterior à troca falhou, e o motivo ficou escondido numa mensagem genérica. A correspondência de todos os valores com a tela não foi conferida, então a varredura ainda não está comprovada.
 
 ### O que as duas imagens da validação mostraram
 
@@ -134,6 +136,29 @@ As duas imagens que você enviou, `cotacao-candidatos.png` e `cotacao-previa.png
 | OCR | 18 ms | 15 a 19 ms, depois da primeira leitura, que leva cerca de 80 ms |
 
 No seu computador, a captura respondeu por 86% a 91% da leitura visual: é o gargalo. Os 2 a 3,5 s das prévias da segunda validação não se repetiram, e a causa daquela demora não foi identificada.
+
+**Primeira varredura no seu Windows** (`varrer_windows.cmd --cycles 2`, informada em 15/10/2026): oito favoritos, 16 visitas, 14 leituras completas e duas parciais, código 0, ciclos de 48 a 53 s. As leituras finais da cotação levaram de 1.076 a 1.555 ms, contra 180 a 255 ms no coletor. A divisão por etapa dessas leituras não foi informada, e as duas parciais (EUR/GBP no ciclo 1 e EUR/USD no ciclo 2) perderam a cotação porque a cotação anterior à troca falhou, com o motivo escondido numa mensagem genérica. Agora o motivo fica.
+
+**O que o Playwright 1.64.0 faz num `page.screenshot(clip=...)`**, conferido no código do driver instalado: mede a janela com uma função que espera um quadro de animação (`requestAnimationFrame`), executa um script de preparação em **todos os frames** da página, espera `document.fonts.ready`, chama `Page.getLayoutMetrics` e `Page.captureScreenshot` e, no fim, outro script em todos os frames. Achar o elemento são mais três idas à página (`count`, `is_visible`, `bounding_box`). Quase tudo isso roda na linha principal da página.
+
+**Medições numa página local, no Linux, com Chromium sem janela** (não é a Pocket Option): um gráfico em canvas de 554x871 px CSS, o tamanho do da sua validação, com a etiqueta semitransparente, 15 leituras por caso, medianas em ms, com o código novo:
+
+| Caso | Imagem | elemento | tela | decodificação | detecção | OCR | total |
+|---|---|---|---|---|---|---|---|
+| escala 1, página ociosa, gráfico inteiro (como antes) | 554x871, 14,6 KB | 9 | 30 | 4 | 12 | 25 | 79 |
+| escala 1, página ociosa, faixa direita (agora) | 145x871, 7,5 KB | 9 | 19 | 1 | 12 | 19 | 60 |
+| escala 1,25, página ociosa, gráfico inteiro | 693x1089, 27,8 KB | 8 | 28 | 6 | 18 | 19 | 80 |
+| escala 1,25, página ociosa, faixa direita | 180x1089, 17,5 KB | 7 | 23 | 2 | 19 | 25 | 74 |
+| escala 1,25, página ocupada, gráfico inteiro | 693x1089 | 110 | 156 | 6 | 19 | 21 | 303 |
+| escala 1,25, página ocupada, faixa direita | 180x1089 | 123 | 150 | 2 | 19 | 26 | 306 |
+
+"Página ocupada" é a mesma página com um script que bloqueia a linha principal por 120 ms a cada 150 ms, como uma página que processa dados. As 15 leituras de cada caso leram a cotação. O que essas medições mostram:
+
+- a faixa direita reduz o PNG, a decodificação e a parte da tela que depende do tamanho da imagem; na página ociosa, o total caiu de 79 para 60 ms na escala 1, e de 80 para 74 ms na escala 1,25;
+- com a linha principal ocupada, achar o elemento e tirar a tela passam de 100 ms cada, com ou sem a faixa: o tempo vai para a espera da página, não para a imagem nem para o OCR;
+- a primeira leitura do OCR levou de 83 a 95 ms, e as seguintes de 7 a 10 ms por linha. O aquecimento faz essa primeira leitura antes de qualquer cotação.
+
+**Hipótese para a sua varredura, ainda não confirmada:** depois de cada troca, a Pocket Option carrega e desenha o histórico do ativo novo, e a linha principal da página fica ocupada. A captura e a busca do elemento esperam por ela, por isso as leituras da varredura demoram muito mais que as do coletor, feitas com o ativo parado. **Como confirmar no próximo teste:** o arquivo `tempos-scan-...csv` grava cada leitura com o momento (`referência antes da troca`, com o gráfico parado, ou `depois da troca`), o tempo desde o clique e cada etapa. Se as leituras antes da troca ficarem perto das do coletor e as de depois da troca forem lentas, sobretudo logo depois do clique, nas etapas `element_ms` e `screenshot_ms`, a hipótese se confirma. Se as duas forem lentas, a causa é outra, e as colunas mostram em que etapa.
 
 ### Testes
 
@@ -167,7 +192,7 @@ As páginas de teste são HTML escrito para os testes e servido pelo próprio Pl
 3. **Etiqueta semitransparente.** A cor da etiqueta muda com o que está atrás. Uma cor conta como da etiqueta até 40 níveis por canal de uma das cores gravadas.
    - As duas cores medidas diferem em 32, então uma calibração sobre a vela verde cobre também o fundo, e vice-versa.
    - Sobre uma vela vermelha, a cor calculada para a mesma etiqueta (`#6e6b8d`) fica a 47 de `#3f638e` e a 37 de `#498390`. Uma calibração feita só sobre o fundo deixa a cotação indisponível ali até você somar essa cor com `n` e `+`. Esse caso foi testado só em imagem sintética.
-4. **Tempo de captura.** Na terceira validação, a captura levou de 155 a 231 ms, de 86% a 91% da leitura visual. A demora de 2 a 3,5 s das prévias da segunda validação não foi explicada.
+4. **Tempo de captura.** Na terceira validação, a captura levou de 155 a 231 ms, de 86% a 91% da leitura visual. Na primeira varredura, as leituras finais levaram de 1.076 a 1.555 ms, sem a divisão por etapa. Agora só a faixa direita do gráfico é capturada e o OCR é aquecido antes da primeira cotação, o que reduziu o tempo numa página local ociosa; numa página ocupada, quase nada mudou (seção 5). A causa da demora na varredura continua sem confirmação: o arquivo de tempos é o diagnóstico para o próximo teste. A demora de 2 a 3,5 s das prévias da segunda validação também não foi explicada.
 5. **Janela visível.** A captura depende de a janela do navegador estar visível e não minimizada. O gráfico precisa caber inteiro na área visível, e o mouse sobre o gráfico pode criar uma etiqueta de cursor que deixa a leitura ambígua.
 6. **Latência.** Cada leitura é um instante, e a cotação pode mudar logo depois.
 7. **Login.** Só você pode fazer. Não tentei login nem pedi credenciais.
@@ -184,18 +209,17 @@ As páginas de teste são HTML escrito para os testes e servido pelo próprio Pl
 
 ## 7. Como validar no seu Windows
 
-Os lançadores estão descritos no [README](README.md#windows-os-lançadores). Se puder, valide primeiro na conta demo. A validação do coletor (`observar_windows.cmd`) foi a terceira, da seção 5; esta é a da varredura dos favoritos.
+Os lançadores estão descritos no [README](README.md#windows-os-lançadores). Se puder, valide primeiro na conta demo. Esta é a segunda validação da varredura, depois das correções da primeira.
 
-1. Na pasta `claude`, rode `git pull`. O `preparar_windows.cmd` não precisa rodar de novo, porque as dependências não mudaram, e a `.venv` continua a mesma.
-2. Deixe dois ou três ativos nos favoritos da Pocket Option, se puder com um de payout abaixo de 90%.
-3. No terminal, na pasta `claude`, rode `varrer_windows.cmd --cycles 2`. Cole o link, faça o login e pressione Enter.
-4. No DevTools, inspecione um favorito e cole um seletor que encontre todos eles, com a tag e a classe comuns, sem `:nth-child`. Confira a lista: cada favorito da tela, com o nome certo, e nenhum outro elemento. Enter aceita e começa a varredura.
-5. Não use a janela do navegador enquanto ela roda. A cada linha, confira na tela o ativo selecionado, a cotação e o payout, e anote os tempos de troca e de dados.
-6. Rode de novo, sem `--cycles`, e interrompa com Ctrl+C depois do primeiro ciclo. À pergunta do `cmd`, responda N.
-7. Me envie:
-   - a saída do terminal;
+1. Na pasta `claude`, rode `git pull`. O `preparar_windows.cmd` não precisa rodar de novo, porque as dependências não mudaram, e a `.venv`, o perfil e os seletores gravados continuam os mesmos.
+2. No terminal, na pasta `claude`, rode `varrer_windows.cmd --cycles 2`. Cole o link, faça o login, pressione Enter e, na pergunta dos favoritos, Enter mantém o seletor gravado. Confira que apareceu `OCR local pronto: ... leu '1.26543'`.
+3. Não use a janela do navegador enquanto ela roda, e deixe-a visível, sem a janela do terminal por cima do gráfico.
+4. A cada linha, confira na tela o ativo, a cotação e o payout. Numa linha `PARCIAL`, anote o motivo, que agora vem inteiro, e veja se a cotação anterior à troca falhou (`cotação antes da troca INDISPONÍVEL`).
+5. Rode `observar_windows.cmd --count 5`, com o ativo parado, para ter os tempos do coletor no mesmo dia.
+6. Me envie:
+   - a saída do terminal das duas execuções, inclusive as linhas `Tempos da leitura da cotação`;
+   - os arquivos `runtime\tempos-scan-...csv` e `runtime\tempos-observations-...csv`, que só têm horários, cotações, nomes de ativos e tempos;
    - se cada linha bateu com a tela;
-   - o seletor dos favoritos que você usou;
-   - o CSV `runtime\scan-...csv` da primeira execução, se não mostrar dados seus.
+   - o CSV `runtime\scan-...csv`, se não mostrar dados seus.
 
-Só as linhas cujo ativo, cotação e payout corresponderem à tela comprovam a varredura.
+Só as linhas cujo ativo, cotação e payout corresponderem à tela comprovam a varredura. Os tempos dizem em que etapa e em que momento a leitura demora (seção 5); eles não mudam nenhuma conferência.

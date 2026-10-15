@@ -132,6 +132,14 @@ def chart(marker_y=150, cursor_y=None, marker_color=MARKER, extra=(), width=400,
     return canvas.image()
 
 
+def right_strip(image, width):
+    """The rightmost width columns of image, as a capture of the chart's right strip gives them."""
+    width = min(image.width, int(width))
+    start = image.width - width
+    rows = [image.data[(y * image.width + start) * 3:(y + 1) * image.width * 3] for y in range(image.height)]
+    return RgbImage(width, image.height, b"".join(rows))
+
+
 class FakeEngine:
     """Stands in for the OCR: every line reads as text with score, unless answers says otherwise.
 

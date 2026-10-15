@@ -72,8 +72,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from pocketautonomo import quote_reader
-from pocketautonomo.quote_ocr import OcrUnavailable, RapidOcrEngine, decode_png
+from pocketautonomo import quote_reader, quote_timings
+from pocketautonomo.quote_ocr import WARM_UP_SAMPLE, OcrUnavailable, RapidOcrEngine, decode_png
 
 ALLOWED_DOMAIN = "pocketoption.com"
 RUNTIME_DIR = Path("runtime")  # relative to the current directory, like the simulation
@@ -259,12 +259,17 @@ class Capture:
     count: int
     visible: bool = False
     image: object = None  # quote_reader.RgbImage, in device pixels
-    css_width: float = 0.0  # the element's width in CSS pixels
-    clipped: bool = False  # part of the element was outside the window: no image
+    css_width: float = 0.0  # the captured width in CSS pixels: the element's, or the strip's
+    clipped: bool = False  # part of the captured area was outside the window: no image
     # Milliseconds of each step, when the session measured them.
     element_ms: object = None  # finding the element: count, visibility and position
     screenshot_ms: object = None  # page.screenshot
     decode_ms: object = None  # decoding the PNG
+    count_ms: object = None  # the parts of element_ms: count, visibility, position
+    visible_ms: object = None
+    box_ms: object = None
+    png_bytes: object = None  # the size of the PNG that the screenshot returned
+    strip_css: object = None  # the width of the right strip captured; None for the whole element
 
     @property
     def scale(self):
@@ -281,6 +286,12 @@ class QuoteTimings:
     element_ms: object = None
     screenshot_ms: object = None
     decode_ms: object = None
+    count_ms: object = None
+    visible_ms: object = None
+    box_ms: object = None
+    image_px: object = None  # "width x height" of the captured image, in device pixels
+    png_bytes: object = None
+    strip_css: object = None
 
     def describe(self):
         parts = []
@@ -324,20 +335,63 @@ class TextMatch:
     selector: object  # a selector that finds only this element, or None
 
 
+@dataclass(frozen=True)
+class OcrStartup:
+    """How the OCR engine started: load time, and its first recognition, of a known sample."""
+
+    load_ms: float
+    warm_up: object = None  # quote_ocr.WarmUp, or None when the engine has no warm_up
+
+    def describe(self):
+        text = f"OCR local pronto: carregado em {self.load_ms:.0f} ms"
+        if self.warm_up is None:
+            return text
+        text += (
+            f"; leitura de aquecimento em {self.warm_up.ms:.0f} ms, antes de qualquer cotação,"
+            f" na amostra {WARM_UP_SAMPLE}: leu {self.warm_up.text!r}"
+        )
+        if not self.warm_up.read_sample:
+            text += (
+                " (AVISO: não é a amostra; cada cotação continua conferida por duas leituras e"
+                " pela confiança, mas confira as prévias com cuidado)"
+            )
+        return text
+
+
 class LazyEngine:
-    """The OCR engine, created on first use; a missing OCR becomes a ConfigError."""
+    """The OCR engine, created and warmed up on first use; a missing OCR becomes a ConfigError.
+
+    The engine is created once and reused for every reading of the run. Its first
+    recognition is made on a known sample right after it loads (warm_up), so that the
+    first quote does not pay for ONNX Runtime's preparation of the model.
+    """
 
     def __init__(self, factory=RapidOcrEngine):
         self._factory = factory
         self._engine = None
+        self.startup = None  # OcrStartup, once the engine started
+        self.announced = False
 
     def get(self):
         if self._engine is None:
+            start = time.perf_counter()
             try:
-                self._engine = self._factory()
+                engine = self._factory()
+                load_ms = round((time.perf_counter() - start) * 1000, 1)
+                warm = engine.warm_up() if isinstance(engine, RapidOcrEngine) else None
             except OcrUnavailable as error:
                 raise ConfigError(str(error)) from error
+            self.startup = OcrStartup(load_ms, warm)
+            self._engine = engine
         return self._engine
+
+
+def announce_ocr(ctx):
+    """Show how the OCR started, once per run, when the engine is the real LazyEngine."""
+    engine = ctx.engine
+    if isinstance(engine, LazyEngine) and engine.startup is not None and not engine.announced:
+        engine.announced = True
+        say(engine.startup.describe())
 
 
 def show_image_file(path):
@@ -376,6 +430,53 @@ class Progress:
     valid: int = 0
     complete: int = 0
     csv: object = None  # the CsvLog, created with the first valid observation
+    csv_path: object = None  # its path, chosen when the observations start
+    timings: object = None  # quote_timings.TimingRecorder of the readings of the quote
+
+
+TIMING_OBSERVATION = "observação"
+
+
+def timing_row(reading, **extra):
+    """The line of quote_timings.TimingLog for one reading of the quote, plus extra columns."""
+    timings = reading.timings or QuoteTimings()
+    row = {
+        "captured_at_utc": utc_text(reading.captured_at) if reading.captured_at else None,
+        "result": OK if reading.available else UNAVAILABLE,
+        "quote": reading.value if reading.available else None,
+        "reason": None if reading.available else reading.reason,
+        "source": reading.source,
+        "total_ms": reading.processing_ms,
+        "element_ms": timings.element_ms,
+        "count_ms": timings.count_ms,
+        "visible_ms": timings.visible_ms,
+        "box_ms": timings.box_ms,
+        "screenshot_ms": timings.screenshot_ms,
+        "decode_ms": timings.decode_ms,
+        "detection_ms": timings.detection_ms,
+        "ocr_ms": timings.ocr_ms,
+        "image_px": timings.image_px,
+        "png_bytes": timings.png_bytes,
+        "strip_css": timings.strip_css,
+    }
+    row.update(extra)
+    return row
+
+
+def asset_text(observation):
+    asset = observation.readings["asset"]
+    return asset.value if asset.available else None
+
+
+def report_timings(recorder):
+    """The summary of the times of the readings of the quote, and where each one is."""
+    if recorder is None or not recorder.summary.lines():
+        return
+    say("Tempos da leitura da cotação, mediana/máximo em ms, por momento da leitura:")
+    for line in recorder.summary.lines():
+        say(line)
+    if recorder.written:
+        say(f"Tempos de cada leitura: {recorder.path}")
 
 
 def main(
@@ -433,6 +534,7 @@ def main(
         announce_selectors(selectors, selectors_path)
         if isinstance(selectors["price"], QuoteOcrSource):
             ctx.engine.get()  # a missing OCR stops the run before the first observation
+            announce_ocr(ctx)
         run_observations(session, selectors, args, ctx, progress)
         return finish(progress)
     except ConfigError as error:
@@ -448,6 +550,8 @@ def main(
     finally:
         if progress.csv is not None:
             progress.csv.close()
+        if progress.timings is not None:
+            progress.timings.close()
         close_session(session, interrupted)
 
 
@@ -775,10 +879,13 @@ def read_text_field(session, field, selector):
     return FieldReading(value, f"{OK}: {selector}")
 
 
-def capture_chart(session, chart):
-    """(Capture, None) of the chart element, or (None, reason)."""
+def capture_chart(session, chart, strip=None):
+    """(Capture, None) of the chart element, or of its right strip of that width, or (None, reason)."""
     try:
-        capture = session.capture(chart, CAPTURE_TIMEOUT_MS)
+        if strip is None:
+            capture = session.capture(chart, CAPTURE_TIMEOUT_MS)
+        else:
+            capture = session.capture(chart, CAPTURE_TIMEOUT_MS, strip=strip)
     except ReadError as error:
         return None, f"a captura do gráfico falhou: {error}"
     if capture.count == 0:
@@ -808,18 +915,33 @@ class VisualReading:
     timings: object = None  # QuoteTimings
 
 
+def capture_steps(capture):
+    """The QuoteTimings fields that the session measured in capture."""
+    image = capture.image
+    return {
+        "element_ms": capture.element_ms,
+        "screenshot_ms": capture.screenshot_ms,
+        "decode_ms": capture.decode_ms,
+        "count_ms": capture.count_ms,
+        "visible_ms": capture.visible_ms,
+        "box_ms": capture.box_ms,
+        "image_px": f"{image.width}x{image.height}" if image is not None else None,
+        "png_bytes": capture.png_bytes,
+        "strip_css": capture.strip_css,
+    }
+
+
 def read_quote_visually(session, source, ctx):
-    """The VisualReading of the quote, with capture, detection and OCR timed apart."""
+    """The VisualReading of the quote, with capture, detection and OCR timed apart.
+
+    Only the right strip of the chart that the marker's search needs is captured
+    (quote_reader.strip_width): the reading is the same as on the whole chart, from a
+    smaller image.
+    """
     start = ctx.monotonic()
-    capture, problem = capture_chart(session, source.chart)
+    capture, problem = capture_chart(session, source.chart, quote_reader.strip_width(source.marker))
     capture_ms = ctx.elapsed_ms(start)
-    steps = {}
-    if capture is not None:
-        steps = {
-            "element_ms": capture.element_ms,
-            "screenshot_ms": capture.screenshot_ms,
-            "decode_ms": capture.decode_ms,
-        }
+    steps = capture_steps(capture) if capture is not None else {}
     if capture is None:
         return VisualReading(unavailable(problem), None, None, QuoteTimings(capture_ms, **steps))
     start = ctx.monotonic()
@@ -828,8 +950,10 @@ def read_quote_visually(session, source, ctx):
     if box is None:
         timings = QuoteTimings(capture_ms, detection_ms, **steps)
         return VisualReading(unavailable(reason), capture, None, timings)
+    engine = ctx.engine.get()
+    announce_ocr(ctx)
     start = ctx.monotonic()
-    found = quote_reader.read_marker_text(capture.image, box, ctx.engine.get())
+    found = quote_reader.read_marker_text(capture.image, box, engine)
     timings = QuoteTimings(capture_ms, detection_ms, ctx.elapsed_ms(start), **steps)
     if found.value is None:
         return VisualReading(unavailable(found.reason), capture, box, timings)
@@ -848,6 +972,8 @@ def run_observations(session, selectors, args, ctx, progress):
     the browser's events. Each value is still read at one moment and can change right after.
     """
     number = 0
+    progress.csv_path = new_csv_path(ctx.runtime_dir)
+    progress.timings = quote_timings.TimingRecorder(quote_timings.timing_path(progress.csv_path), warn)
     while args.count is None or number < args.count:
         if session.is_closed():
             say("A janela do navegador foi fechada; a leitura terminou.")
@@ -855,9 +981,14 @@ def run_observations(session, selectors, args, ctx, progress):
         number += 1
         observation = observe_once(session, selectors, ctx)
         progress.observations += 1
+        price = observation.readings["price"]
+        if price.source is not None:
+            progress.timings.add(
+                TIMING_OBSERVATION, timing_row(price, attempt=number, asset=asset_text(observation))
+            )
         if observation.valid:
             if progress.csv is None:
-                progress.csv = CsvLog(new_csv_path(ctx.runtime_dir))
+                progress.csv = CsvLog(progress.csv_path)
                 say(f"CSV: {progress.csv.path}")
             progress.csv.write(observation)
             progress.valid += 1
@@ -1234,6 +1365,7 @@ def configure_visual_source(session, previous, read_line, ctx):
     say("LEITURA VISUAL DA COTAÇÃO")
     say(VISUAL_INTRO)
     ctx.engine.get()  # a missing OCR stops here, with the installation hint
+    announce_ocr(ctx)
     chart = previous.chart if previous is not None else None
     keep = f"Enter mantém {chart}; - desiste" if chart else "- desiste"
     answer = ask(
@@ -1539,6 +1671,7 @@ def written_summary(progress):
 
 def finish(progress):
     say(f"Concluído: {written_summary(progress)}.")
+    report_timings(progress.timings)
     if progress.csv is None:
         warn(
             "PARADA: nenhuma observação válida, então nenhum CSV foi criado. Confira os"
@@ -1555,6 +1688,7 @@ def finish(progress):
 
 def report_interruption(progress):
     say(f"Interrompido por Ctrl+C: {written_summary(progress)}.")
+    report_timings(progress.timings)
     if progress.csv is not None:
         say(f"CSV preservado: {progress.csv.path}")
 
@@ -1678,24 +1812,33 @@ class PlaywrightSession:
         except self._error_type as error:
             raise ReadError(describe(error)) from error
 
-    def capture(self, selector, timeout_ms):
+    def capture(self, selector, timeout_ms, strip=None):
         """Capture of the only visible element of selector: the page clipped to its box.
 
         page.screenshot with a clip neither scrolls nor touches the page, unlike an element
-        screenshot, and caret="initial" leaves the text caret as it is.
+        screenshot, and caret="initial" leaves the text caret as it is. With strip, a width
+        in CSS pixels, only the right strip of the element with that width is captured: the
+        part where the current-quote marker is looked for (quote_reader.strip_width). A
+        smaller image is quicker to encode, to send from the browser and to decode; the
+        element's box, and so the strip's place, is read anew for every capture.
         """
         start = time.perf_counter()
         try:
             locator = self._page.locator(selector)
             matches = locator.count()
+            counted = time.perf_counter()
             if matches != 1:
                 return Capture(matches)
             if not locator.is_visible():
                 return Capture(1)
+            checked = time.perf_counter()
             box = locator.bounding_box(timeout=timeout_ms)
             if box is None or box["width"] < 1 or box["height"] < 1:
                 return Capture(1)
             clip = {key: box[key] for key in ("x", "y", "width", "height")}
+            strip_css = None
+            if strip is not None and strip < box["width"]:
+                clip["x"], clip["width"], strip_css = box["x"] + box["width"] - strip, strip, strip
             located = time.perf_counter()
             png = self._page.screenshot(clip=clip, caret="initial", timeout=timeout_ms)
             shot = time.perf_counter()
@@ -1710,13 +1853,18 @@ class PlaywrightSession:
             "element_ms": round((located - start) * 1000, 1),
             "screenshot_ms": round((shot - located) * 1000, 1),
             "decode_ms": round((decoded - shot) * 1000, 1),
+            "count_ms": round((counted - start) * 1000, 1),
+            "visible_ms": round((checked - counted) * 1000, 1),
+            "box_ms": round((located - checked) * 1000, 1),
+            "png_bytes": len(png),
+            "strip_css": strip_css,
         }
         # The screenshot keeps only what is inside the window. A cropped capture has
         # different scales across and down, and its right edge is not the element's.
-        across, down = image.width / box["width"], image.height / box["height"]
+        across, down = image.width / clip["width"], image.height / clip["height"]
         if abs(across - down) > 0.02 * max(across, down):
-            return Capture(1, True, None, box["width"], clipped=True, **steps)
-        return Capture(1, True, image, box["width"], **steps)
+            return Capture(1, True, None, clip["width"], clipped=True, **steps)
+        return Capture(1, True, image, clip["width"], **steps)
 
     def find_quote_texts(self, limit):
         """TextMatch of up to limit visible elements whose whole text looks like a quote."""

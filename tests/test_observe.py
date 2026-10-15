@@ -30,7 +30,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # chart_images, next to the tests
 
 import chart_images  # noqa: E402
-from pocketautonomo import observe  # noqa: E402
+from pocketautonomo import observe, quote_ocr  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 URL = "https://pocketoption.com/pt/tela-de-teste/"  # invented path, never opened
@@ -82,6 +82,7 @@ class FakeSession:
         self.opened = []
         self.reads = []
         self.capture_calls = []
+        self.strips = []
         self.waits = []
         self.window_closed = False
         self.closes = 0
@@ -104,9 +105,14 @@ class FakeSession:
             raise answer
         return answer
 
-    def capture(self, selector, timeout_ms):
-        """A Capture at 1 device pixel per CSS pixel, like read() for the chart."""
+    def capture(self, selector, timeout_ms, strip=None):
+        """A Capture at 1 device pixel per CSS pixel, like read() for the chart.
+
+        With strip, only the image's rightmost strip columns are returned, as
+        PlaywrightSession clips the screenshot; strips records each width asked for.
+        """
         self.capture_calls.append(selector)
+        self.strips.append(strip)
         answer = self.captures[selector]
         if isinstance(answer, list):
             answer = answer.pop(0) if len(answer) > 1 else answer[0]
@@ -114,6 +120,9 @@ class FakeSession:
             raise answer
         if isinstance(answer, observe.Capture):
             return answer
+        if strip is not None and strip < answer.width:
+            part = chart_images.right_strip(answer, strip)
+            return observe.Capture(1, True, part, part.width, strip_css=strip)
         return observe.Capture(1, True, answer, answer.width)
 
     def find_quote_texts(self, limit):
@@ -963,11 +972,32 @@ class ConfigureQuoteTest(ObserveTestCase):
         self.assertIn(observe.COMPARE_QUOTE, run.out)
         self.assertIn("cotação do ativo: 1.26543 (leitura visual (OCR) do marcador #2962ff, no elemento #grafico)", run.out)
         self.assertEqual(self.csv_rows()[0][4:10], ["1.26543", "ok: ocr #grafico", "92", "ok: #payout", "completa", "ocr"])
-        # Only the two preview images were added to runtime/.
+        # The candidates come from the whole chart; every reading after them, previews and
+        # observation, from the right strip that the marker's search needs.
+        strip = observe.quote_reader.strip_width(observe.quote_reader.MarkerModel.from_json(NEW_VISUAL["marker"]))
+        self.assertEqual(session.strips[0], None)
+        self.assertEqual(set(session.strips[1:]), {strip})
+        self.assertLess(strip, image.width)
+        # Besides the CSV of the observations and its timings, only the two preview images
+        # were added to runtime/.
+        [main_csv] = self.csv_files()
+        timings = self.runtime / ("tempos-" + main_csv.name)
         self.assertEqual(
-            sorted(path.name for path in self.runtime.iterdir() if not path.name.startswith("observations-")),
+            sorted(path.name for path in self.runtime.iterdir() if path not in (main_csv, timings)),
             sorted([candidates.name, previews.name, "observe-selectors.json"]),
         )
+        with open(timings, newline="", encoding="utf-8") as file:
+            header, *rows = list(csv.reader(file))
+        self.assertEqual(tuple(header), observe.quote_timings.TIMING_COLUMNS)
+        [row] = [dict(zip(header, row)) for row in rows]  # the observation; the previews are not written
+        self.assertEqual(
+            (row["moment"], row["result"], row["quote"], row["source"], row["asset"], row["strip_css"]),
+            ("observação", "ok", "1.26543", "ocr", "GBP/USD OTC", f"{strip:.1f}"),
+        )
+        self.assertEqual(row["image_px"], f"{int(strip)}x{image.height}")
+        self.assertIn("Tempos da leitura da cotação, mediana/máximo em ms, por momento da leitura:", run.out)
+        self.assertIn("  observação (1 leitura, 1 com cotação): total ", run.out)
+        self.assertIn(f"Tempos de cada leitura: {timings}", run.out)
 
     def test_search_lists_text_candidates_and_uses_the_one_chosen(self):
         session = FakeSession(
@@ -1262,6 +1292,140 @@ class PlaywrightSessionTest(ObserveTestCase):
         self.assertIn("python -m pip install playwright==1.64.0", run.err)
         self.assertIn("python -m playwright install chromium", run.err)
         self.assertEqual((self.answers.prompts, self.csv_files()), ([], []))
+
+
+class FakePng(bytes):
+    """What the fake screenshot returns: PNG-like bytes that carry the size of the image."""
+
+    def __new__(cls, width, height):
+        png = super().__new__(cls, b"\x89PNG\r\n\x1a\n" + b"\0" * 92)
+        png.width, png.height = width, height
+        return png
+
+
+def fake_decode(png):
+    return chart_images.RgbImage(png.width, png.height, bytes(png.width * png.height * 3))
+
+
+class FakeChartPage:
+    """A page with one chart element at box, drawn at scale device pixels per CSS pixel.
+
+    window, a (width, height) pair in CSS pixels, trims the screenshot as a window does.
+    """
+
+    def __init__(self, box, scale=1.25, window=(1920, 1080)):
+        self.box, self.scale, self.window = box, scale, window
+        self.calls = []
+
+    def locator(self, selector):
+        page = self
+
+        class Locator:
+            def count(self):
+                page.calls.append("count")
+                return 1
+
+            def is_visible(self):
+                page.calls.append("is_visible")
+                return True
+
+            def bounding_box(self, *, timeout):
+                page.calls.append("bounding_box")
+                return dict(page.box)
+
+        return Locator()
+
+    def screenshot(self, *, clip, caret, timeout):
+        self.calls.append(("screenshot", dict(clip), caret))
+        right = min(clip["x"] + clip["width"], self.window[0])
+        bottom = min(clip["y"] + clip["height"], self.window[1])
+        return FakePng(round((right - clip["x"]) * self.scale), round((bottom - clip["y"]) * self.scale))
+
+
+class CaptureStripTest(unittest.TestCase):
+    """PlaywrightSession.capture on a fake page: the right strip, and the time of each step."""
+
+    def capture(self, page, strip=None):
+        session = object.__new__(observe.PlaywrightSession)
+        session._page, session._error_type = page, RuntimeError
+        with mock.patch.object(observe, "decode_png", fake_decode):
+            return session.capture("canvas.layer.plot", 5_000, strip=strip)
+
+    def test_only_the_right_strip_is_captured(self):
+        page = FakeChartPage({"x": 100.5, "y": 80.0, "width": 554.0, "height": 871.0})
+        capture = self.capture(page, strip=154.0)
+        [shot] = [call for call in page.calls if call[0] == "screenshot"]
+        self.assertEqual(shot[1], {"x": 100.5 + 554.0 - 154.0, "y": 80.0, "width": 154.0, "height": 871.0})
+        self.assertEqual(shot[2], "initial")
+        self.assertEqual((capture.css_width, capture.strip_css), (154.0, 154.0))
+        self.assertEqual((capture.image.width, capture.image.height), (192, 1089))
+        self.assertAlmostEqual(capture.scale, 1.25, places=2)
+        self.assertFalse(capture.clipped)
+        self.assertEqual(capture.png_bytes, 100)
+        for step in ("count_ms", "visible_ms", "box_ms", "element_ms", "screenshot_ms", "decode_ms"):
+            self.assertGreaterEqual(getattr(capture, step), 0.0, step)
+        self.assertEqual(page.calls[:3], ["count", "is_visible", "bounding_box"])  # read anew each time
+
+    def test_without_a_strip_or_with_a_wide_one_the_whole_element_is_captured(self):
+        box = {"x": 10.0, "y": 20.0, "width": 300.0, "height": 200.0}
+        for strip in (None, 300.0, 450.0):
+            with self.subTest(strip=strip):
+                page = FakeChartPage(box)
+                capture = self.capture(page, strip=strip)
+                [shot] = [call for call in page.calls if call[0] == "screenshot"]
+                self.assertEqual(shot[1], box)
+                self.assertEqual((capture.css_width, capture.strip_css), (300.0, None))
+
+    def test_a_strip_cut_by_the_window_is_refused(self):
+        box = {"x": 100.0, "y": 80.0, "width": 554.0, "height": 871.0}
+        for window in ((600, 1080), (1920, 700)):  # the right edge, or the bottom, outside the window
+            with self.subTest(window=window):
+                capture = self.capture(FakeChartPage(box, window=window), strip=154.0)
+                self.assertTrue(capture.clipped)
+                self.assertIsNone(capture.image)
+
+    def test_the_timings_of_a_reading_carry_the_strip_and_the_image(self):
+        image = chart_images.chart(marker_y=150)
+        session = FakeSession(captures={"#grafico": image})
+        source = observe.QuoteOcrSource("#grafico", observe.quote_reader.MarkerModel.from_json(BLUE_MARKER))
+        visual = observe.read_quote_visually(session, source, context(engine=chart_images.FakeEngineHolder()))
+        strip = observe.quote_reader.strip_width(source.marker)
+        self.assertEqual(session.strips, [strip])
+        self.assertEqual(visual.reading.value, "1.26543")
+        self.assertEqual((visual.timings.strip_css, visual.timings.image_px), (strip, f"{int(strip)}x{image.height}"))
+        reading = observe.read_field(session, "price", source, context(engine=chart_images.FakeEngineHolder()))
+        row = observe.timing_row(reading, attempt=1)
+        self.assertEqual((row["result"], row["quote"], row["source"], row["strip_css"]), ("ok", "1.26543", "ocr", strip))
+
+
+class OcrWarmUpTest(unittest.TestCase):
+    """The OCR engine is created once, and its first recognition is made on a known sample."""
+
+    def test_the_engine_is_warmed_up_once_and_reused(self):
+        created = []
+
+        class WarmEngine(observe.RapidOcrEngine):
+            def __init__(self):  # no packages: only what LazyEngine calls
+                created.append(self)
+                self.warmed = 0
+
+            def warm_up(self):
+                self.warmed += 1
+                return quote_ocr.WarmUp("1.26543", 0.99, 80.0)
+
+        lazy = observe.LazyEngine(WarmEngine)
+        ctx = context(engine=lazy)
+        self.assertIs(lazy.get(), lazy.get())
+        self.assertEqual((len(created), created[0].warmed), (1, 1))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            observe.announce_ocr(ctx)
+            observe.announce_ocr(ctx)  # once per run
+        self.assertEqual(out.getvalue().count("OCR local pronto: carregado em "), 1)
+        self.assertIn("leitura de aquecimento em 80 ms, antes de qualquer cotação, na amostra 1.26543: leu '1.26543'", out.getvalue())
+        self.assertNotIn("AVISO", out.getvalue())
+        wrong = observe.OcrStartup(500.0, quote_ocr.WarmUp("1.2654", 0.95, 90.0))
+        self.assertIn("AVISO: não é a amostra", wrong.describe())
 
 
 class ReadOnlySourceTest(unittest.TestCase):
