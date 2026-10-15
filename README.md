@@ -132,18 +132,18 @@ python -m pocketautonomo.local_simulation --cycles 2 --results "LOSS,LOSS,LOSS,L
 
 No Linux os comandos rodam no bash; no Windows, no PowerShell 7. A saída usa UTF-8 (`PYTHONIOENCODING=utf-8`).
 
-Última execução verificada: [run 38688877951](https://github.com/vickzinha9/claude/actions/runs/38688877951), de 15/10/2026, no commit `ea1c557`, com os três jobs aprovados. No job `tests`:
+Última execução verificada: [run 38702554435](https://github.com/vickzinha9/claude/actions/runs/38702554435), de 15/10/2026, no commit `bbbf50d`, com os três jobs aprovados. No job `tests`:
 
 | Sistema | Ambiente | Testes | `--cycles 3` LOSS,LOSS,WIN | `--cycles 2` quatro LOSS |
 |---|---|---|---|---|
-| Linux | ubuntu-24.04, Python 3.12.15 | 230: 222 OK e 8 pulados | código 0 | código 0 |
-| Windows | Windows Server 2025 (imagem windows-2025-vs2026), Python 3.12.10 | 230: 227 OK e 3 pulados | código 0 | código 0 |
+| Linux | ubuntu-24.04, Python 3.12.15 | 261: 251 OK e 10 pulados | código 0 | código 0 |
+| Windows | Windows Server 2025 (imagem windows-2025-vs2026), Python 3.12.10 | 261: 257 OK e 4 pulados | código 0 | código 0 |
 
-No Linux ficam de fora os 5 testes que só rodam no Windows e os 3 que usam o Chromium. No Windows ficam de fora só os 3 com Chromium, porque o job `tests` não instala o Playwright; o job `windows-browser`, descrito abaixo, roda os três. A primeira execução, [run 38522223843](https://github.com/vickzinha9/claude/actions/runs/38522223843), no commit `ecc9d12`, teve 160 testes OK nos dois sistemas.
+No Linux ficam de fora os 6 testes que só rodam no Windows e os 4 que usam o Chromium. No Windows ficam de fora só os 4 com Chromium, porque o job `tests` não instala o Playwright; o job `windows-browser`, descrito abaixo, roda os quatro. A primeira execução, [run 38522223843](https://github.com/vickzinha9/claude/actions/runs/38522223843), no commit `ecc9d12`, teve 160 testes OK nos dois sistemas.
 
 Nos dois sistemas, os acentos da saída apareceram corretos no log. Os testes de exclusividade do banco também passaram, inclusive no Windows, onde a trava usa `msvcrt.locking`.
 
-O job `windows-browser` roda só em `windows-latest` e testa o coletor em **páginas locais de teste**, servidas pelo próprio Playwright para o nome reservado `observe.test`; uma delas é um gráfico desenhado em canvas pelo próprio teste. Ele não acessa a Pocket Option, então passar nele não valida nada na plataforma real. Os passos são estes:
+O job `windows-browser` roda só em `windows-latest` e testa o coletor e a varredura em **páginas locais de teste**, servidas pelo próprio Playwright para o nome reservado `observe.test`: dois gráficos desenhados em canvas pelos próprios testes, um deles com uma barra de favoritos. Ele não acessa a Pocket Option, então passar nele não valida nada na plataforma real. Os passos são estes:
 
 1. cria em `runtime/` um arquivo no perfil do navegador e um `observe-selectors.json`, que precisam continuar iguais no fim;
 2. roda `preparar_windows.cmd` duas vezes, pelo `cmd`: a primeira cria `.venv` e instala o Playwright, o Chromium e o OCR local, e a segunda reutiliza `.venv`;
@@ -151,13 +151,15 @@ O job `windows-browser` roda só em `windows-latest` e testa o coletor em **pág
 4. roda `observar_windows.cmd --help` e `observar_windows.cmd --url http://example.org/`, que precisa terminar com código 2. Nenhum dos dois abre o navegador;
 5. confere que os dois arquivos de `runtime/` não mudaram.
 
-Na execução 38688877951, todos os passos passaram:
+Na execução 38702554435, todos os passos passaram:
 
-- o `preparar_windows.cmd` escolheu `py -3.12`, o Python 3.12.10 de 64 bits. Ele criou `.venv` e instalou o `playwright-1.64.0` e o OCR (`rapidocr-3.10.0` e `onnxruntime-1.31.0`, com `numpy-2.5.4` e `opencv-python-headless-5.0.0.93`). Também baixou o Chrome for Testing 156.0.8078.4. Depois, conferiu a instalação, e o OCR leu `1.26543` na imagem de teste: 52 s no total;
-- na segunda vez, ele reutilizou `.venv` em 7 s;
-- os 3 testes com Chromium e OCR de verdade passaram em 13,7 s, inclusive a leitura da cotação num gráfico de teste desenhado em canvas, com a etiqueta semitransparente calibrada sobre uma vela verde e lida sobre o fundo;
+- o `preparar_windows.cmd` escolheu `py -3.12`, o Python 3.12.10 de 64 bits. Ele criou `.venv` e instalou o `playwright-1.64.0` e o OCR (`rapidocr-3.10.0` e `onnxruntime-1.31.0`, com `numpy-2.5.4` e `opencv-python-headless-5.0.0.93`). Também baixou o Chrome for Testing 156.0.8078.4. Depois, conferiu a instalação, e o OCR leu `1.26543` na imagem de teste: 44 s no total;
+- na segunda vez, ele reutilizou `.venv` em 6 s;
+- os 4 testes com Chromium e OCR de verdade passaram em 31 s. Entre eles estão a leitura da cotação num gráfico com a etiqueta semitransparente e a varredura de três favoritos com carregamento atrasado: 6 linhas completas, sem misturar ativos, com 5 cliques, todos em favoritos, e nenhum em BUY, SELL, CALL, PUT ou no Amount;
 - `observar_windows.cmd --help` terminou com código 0, e o link recusado, com código 2;
 - os arquivos de `runtime/` continuaram iguais.
+
+No job `tests` do Windows, o `ScanLauncherOnWindowsTest` rodou o `varrer_windows.cmd` pelo `cmd.exe` numa cópia do projeto: sem `.venv`, código 1; com uma `.venv` sem pip, `--help` com código 0 e um link recusado com código 2.
 
 ### Windows: testado em CI, não no seu computador
 
