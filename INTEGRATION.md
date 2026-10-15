@@ -1,13 +1,14 @@
-# Integração com a Pocket Option: leitura de dados
+# Integração com a Pocket Option: leitura de dados e varredura dos favoritos
 
-Pesquisa e testes feitos em 14/10/2026, no branch `feature/progression-core`. No mesmo dia entraram os lançadores do Windows, o modo `--configure`, a espera pelo Playwright e a leitura visual da cotação. Em 15/10/2026, a detecção e a configuração visual foram corrigidas com base na sua segunda validação (seções 5 e 6).
+Pesquisa e testes feitos em 14/10/2026, no branch `feature/progression-core`. No mesmo dia entraram os lançadores do Windows, o modo `--configure`, a espera pelo Playwright e a leitura visual da cotação. Em 15/10/2026, a detecção e a configuração visual foram corrigidas com base na sua segunda validação (seções 5 e 6), e entrou a varredura dos favoritos (seção 4).
 
-> **Nenhuma conexão real foi comprovada.** Nada foi lido da plataforma real até agora. A origem dos três campos (ativo, cotação do ativo e payout) continua sem comprovação. Todos os testes usaram objetos falsos ou uma página local de teste, inclusive os do CI no Windows.
+> **Na plataforma real**, a sua terceira validação, informada em 15/10/2026, terminou com três observações completas de GBP/USD OTC (seção 5). A varredura dos favoritos ainda não rodou na sua tela, e nenhum seletor dos favoritos foi conferido nela. Os demais testes usaram objetos falsos ou páginas locais de teste, inclusive os do CI no Windows.
 
 ## Resumo
 
 - Não encontrei nenhuma interface oficial documentada (API, SDK ou documentação para desenvolvedores) que permita a um programa ler dados do terminal web CALL/PUT.
-- **Método escolhido:** um Chromium **visível**, controlado pelo Playwright, com o perfil em `runtime/browser-profile`. Você faz o login nessa janela, e o programa só lê o que a página mostra. A leitura usa fontes que você escolhe no terminal, com prévia de cada uma (`--configure`, que o `observar_windows.cmd` usa), gravadas em `runtime/observe-selectors.json`: seletores de texto e, para a cotação, também a leitura visual do marcador no gráfico, com OCR local (seção 4).
+- **Método escolhido:** um Chromium **visível**, controlado pelo Playwright, com o perfil em `runtime/browser-profile`. Você faz o login nessa janela, e o coletor só lê o que a página mostra. A leitura usa fontes que você escolhe no terminal, com prévia de cada uma (`--configure`, que o `observar_windows.cmd` usa), gravadas em `runtime/observe-selectors.json`: seletores de texto e, para a cotação, também a leitura visual do marcador no gráfico, com OCR local (seção 4).
+- **Varredura dos favoritos:** `python -m pocketautonomo.scan` (`varrer_windows.cmd`) usa o mesmo navegador, o mesmo perfil e as mesmas fontes, e acrescenta uma única ação: o clique num ativo favorito, por um seletor que você confere, para selecioná-lo. Ela nunca clica em BUY, SELL, CALL ou PUT, não mexe no Amount e não envia ordens.
 - O programa não traz nenhum seletor nem marcador pronto. Sem os seus, todo campo fica indisponível, com o motivo. Um seletor que encontra texto ou um OCR que lê um número não validam o campo: só a sua comparação com a tela valida.
 
 ## 1. Fontes oficiais consultadas
@@ -73,7 +74,7 @@ O OCR é o [RapidOCR](https://github.com/RapidAI/RapidOCR) 3.10.0, com o modelo 
 
 **Garantias:**
 
-- **Só leitura.** Além de abrir e fechar o navegador, o código usa apenas `goto`, `url`, `is_closed`, `locator`, `count`, `is_visible`, `inner_text`, `wait_for_timeout`, `bounding_box`, `get_by_text`, `nth`, `get_attribute` e `screenshot`. O `screenshot` só pode ser chamado com `clip`, sem `path` e sem página inteira. Um teste analisa o código-fonte e falha se aparecer, por exemplo, `click`, `fill`, `press`, `type`, `evaluate`, `cookies`, `storage_state`, `route`, `keyboard`, `mouse` ou `sleep`, ou um `screenshot` diferente.
+- **Só leitura no coletor.** Além de abrir e fechar o navegador, o código do coletor (`observe.py`, `quote_reader.py` e `quote_ocr.py`) usa apenas `goto`, `url`, `is_closed`, `locator`, `count`, `is_visible`, `inner_text`, `wait_for_timeout`, `bounding_box`, `get_by_text`, `nth`, `get_attribute` e `screenshot`. O `screenshot` só pode ser chamado com `clip`, sem `path` e sem página inteira. Um teste analisa o código-fonte e falha se aparecer, por exemplo, `click`, `fill`, `press`, `type`, `evaluate`, `cookies`, `storage_state`, `route`, `keyboard`, `mouse` ou `sleep`, ou um `screenshot` diferente. A varredura, abaixo, é a única parte que clica.
 - **Origem conferida.** Uma página fora de pocketoption.com nunca é lida. Cada campo disponível registra a fonte usada (`ok: <seletor>` ou `ok: ocr <seletor do gráfico>`).
 - **Sem segredos na saída.** Parâmetros (`?...`) e fragmento (`#...`) da URL nunca aparecem no terminal nem no CSV. O programa não lê cookies, tokens, armazenamento do site nem tráfego de rede.
 - **Horário.** Os horários vêm do relógio deste computador, em UTC, com milissegundos: o do início da observação e o de logo antes da captura da cotação. **Nenhum horário é lido da plataforma, e nenhum é o horário do servidor.** O CSV registra também quanto tempo levaram a captura e a leitura da cotação e a observação inteira.
@@ -87,16 +88,31 @@ As colunas do CSV estão no [README](README.md#execução-sem-os-lançadores). A
 - **Cotação do ativo:** dígitos com pelo menos um separador decimal (`.` ou `,`), como `1.08534`. Um número inteiro, como `10`, é recusado, porque pode ser o valor da aposta. O valor fica como texto, porque o formato numérico da plataforma não foi verificado.
 - **Payout:** de 1 a 3 dígitos, com decimais opcionais, seguidos de `%`; aceita `+` na frente.
 
+### Varredura dos favoritos: `python -m pocketautonomo.scan`
+
+A varredura passa pelos seus ativos favoritos, um de cada vez, e lê cada um com o mesmo leitor e as mesmas fontes do coletor, de `runtime/observe-selectors.json`. A fonte do ativo é obrigatória, porque confirma cada troca.
+
+1. **Favoritos.** O seletor dos favoritos fica em `runtime/scan-selectors.json`. No `--configure`, o programa lê o seletor na hora e lista cada elemento encontrado, com o nome do ativo tirado do texto e o motivo de cada elemento ignorado: oculto, sem nome de ativo ou repetido. Ele também diz se o ativo selecionado agora está na lista. Percentuais no texto do favorito, como um payout, ficam fora do nome. Nada é clicado na configuração.
+2. **Seletor recusado inteiro.** O seletor não pode ser usado se encontrar mais de 30 elementos, um campo de formulário (como o Amount) ou um elemento com uma palavra de botão financeiro ou de dinheiro: buy, sell, call, put, compra(r), venda/vender, amount, valor, deposit(ar), depósito, saque/sacar, withdraw, trade, operar e outras. Se isso aparecer durante a varredura, ela para sem clicar.
+3. **O único clique.** Antes de cada clique, a página precisa estar em pocketoption.com, e a lista é lida de novo. O elemento do favorito é lido mais uma vez logo antes do clique e precisa ter o mesmo nome de ativo, estar visível, não ter campo de formulário e ter no máximo 400x120 px. O clique é o `click` do Playwright, com as conferências dele (elemento visível, estável, habilitado e que recebe o clique) e sem nenhuma opção mudada. Um teste confere no código-fonte que é a única chamada que age na página.
+4. **Confirmação da troca.** Depois do clique, o ativo é lido a cada 0,25 s até mostrar o nome do favorito, comparado só por letras e algarismos (`GBP/USD OTC` e `GBPUSD OTC` contam como iguais). Sem confirmação dentro do limite (`--load-timeout`, padrão 20 s), a linha fica sem dados, com o motivo. Três trocas seguidas sem confirmação encerram o ciclo, sem clicar nos favoritos que faltam.
+5. **Espera dos dados.** Confirmado o ativo, a varredura espera 1 s e lê, a cada 0,5 s: ativo, cotação, payout e ativo de novo. Um campo só fica disponível quando duas leituras seguidas concordam: o mesmo ativo antes e depois, o mesmo payout e cotações a menos de 1% uma da outra. Depois de uma troca, a cotação também precisa estar a mais de 0,1% da cotação lida no gráfico do ativo anterior logo antes do clique; mais perto que isso, o gráfico pode ainda ser o do ativo anterior. Sem essa cotação anterior, nada mostra que o gráfico mudou, e a cotação fica indisponível. O payout é lido depois da cotação, então um payout aceito foi lido depois que o gráfico já tinha mudado. O que não estabilizar até o limite fica indisponível, com o motivo e o limite.
+6. **Uma navegação por vez.** O próximo clique só acontece depois do fim da visita atual. A trava `runtime/scan.lock` impede uma segunda varredura ao mesmo tempo. Se um clique abrir outra aba, ou se o favorito clicado sumir da lista, a varredura termina sem novos cliques.
+7. **Elegibilidade.** `payout_eligible` é `sim` quando o payout numérico é 90% ou mais, `não` abaixo disso e `indisponível` sem payout. É o critério para uma futura primeira entrada; **não é probabilidade de vitória**, e os ativos abaixo de 90% também são gravados.
+8. **Gravação.** Cada visita vai, assim que termina, para um CSV novo por execução, `runtime/scan-<data>-<hora>-<sufixo>.csv`: as 16 colunas do coletor e as da varredura (ciclo, favorito, troca, ativo e cotação antes do clique, tempos e elegibilidade). As colunas estão no [README](README.md#varredura-dos-favoritos).
+9. **Ciclos.** `--cycles N` faz N ciclos; sem ele, a varredura continua até Ctrl+C. Entre dois ciclos, a espera é `--interval` (padrão 10 s). Depois de um ciclo sem nenhuma leitura completa, ela dobra a cada ciclo assim, até 120 s, e volta ao normal com uma leitura completa.
+
 ## 5. O que foi comprovado
 
-**Na plataforma real**, pelas suas duas validações no Windows, informadas em 14/10/2026 e em 15/10/2026:
+**Na plataforma real**, pelas suas três validações no Windows, informadas em 14/10/2026 e em 15/10/2026:
 
 - a página depois do login foi `https://pocketoption.com/en/cabinet/`;
 - ativo: `span.current-symbol` leu `GBP/USD OTC`, que correspondia à tela;
-- payout: `div.value__val-start` leu 38% na prévia e 36% na primeira observação;
-- cotação: **ainda não lida.** Na segunda validação, a calibração visual escolheu uma caixa `#498390` de 46x9 px sem texto legível, as 3 prévias não acharam o marcador, levaram 3486, 2059 e 3023 ms, e o `n` encerrou o programa com `[Errno 22]`. A seção 6 explica as causas e as correções.
+- payout: `div.value__val-start` leu 38% na prévia e 36% na primeira observação da primeira validação, e 92% na terceira;
+- cotação: na segunda validação, a calibração visual escolheu uma caixa `#498390` de 46x9 px sem texto legível, as 3 prévias não acharam o marcador, levaram 3486, 2059 e 3023 ms, e o `n` encerrou o programa com `[Errno 22]` (causas e correções na seção 6);
+- **terceira validação:** com a leitura visual corrigida, o `observar_windows.cmd` terminou com código 0 e três observações COMPLETAS de GBP/USD OTC, com as cotações 1.42582, 1.42586 e 1.42604 e o payout de 92%. A configuração ficou gravada em `runtime/observe-selectors.json`.
 
-**A coleta não está comprovada:** os três campos precisam corresponder à plataforma, e a cotação ainda não foi lida nela.
+**A coleta de GBP/USD OTC:** os três campos foram lidos juntos nas três observações, e você deu a validação por concluída; a comparação de cada valor com a tela não foi descrita. Outros ativos e a varredura dos favoritos não rodaram na plataforma.
 
 ### O que as duas imagens da validação mostraram
 
@@ -108,17 +124,16 @@ As duas imagens que você enviou, `cotacao-candidatos.png` e `cotacao-previa.png
 - O modelo guardou `#498390`, 46x9 px. Na prévia, a etiqueta estava sobre o fundo (`#3f638e`, a 32 da cor gravada, acima da tolerância de 20) e tinha 55x23 px. Por isso ela não foi achada.
 - **Com a detecção nova**, na mesma imagem da calibração, a caixa tem as 23 linhas da etiqueta. A largura ficou em 48 px, e não 55, porque as marcas rosas cobrem as bordas na metade de cima. Na `cotacao-previa.png`, ela tem 55x23 px e o OCR leu `1.42045`, que é o valor que a imagem mostra. O modelo calibrado na primeira imagem acha a etiqueta na segunda, e o calibrado na segunda acha a da primeira.
 
-### Tempo das prévias
+### Tempo da leitura visual
 
-Na `cotacao-previa.png`, medido no Linux remoto:
+| Etapa | Na sua terceira validação, no Windows, nas 3 observações | Na `cotacao-previa.png`, no Linux remoto |
+|---|---|---|
+| leitura visual inteira | 255, 180 e 193 ms | não se aplica |
+| captura (achar o elemento, `page.screenshot` e decodificação) | 231, 155 e 168 ms | decodificação: 10 ms |
+| detecção do marcador | 6 ms | 8 ms (15 ms numa versão ampliada para 150%) |
+| OCR | 18 ms | 15 a 19 ms, depois da primeira leitura, que leva cerca de 80 ms |
 
-| Etapa | Tempo |
-|---|---|
-| decodificar o PNG | 10 ms |
-| detecção do marcador | 8 ms (15 ms numa versão ampliada para 150%) |
-| OCR | 15 a 19 ms, depois da primeira leitura; a primeira leva cerca de 80 ms |
-
-Isso não explica 2 a 3,5 s. A suspeita é a captura (`page.screenshot`) no navegador visível do Windows, mas isso não foi medido aí. Num gráfico de teste, com o Chromium sem janela no Linux, a captura levou 6 ms para achar o elemento, 26 ms para a tela e 2 ms para decodificar. Agora cada prévia, cada linha `OBSERVAÇÃO` e o CSV mostram o tempo de cada etapa, para confirmar no seu computador onde está o gargalo.
+No seu computador, a captura respondeu por 86% a 91% da leitura visual: é o gargalo. Os 2 a 3,5 s das prévias da segunda validação não se repetiram, e a causa daquela demora não foi identificada.
 
 ### Testes
 
@@ -128,15 +143,19 @@ Isso não explica 2 a 3,5 s. A suspeita é a captura (`page.screenshot`) no nave
 | Lançadores do Windows | CI `windows-latest`: `preparar_windows.cmd` duas vezes, com o Playwright, o Chromium e o OCR; `observar_windows.cmd --help` e com um link recusado, código 2; `runtime/` igual no fim. O `PreparerOnWindowsTest` roda o `cmd.exe` com um `py` falso que devolve `-1610612730` | a preparação funcionou depois de `py install 3.12` |
 | Abrir o navegador visível com o perfil em `runtime/` | Playwright falso: `headless=False` e perfil `runtime/browser-profile`. A janela visível não abriu em nenhum teste | funcionou: você fez o login na janela |
 | Ativo | objetos falsos e Chromium real em página local | **conferido por você**: `span.current-symbol`, `GBP/USD OTC` |
-| Payout | objetos falsos e Chromium real em página local | lido por `div.value__val-start` (38% e 36%); a comparação com a tela não foi informada |
-| Cotação, leitura visual | imagens sintéticas com a estrutura medida (etiqueta 80% opaca sobre vela e fundo, algarismos com vãos de 2 px); as suas duas imagens, fora da suíte; Chromium real e OCR real num gráfico de teste com etiqueta semitransparente, calibrada sobre uma vela verde e lida sobre o fundo | **não comprovada**: a calibração falhou na segunda validação |
+| Payout | objetos falsos e Chromium real em página local | lido por `div.value__val-start`: 38% e 36% na primeira validação, 92% na terceira |
+| Cotação, leitura visual | imagens sintéticas com a estrutura medida (etiqueta 80% opaca sobre vela e fundo, algarismos com vãos de 2 px); as suas duas imagens, fora da suíte; Chromium real e OCR real num gráfico de teste com etiqueta semitransparente, calibrada sobre uma vela verde e lida sobre o fundo | **lida na terceira validação**: 1.42582, 1.42586 e 1.42604, em três observações completas de GBP/USD OTC |
 | Cotação, busca em texto | objetos falsos; Chromium real na página de teste | **não executado** |
 | Ambíguo, ausente, cortado, inválido: INDISPONÍVEL | imagens sintéticas e gráfico de teste | na segunda validação, as prévias ficaram INDISPONÍVEIS em vez de mostrar um valor errado |
-| Imagens de conferência com nome novo | objetos falsos; no CI Windows ([run 38688877951](https://github.com/vickzinha9/claude/actions/runs/38688877951)), um arquivo mapeado na memória, como um visualizador faz, recusou ser regravado com `[Errno 22]`, e a imagem nova foi gravada em outro arquivo | **não executado** |
-| Nenhum clique | teste no código-fonte e página local com botões CALL e PUT que contam cliques: zero cliques | não se aplica |
+| Imagens de conferência com nome novo | objetos falsos; no CI Windows ([run 38688877951](https://github.com/vickzinha9/claude/actions/runs/38688877951)), um arquivo mapeado na memória, como um visualizador faz, recusou ser regravado com `[Errno 22]`, e a imagem nova foi gravada em outro arquivo | não informado |
+| Coletor sem cliques | teste no código-fonte e página local com botões CALL e PUT que contam cliques: zero cliques | não se aplica |
+| Varredura: só cliques em favoritos | teste no código-fonte: um único `click`, em `ScanSession.click_favorite`, sem opções; seletores com BUY, SELL, COMPRAR, campo de formulário ou mais de 30 elementos recusados sem clique; Chromium real numa página local com BUY, SELL, CALL, PUT e Amount que contam o que recebem: zero, com 5 cliques, todos em favoritos | **não executado** |
+| Varredura: troca confirmada, espera do gráfico, nenhuma mistura | objetos falsos com atrasos diferentes para nome, payout e gráfico, troca não confirmada, gráfico que não muda, campos ausentes; Chromium real e OCR real numa página local em que o nome muda em 300 ms, o payout em 1400 ms e o gráfico em 1700 ms: 6 linhas completas, cada uma com a cotação e o payout do próprio ativo | **não executado** |
+| Varredura: elegibilidade, ciclos, modo contínuo, espera maior, Ctrl+C, trava | objetos falsos: 89 e 89,9 dão `não`, 90 e 90,0 dão `sim`; Ctrl+C preserva as linhas gravadas e solta a trava; uma segunda varredura é recusada | **não executado** |
+| `varrer_windows.cmd` | texto conferido (CRLF, ASCII, sem apagar nada); no CI Windows, `ScanLauncherOnWindowsTest` roda o `cmd.exe` sem `.venv`, com `--help` e com um link recusado | **não executado** |
 | Espera do Playwright entre leituras, Ctrl+C | objetos falsos; Chromium real; SIGINT real no Linux: código 130 e o CSV preservado | **não testado no Windows** |
 
-As páginas de teste são HTML escrito para os testes e servido pelo próprio Playwright para o nome reservado `observe.test`, sem acesso à rede. O gráfico de teste foi desenhado por mim. A etiqueta dele usa a cor e a opacidade medidas nas suas imagens, mas ele **não é a Pocket Option**: passar nele, no Linux ou no CI Windows, não diz nada sobre a plataforma real.
+As páginas de teste são HTML escrito para os testes e servido pelo próprio Playwright para o nome reservado `observe.test`, sem acesso à rede. O gráfico e a barra de favoritos de teste foram desenhados por mim. A etiqueta do primeiro gráfico usa a cor e a opacidade medidas nas suas imagens, mas nenhuma dessas páginas **é a Pocket Option**: passar nelas, no Linux ou no CI Windows, não diz nada sobre a plataforma real.
 
 ## 6. Bloqueios e riscos
 
@@ -148,28 +167,35 @@ As páginas de teste são HTML escrito para os testes e servido pelo próprio Pl
 3. **Etiqueta semitransparente.** A cor da etiqueta muda com o que está atrás. Uma cor conta como da etiqueta até 40 níveis por canal de uma das cores gravadas.
    - As duas cores medidas diferem em 32, então uma calibração sobre a vela verde cobre também o fundo, e vice-versa.
    - Sobre uma vela vermelha, a cor calculada para a mesma etiqueta (`#6e6b8d`) fica a 47 de `#3f638e` e a 37 de `#498390`. Uma calibração feita só sobre o fundo deixa a cotação indisponível ali até você somar essa cor com `n` e `+`. Esse caso foi testado só em imagem sintética.
-4. **Tempo de captura.** As prévias levaram de 2 a 3,5 s, e a causa ainda não foi medida no Windows (seção 5).
+4. **Tempo de captura.** Na terceira validação, a captura levou de 155 a 231 ms, de 86% a 91% da leitura visual. A demora de 2 a 3,5 s das prévias da segunda validação não foi explicada.
 5. **Janela visível.** A captura depende de a janela do navegador estar visível e não minimizada. O gráfico precisa caber inteiro na área visível, e o mouse sobre o gráfico pode criar uma etiqueta de cursor que deixa a leitura ambígua.
 6. **Latência.** Cada leitura é um instante, e a cotação pode mudar logo depois.
 7. **Login.** Só você pode fazer. Não tentei login nem pedi credenciais.
 8. **robots.txt veda `*/cabinet*`.** Por isso nada foi aberto na plataforma a partir do servidor.
-9. **Termos de uso.** Os Termos permitem cancelar ou revisar resultados de operações feitas com software robô não autorizado, e o blog diz que o único bot permitido é o do Telegram. Este coletor não opera, mas automatiza o navegador na sua conta. Se a Pocket Option considerar isso uso não autorizado, o risco é seu.
+9. **Termos de uso.** Os Termos permitem cancelar ou revisar resultados de operações feitas com software robô não autorizado, e o blog diz que o único bot permitido é o do Telegram. O coletor e a varredura não operam, mas automatizam o navegador na sua conta, e a varredura clica nos favoritos para trocar o ativo. Se a Pocket Option considerar isso uso não autorizado, o risco é seu.
 10. **Situação no Brasil.** Há o alerta da CVM da seção 1. Além disso, em 14/10/2026 o rodapé do blog oficial dizia: "This website does not provide service to residents of the EEA countries, USA, Israel, UK, Philippines, Japan and Brazil".
+11. **Varredura: sinais da plataforma desconhecidos.** A plataforma não mostra quando o gráfico terminou de carregar. A varredura usa só o que consegue ler: o nome do ativo, a cotação anterior e duas leituras que concordam. Riscos que continuam:
+    - se o gráfico demorar mais que o limite para mudar, a cotação fica indisponível;
+    - se dois favoritos tiverem cotações a menos de 0,1% uma da outra, como um par e a versão OTC dele, a troca entre eles deixa a cotação indisponível;
+    - sem a cotação do ativo anterior, lida antes do clique, a cotação depois da troca fica indisponível;
+    - sem fonte da cotação, o payout depende só da espera e das duas leituras iguais: se a plataforma atualizar o payout mais de 1,5 s depois do nome, o payout antigo pode ser gravado. Com a cotação, isso exige que o payout mude mais de duas leituras depois do gráfico.
+12. **Varredura: nomes e seletor.** A troca é confirmada comparando só letras e algarismos do nome do favorito com o do ativo. Se a barra de favoritos escrever o nome de outro jeito, nenhuma troca é confirmada, e três seguidas encerram o ciclo. O seletor precisa encontrar só os favoritos; a lista da configuração mostra o que ele encontra.
+13. **Varredura: você e o navegador.** Durante a varredura, um clique seu na janela troca o ativo, e o mouse sobre o gráfico cria a etiqueta do cursor. A troca é conferida, mas não use a janela enquanto ela roda.
 
 ## 7. Como validar no seu Windows
 
-Os lançadores estão descritos no [README](README.md#windows-os-dois-lançadores). Se puder, valide primeiro na conta demo.
+Os lançadores estão descritos no [README](README.md#windows-os-lançadores). Se puder, valide primeiro na conta demo. A validação do coletor (`observar_windows.cmd`) foi a terceira, da seção 5; esta é a da varredura dos favoritos.
 
-1. Na pasta `claude`, rode `git pull` e abra `preparar_windows.cmd`. Ele deve terminar com "tudo pronto".
-2. Abra `observar_windows.cmd`, faça o login e pressione Enter. Mantenha ativo e payout com Enter.
-3. Na cotação, digite `ocr` e cole `canvas.layer.plot`.
-4. Tire o mouse do gráfico. Na lista de candidatos, escolha o número cujo "texto lido" é a cotação da tela. Um candidato "não pode ser escolhido" quando não tem cotação legível.
-5. Compare as 3 prévias com a tela e anote o tempo de cada etapa. Se alguma ficar `INDISPONÍVEL`, Enter repete; com as 3 lidas e iguais à tela, Enter aceita.
-6. Teste também o `n`, para escolher o marcador de novo com a imagem anterior ainda aberta: ele deve mostrar outra imagem, sem `PARADA`.
-7. Compare as 3 linhas `OBSERVAÇÃO` com a tela.
-8. Me envie:
-   - a saída do terminal, com os tempos;
-   - se cada cotação bateu com a tela;
-   - as imagens `runtime\cotacao-candidatos-...png` e `runtime\cotacao-previa-...png` da execução, se não mostrarem dados seus.
+1. Na pasta `claude`, rode `git pull`. O `preparar_windows.cmd` não precisa rodar de novo, porque as dependências não mudaram, e a `.venv` continua a mesma.
+2. Deixe dois ou três ativos nos favoritos da Pocket Option, se puder com um de payout abaixo de 90%.
+3. No terminal, na pasta `claude`, rode `varrer_windows.cmd --cycles 2`. Cole o link, faça o login e pressione Enter.
+4. No DevTools, inspecione um favorito e cole um seletor que encontre todos eles, com a tag e a classe comuns, sem `:nth-child`. Confira a lista: cada favorito da tela, com o nome certo, e nenhum outro elemento. Enter aceita e começa a varredura.
+5. Não use a janela do navegador enquanto ela roda. A cada linha, confira na tela o ativo selecionado, a cotação e o payout, e anote os tempos de troca e de dados.
+6. Rode de novo, sem `--cycles`, e interrompa com Ctrl+C depois do primeiro ciclo. À pergunta do `cmd`, responda N.
+7. Me envie:
+   - a saída do terminal;
+   - se cada linha bateu com a tela;
+   - o seletor dos favoritos que você usou;
+   - o CSV `runtime\scan-...csv` da primeira execução, se não mostrar dados seus.
 
-Só com os três campos correspondendo à plataforma a coleta será considerada comprovada.
+Só as linhas cujo ativo, cotação e payout corresponderem à tela comprovam a varredura.

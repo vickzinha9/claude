@@ -1,10 +1,12 @@
 """Tests of the collector's preparation, pocketautonomo.setup_observer, and of the launchers.
 
 FakeRun stands in for subprocess.run, so no virtual environment is created, nothing is
-installed and no browser opens here. The two .cmd launchers are checked as text everywhere.
+installed and no browser opens here. The three .cmd launchers are checked as text everywhere.
 On Windows, PreparerOnWindowsTest also runs preparar_windows.cmd with cmd.exe, in a copy of
 the project whose setup_observer is a fake, with a fake py first on the PATH: it chooses a
-Python and installs nothing.
+Python and installs nothing. ScanLauncherOnWindowsTest runs varrer_windows.cmd with cmd.exe
+in a copy of the project, without .venv and then with a .venv without pip, only for --help
+and for a refused link: no browser opens.
 """
 
 import contextlib
@@ -208,7 +210,7 @@ class LaunchersTest(unittest.TestCase):
         return [line for line in lines if line and not line.lower().startswith("rem")]
 
     def test_launchers_enter_their_folder_and_never_touch_runtime(self):
-        for name in ("preparar_windows.cmd", "observar_windows.cmd"):
+        for name in ("preparar_windows.cmd", "observar_windows.cmd", "varrer_windows.cmd"):
             with self.subTest(name=name):
                 commands = self.commands(name)
                 self.assertEqual(commands[0], "@echo off")
@@ -232,10 +234,10 @@ class LaunchersTest(unittest.TestCase):
         self.assertTrue(probe.endswith("<nul >nul 2>&1"), probe)  # no prompt can wait for input
         observe = self.commands("observar_windows.cmd")
         self.assertIn('".venv\\Scripts\\python.exe" -m pocketautonomo.observe --configure --count 3 %*', observe)
+        scan = self.commands("varrer_windows.cmd")
+        self.assertIn('".venv\\Scripts\\python.exe" -m pocketautonomo.scan --configure %*', scan)
+        self.assertIn('set "CODIGO=%ERRORLEVEL%"', scan)
 
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 # The exit code that py, from the Python install manager, gave on the user's Windows for
@@ -336,3 +338,58 @@ class PreparerOnWindowsTest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("Python escolhido: py -3.12\n", out)
         self.assertNotIn("nao serve", out)
+
+
+@unittest.skipUnless(os.name == "nt", "cmd.exe só existe no Windows")
+class ScanLauncherOnWindowsTest(unittest.TestCase):
+    """varrer_windows.cmd with cmd.exe, in a copy of the project: no browser opens here."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.base = Path(directory.name)
+        self.project = self.base / "projeto"
+        self.project.mkdir()
+        shutil.copy(ROOT / "varrer_windows.cmd", self.project)
+        shutil.copytree(ROOT / "pocketautonomo", self.project / "pocketautonomo", ignore=shutil.ignore_patterns("__pycache__"))
+
+    def run_launcher(self, *args):
+        env = {key: value for key, value in os.environ.items() if key.upper() not in ("PYTHONPATH", "PYTHONHOME")}
+        env["POCKETAUTONOMO_SEM_PAUSA"] = "1"
+        result = subprocess.run(
+            ["cmd", "/d", "/c", "call", str(self.project / "varrer_windows.cmd"), *args],
+            cwd=self.base,  # the launcher must enter its own folder from here
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            encoding="ascii",
+            errors="replace",
+            timeout=120,
+        )
+        return result.returncode, result.stdout + result.stderr
+
+    def test_the_launcher_runs_the_scan_from_its_own_folder(self):
+        code, out = self.run_launcher("--help")
+        self.assertEqual(code, 1, out)
+        self.assertIn("[ERRO] Nao encontrei .venv\\Scripts\\python.exe nesta pasta.", out)
+        self.assertIn("varrer_windows.cmd terminou com codigo 1.", out)
+        venv = subprocess.run(
+            [sys.executable, "-m", "venv", "--without-pip", str(self.project / ".venv")],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        self.assertEqual(venv.returncode, 0, venv.stderr)
+        code, out = self.run_launcher("--help")
+        self.assertEqual(code, 0, out)
+        self.assertIn("usage: python -m pocketautonomo.scan", out)
+        self.assertIn("--cycles", out)
+        self.assertIn("varrer_windows.cmd terminou com codigo 0.", out)
+        code, out = self.run_launcher("--url", "http://example.org/")
+        self.assertEqual(code, 2, out)
+        self.assertIn("varrer_windows.cmd terminou com codigo 2.", out)
+        self.assertFalse((self.project / "runtime").exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,774 @@
+"""Tests of the favorites scan, pocketautonomo.scan.
+
+No test here opens a browser or reaches the network, and none needs Playwright.
+FakePlatform is a trading screen in memory, with its own clock: after a click on a
+favorite, the asset's name, the payout and the chart change at different moments, as the
+delays of each test say. FakeScanSession stands in for ScanSession on top of it; its waits
+only move that clock. Every name, selector and value below was invented for the tests;
+none came from the real platform.
+"""
+
+import ast
+import contextlib
+import csv
+import io
+import json
+import math
+import os
+import subprocess
+import sys
+import tempfile
+import types
+import unittest
+from datetime import timedelta
+from pathlib import Path
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # chart_images and test_observe
+
+import chart_images  # noqa: E402
+from test_observe import BLUE_MARKER, FORBIDDEN_ATTRIBUTES, START, Answers, shown  # noqa: E402
+
+from pocketautonomo import observe, scan  # noqa: E402
+
+ROOT = Path(__file__).resolve().parent.parent
+URL = "https://pocketoption.com/pt/tela-de-teste/"  # invented path, never opened
+ASSET, QUOTE, PAYOUT, CHART, FAVORITES = "#ativo", "#cotacao", "#payout", "#grafico", ".fav"
+EUR = ("EUR/USD OTC", "+92%", 1.08530)
+GBP = ("GBP/USD OTC", "+90%", 1.27340)
+AUD = ("AUD/CAD OTC", "+85%", 0.91210)
+
+
+class FakeItem:
+    """One element of the favorites selector; target is the asset its click selects, or None."""
+
+    def __init__(self, text, target=None, visible=True, width=110.0, height=32.0, fields=0):
+        self.text, self.target, self.visible = text, target, visible
+        self.width, self.height, self.fields = width, height, fields
+
+
+class FakePlatform:
+    """The trading screen: assets, the favorites bar and what a click changes, and when.
+
+    named, paid and drawn are the assets shown by the asset field, the payout field and the
+    chart. A click on a favorite changes each of them after its own delay, in seconds of
+    the platform's clock, which only waits and readings move.
+    """
+
+    def __init__(self, assets=(EUR, GBP, AUD), selected=0, delays=(0.2, 0.3, 0.4)):
+        self.assets = [list(asset) for asset in assets]  # name, payout text or None, base or None
+        self.items = [FakeItem(f"{name}\n{payout.lstrip('+') if payout else ''}", index) for index, (name, payout, _) in enumerate(assets)]
+        self.named = self.paid = self.drawn = selected
+        self.delays = dict(zip(("named", "paid", "drawn"), delays))
+        self.t = 0.0
+        self.pending = []
+        self.clicks = []  # (time, index of the favorite)
+        self.ignored = set()  # favorites whose click changes nothing
+        self.removed_on_click = set()  # favorites that a click removes from the bar
+        self.form_fields = 0
+        self.url = URL
+        self.suggestions = {}  # selector -> what ScanSession.class_suggestions finds
+        self.other_lists = {}  # selector other than FAVORITES -> the FakeItems it finds
+
+    def now(self):
+        return START + timedelta(seconds=self.t)
+
+    def monotonic(self):
+        return 100.0 + self.t
+
+    def advance(self, seconds):
+        self.t += seconds
+        for event in [event for event in self.pending if event[0] <= self.t]:
+            self.pending.remove(event)
+            setattr(self, event[1], event[2])
+
+    def click(self, index):
+        self.clicks.append((round(self.t, 3), index))
+        item = self.items[index]
+        if index in self.removed_on_click:
+            del self.items[index]
+            return
+        if item.target is None or index in self.ignored:
+            return
+        for attribute, delay in self.delays.items():
+            self.pending.append((self.t + delay, attribute, item.target))
+
+    def quote(self, index):
+        base = self.assets[index][2]
+        return None if base is None else f"{base + 0.00002 * math.sin(self.t * 3):.5f}"
+
+
+class PlatformEngine:
+    """Stands in for the OCR: it reads the quote that the chart shows now."""
+
+    def __init__(self, platform):
+        self.platform = platform
+
+    def recognize(self, gray):
+        return self.platform.quote(self.platform.drawn), 0.99
+
+
+class FakeScanSession:
+    """Stands in for ScanSession on top of FakePlatform; it records every call it gets.
+
+    on_wait(seconds), when given, runs after each wait: a test uses it to change the
+    platform or to press Ctrl+C at a chosen moment.
+    """
+
+    def __init__(self, platform, on_wait=None):
+        self.platform = platform
+        self.on_wait = on_wait
+        self.calls = []
+        self.waits = []
+        self.opened = []
+        self.window_closed = False
+        self.closes = 0
+
+    def open(self, url):
+        self.opened.append(url)
+
+    def current_url(self):
+        return self.platform.url
+
+    def is_closed(self):
+        return self.window_closed
+
+    def read(self, selector, timeout_ms):
+        platform = self.platform
+        platform.advance(0.005)
+        self.calls.append(("read", selector))
+        if selector == ASSET:
+            return shown(platform.assets[platform.named][0])
+        if selector == QUOTE:
+            text = platform.quote(platform.drawn)
+            return observe.ElementText(0) if text is None else shown(text)
+        if selector == PAYOUT:
+            payout = platform.assets[platform.paid][1]
+            return observe.ElementText(0) if payout is None else shown(payout)
+        return observe.ElementText(0)
+
+    def capture(self, selector, timeout_ms):
+        self.platform.advance(0.05)
+        self.calls.append(("capture", selector))
+        image = chart_images.chart(marker_y=150)
+        return observe.Capture(1, True, image, image.width, element_ms=3.0, screenshot_ms=40.0, decode_ms=5.0)
+
+    def favorite_items(self, selector, limit):
+        self.platform.advance(0.01)
+        self.calls.append(("list", selector))
+        items = self.platform.items if selector == FAVORITES else self.platform.other_lists.get(selector, [])
+        if not items or len(items) > limit:
+            return scan.FavoriteList(len(items))
+        return scan.FavoriteList(
+            len(items), tuple(item.text for item in items), tuple(item.visible for item in items), self.platform.form_fields
+        )
+
+    def click_favorite(self, selector, index, check):
+        item = self.platform.items[index]
+        problem = check(scan.FavoriteItem(item.text, item.visible, item.width, item.height, item.fields))
+        if problem is not None:
+            self.calls.append(("refused", index, problem))
+            return problem
+        self.calls.append(("click", index))
+        self.platform.click(index)
+        return None
+
+    def class_suggestions(self, selector, limit):
+        return self.platform.suggestions.get(selector, [])
+
+    def wait(self, seconds):
+        self.waits.append(seconds)
+        self.platform.advance(seconds)
+        if self.on_wait is not None:
+            self.on_wait(seconds)
+
+    def close(self):
+        self.closes += 1
+
+    def clicked(self):
+        return [call[1] for call in self.calls if call[0] == "click"]
+
+
+class ScanTestCase(unittest.TestCase):
+    """Every test uses its own runtime directory, with the collector's sources in it."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.runtime = Path(directory.name) / "runtime"
+        patcher = mock.patch.object(observe, "RUNTIME_DIR", self.runtime)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.write_sources()
+        self.write_favorites(FAVORITES)
+
+    def write_sources(self, **sources):
+        self.runtime.mkdir(parents=True, exist_ok=True)
+        data = {"asset": ASSET, "price": QUOTE, "payout": PAYOUT}
+        data.update(sources)
+        (self.runtime / observe.SELECTORS_FILE_NAME).write_text(json.dumps(data), encoding="utf-8")
+
+    def write_favorites(self, selector):
+        path = self.runtime / scan.SCAN_SELECTORS_FILE_NAME
+        if selector is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_text(json.dumps({"favorites": selector}), encoding="utf-8")
+
+    def run_scan(self, *args, platform, answers=("",), on_wait=None, engine=None, url=URL):
+        """main() with --url url and args on FakeScanSession; answers go to input()."""
+        session = FakeScanSession(platform, on_wait)
+        self.session = session
+        self.answers = Answers(answers)
+        self.opened_profiles = []
+
+        def open_session(profile_dir):
+            self.opened_profiles.append(profile_dir)
+            return session
+
+        argv = (["--url", url] if url is not None else []) + list(args)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = scan.main(
+                argv,
+                open_session=open_session,
+                read_line=self.answers,
+                now=platform.now,
+                monotonic=platform.monotonic,
+                engine=chart_images.FakeEngineHolder(engine) if engine is not None else None,
+            )
+        self.out, self.err = out.getvalue(), err.getvalue()
+        return code
+
+    def rows(self):
+        """The data rows of the only scan CSV, as dicts, after checking its header."""
+        files = sorted(self.runtime.glob("scan-*.csv"))
+        self.assertEqual(len(files), 1, files)
+        with open(files[0], newline="", encoding="utf-8") as file:
+            header, *rows = list(csv.reader(file))
+        self.assertEqual(tuple(header), scan.SCAN_COLUMNS)
+        return [dict(zip(header, row)) for row in rows]
+
+
+def in_range(quote, base):
+    return abs(float(quote) - base) < 0.001
+
+
+class SwitchTest(ScanTestCase):
+    def test_switches_between_favorites_and_records_each_asset(self):
+        platform = FakePlatform()
+        code = self.run_scan("--cycles", "2", "--interval", "7", platform=platform)
+        self.assertEqual((code, self.err), (0, ""), self.out)
+        rows = self.rows()
+        names = [EUR[0], GBP[0], AUD[0]]
+        self.assertEqual([row["asset"] for row in rows], names * 2)
+        self.assertEqual([row["cycle"] for row in rows], ["1"] * 3 + ["2"] * 3)
+        self.assertEqual([row["favorite_position"] for row in rows], ["1", "2", "3"] * 2)
+        self.assertEqual([row["switch"] for row in rows], ["já selecionado"] + ["confirmada"] * 5)
+        bases = dict(zip(names, (EUR[2], GBP[2], AUD[2])))
+        for row in rows:
+            self.assertTrue(in_range(row["price"], bases[row["asset"]]), row)  # never another asset's quote
+            self.assertEqual(row["completeness"], "completa")
+            self.assertEqual(row["asset_status"], f"ok: {ASSET}")
+        self.assertEqual([row["payout_percent"] for row in rows], ["92", "90", "85"] * 2)
+        self.assertEqual([row["payout_eligible"] for row in rows], ["sim", "sim", "não"] * 2)
+        # One click per switch, on the favorites only, in the order of the list.
+        self.assertEqual(self.session.clicked(), [1, 2, 0, 1, 2])
+        self.assertEqual(rows[1]["previous_asset"], EUR[0])
+        self.assertTrue(in_range(rows[1]["previous_quote"], EUR[2]))
+        self.assertEqual(rows[0]["previous_asset"], "")
+        for row in rows[1:]:
+            self.assertGreater(float(row["switch_ms"]), 0)
+            self.assertGreaterEqual(int(row["polls"]), 2)  # two readings in a row that agree
+        self.assertIn(7, self.session.waits)  # --interval between the two cycles
+        self.assertIn(
+            f"CICLO 1 | favorito 2 de 3, {GBP[0]} | COMPLETA | ativo {GBP[0]} | cotação do ativo", self.out
+        )
+        self.assertIn("payout 90% | ELEGÍVEL (payout ≥ 90%) | gravada no CSV", self.out)
+        self.assertIn("payout 85% | não elegível (payout < 90%) | gravada no CSV", self.out)
+        self.assertIn("  tempos: troca confirmada em ", self.out)
+        self.assertIn("Elegíveis (payout ≥ 90%): EUR/USD OTC, GBP/USD OTC.", self.out)
+        self.assertIn("não é probabilidade de vitória", self.out.lower())
+        self.assertIn("Concluído: 2 ciclos, 6 visitas a favoritos, 5 cliques em favoritos", self.out)
+        self.assertEqual(self.session.closes, 1)
+
+    def test_a_slow_switch_never_mixes_the_previous_asset(self):
+        # The name changes after 0.6 s, the payout after 1.9 s and the chart after 2.6 s:
+        # a reading right after the name changed would mix the new name with the old data.
+        platform = FakePlatform(assets=(EUR, GBP), delays=(0.6, 1.9, 2.6))
+        code = self.run_scan("--cycles", "1", platform=platform)
+        self.assertEqual((code, self.err), (0, ""), self.out)
+        first, second = self.rows()
+        self.assertEqual((second["asset"], second["payout_percent"]), (GBP[0], "90"))
+        self.assertTrue(in_range(second["price"], GBP[2]), second)
+        self.assertGreaterEqual(float(second["switch_ms"]), 600)
+        self.assertGreaterEqual(int(second["polls"]), 4)  # it waited for the chart and the payout
+        click_time = platform.clicks[0][0]
+        captured = observe.utc_text(START + timedelta(seconds=click_time + 2.6))
+        self.assertGreater(second["captured_at_utc"], captured)  # read after the chart changed
+
+    def test_a_chart_that_does_not_change_leaves_the_quote_unavailable(self):
+        platform = FakePlatform(assets=(EUR, GBP), delays=(0.2, 0.3, 60.0))
+        code = self.run_scan("--cycles", "1", "--load-timeout", "5", platform=platform)
+        self.assertEqual(code, 0, self.err)
+        second = self.rows()[1]
+        self.assertEqual((second["asset"], second["payout_percent"], second["price"]), (GBP[0], "90", ""))
+        self.assertEqual(second["completeness"], "parcial")
+        self.assertRegex(
+            second["price_status"],
+            r"^indisponível: a cotação lida, 1\.085\d\d, está a menos de 0,1% da lida no ativo anterior antes"
+            r" da troca, 1\.085\d\d: o gráfico pode ainda ser o do ativo anterior \(limite de 5 s por favorito\)$",
+        )
+        self.assertEqual(second["payout_eligible"], "sim")
+
+    def test_an_unconfirmed_switch_is_recorded_without_data(self):
+        platform = FakePlatform()
+        platform.ignored.add(1)  # the click on the second favorite changes nothing
+        code = self.run_scan("--cycles", "1", "--load-timeout", "5", platform=platform)
+        self.assertEqual(code, 0, self.err)
+        rows = self.rows()
+        self.assertEqual([row["switch"] for row in rows], ["já selecionado", "não confirmada", "confirmada"])
+        unconfirmed = rows[1]
+        self.assertEqual((unconfirmed["asset"], unconfirmed["price"], unconfirmed["payout_percent"]), ("", "", ""))
+        self.assertEqual(
+            unconfirmed["asset_status"],
+            f"indisponível: a troca para {GBP[0]} não foi confirmada em 5 s: o ativo na tela continuou {EUR[0]}",
+        )
+        self.assertTrue(unconfirmed["price_status"].startswith("indisponível: não lida: a troca para"))
+        self.assertEqual(unconfirmed["payout_eligible"], "indisponível")
+        self.assertEqual((rows[2]["asset"], rows[2]["completeness"]), (AUD[0], "completa"))
+        self.assertIn("troca NÃO confirmada em ", self.out)
+        self.assertIn(f"SEM CAMPOS | SEM LEITURA: a troca para {GBP[0]} não foi confirmada em 5 s", self.out)
+
+    def test_switches_that_keep_failing_end_the_cycle_without_more_clicks(self):
+        assets = (EUR, GBP, AUD, ("NZD/USD OTC", "+88%", 0.59870), ("USD/CHF OTC", "+91%", 0.88120))
+        platform = FakePlatform(assets=assets)
+        platform.ignored.update({1, 2, 3, 4})  # no click changes the asset
+        code = self.run_scan("--cycles", "1", "--load-timeout", "5", platform=platform)
+        self.assertEqual(code, 0, self.err)
+        self.assertEqual(self.session.clicked(), [1, 2, 3])  # the fifth favorite was never clicked
+        self.assertIn("3 trocas seguidas não foram confirmadas: o ciclo 1 termina aqui", self.out)
+        self.assertEqual([row["switch"] for row in self.rows()], ["já selecionado"] + ["não confirmada"] * 3)
+
+    def test_unavailable_fields_keep_their_reason(self):
+        platform = FakePlatform(assets=(EUR, ("USD/JPY OTC", None, 151.235), ("BTC/USD OTC", "+80%", None)))
+        code = self.run_scan("--cycles", "1", "--load-timeout", "5", platform=platform)
+        self.assertEqual(code, 0, self.err)
+        _, no_payout, no_quote = self.rows()
+        self.assertEqual((no_payout["asset"], no_payout["payout_percent"]), ("USD/JPY OTC", ""))
+        self.assertEqual(
+            no_payout["payout_status"],
+            "indisponível: o seletor não encontrou nenhum elemento (limite de 5 s por favorito)",
+        )
+        self.assertEqual((no_payout["payout_eligible"], no_payout["completeness"]), ("indisponível", "parcial"))
+        self.assertTrue(in_range(no_payout["price"], 151.235))
+        self.assertEqual((no_quote["asset"], no_quote["price"], no_quote["payout_eligible"]), ("BTC/USD OTC", "", "não"))
+        self.assertEqual(
+            no_quote["price_status"],
+            "indisponível: o seletor não encontrou nenhum elemento (limite de 5 s por favorito)",
+        )
+        self.assertIn("payout INDISPONÍVEL (o seletor não encontrou nenhum elemento (limite de 5 s por favorito)) | elegibilidade indisponível (sem payout)", self.out)
+
+    def test_without_the_quote_before_the_click_the_new_quote_is_unavailable(self):
+        platform = FakePlatform(assets=(EUR, GBP))
+        platform.assets[0][2] = None  # the first chart has no readable quote
+        code = self.run_scan("--cycles", "1", "--load-timeout", "5", platform=platform)
+        self.assertEqual(code, 0, self.err)
+        second = self.rows()[1]
+        self.assertEqual((second["asset"], second["previous_quote"], second["price"]), (GBP[0], "", ""))
+        self.assertEqual(second["price_status"], f"indisponível: {scan.NO_REFERENCE}")
+        self.assertEqual(second["payout_percent"], "90")
+
+    def test_the_visual_reading_of_the_quote_goes_into_the_scan(self):
+        self.write_sources(price="", price_ocr={"chart": CHART, "marker": BLUE_MARKER})
+        platform = FakePlatform(assets=(EUR, GBP))
+        code = self.run_scan("--cycles", "1", platform=platform, engine=PlatformEngine(platform))
+        self.assertEqual((code, self.err), (0, ""), self.out)
+        rows = self.rows()
+        self.assertTrue(in_range(rows[1]["price"], GBP[2]))
+        for row in rows:
+            self.assertEqual((row["price_source"], row["price_status"]), ("ocr", f"ok: ocr {CHART}"))
+            self.assertGreater(float(row["price_capture_ms"]), 0)
+        self.assertRegex(self.out, r"cotação \d+ ms \(captura \d+ ms \(elemento 3, tela 40, decodificação 5\), detecção \d+ ms, OCR \d+ ms\)")
+
+
+class EligibilityTest(unittest.TestCase):
+    def test_eligibility_is_a_payout_of_90_or_more(self):
+        cases = {"89": "não", "89,9": "não", "89.99": "não", "90": "sim", "90,0": "sim", "92": "sim", "100": "sim"}
+        for payout, expected in cases.items():
+            with self.subTest(payout=payout):
+                self.assertEqual(scan.eligibility(observe.FieldReading(payout, "ok: #payout")), expected)
+        self.assertEqual(scan.eligibility(observe.unavailable("o seletor não encontrou nenhum elemento")), "indisponível")
+
+
+class FavoritesTest(unittest.TestCase):
+    def listing(self, *texts, visible=None, fields=0):
+        visible = visible or (True,) * len(texts)
+        return scan.FavoriteList(len(texts), texts, tuple(visible), fields)
+
+    def test_each_favorite_names_its_asset(self):
+        favorites = scan.classify(
+            FAVORITES,
+            self.listing("EUR/USD OTC\n92%", "+90% GBP/USD OTC", "★", "92%", "", "EUR/USD OTC 91%", "AUD/CAD OTC", visible=(True,) * 6 + (False,)),
+        )
+        self.assertIsNone(favorites.problem)
+        self.assertEqual([item.name for item in favorites.usable], ["EUR/USD OTC", "GBP/USD OTC"])
+        problems = [item.problem for item in favorites.items]
+        self.assertIn("não parece um ativo", problems[2])
+        self.assertTrue(problems[3].startswith("o texto só tem um percentual"))
+        self.assertEqual(problems[4], "o elemento está sem texto")
+        self.assertEqual(problems[5], "repete o favorito 1")
+        self.assertEqual(problems[6], "o elemento não está visível")
+        self.assertEqual(scan.asset_key("GBP/USD OTC"), scan.asset_key("gbpusd  otc"))
+        self.assertNotEqual(scan.asset_key("EUR/USD"), scan.asset_key("EUR/USD OTC"))
+
+    def test_a_selector_that_finds_a_financial_element_is_refused_as_a_whole(self):
+        for texts, fields, word in (
+            (("EUR/USD OTC", "BUY"), 0, "'buy'"),
+            (("EUR/USD OTC", "Vender"), 0, "'vender'"),
+            (("EUR/USD OTC", "Amount 10"), 0, "'amount'"),
+            (("EUR/USD OTC", "GBP/USD OTC"), 1, "campo de formulário"),
+        ):
+            with self.subTest(texts=texts, fields=fields):
+                favorites = scan.classify(FAVORITES, self.listing(*texts, fields=fields))
+                self.assertTrue(favorites.unsafe)
+                self.assertEqual(favorites.usable, [])
+                self.assertIn(word, favorites.problem)
+        crowded = scan.classify("div", scan.FavoriteList(scan.MAX_FAVORITES + 1))
+        self.assertTrue(crowded.unsafe)
+        self.assertIn("mais que 30", crowded.problem)
+        self.assertFalse(scan.classify(FAVORITES, scan.FavoriteList(0)).unsafe)
+
+    def test_the_element_is_checked_again_right_before_the_click(self):
+        [target] = scan.classify(FAVORITES, self.listing("EUR/USD OTC 92%")).usable
+        check = scan.click_check(target)
+        self.assertIsNone(check(scan.FavoriteItem("EUR/USD OTC\n92%", True, 110, 32)))
+        self.assertIsNone(check(scan.FavoriteItem("EUR/USD OTC 91%", True, 110, 32)))  # only the payout changed
+        refusals = {
+            "mudou antes do clique": scan.FavoriteItem("GBP/USD OTC 90%", True, 110, 32),
+            "'sell'": scan.FavoriteItem("SELL", True, 110, 32),
+            "deixou de estar visível": scan.FavoriteItem("EUR/USD OTC 92%", False),
+            "campo de formulário": scan.FavoriteItem("EUR/USD OTC 92%", True, 110, 32, 1),
+            "grande demais": scan.FavoriteItem("EUR/USD OTC 92%", True, 900, 300),
+        }
+        for reason, item in refusals.items():
+            with self.subTest(reason=reason):
+                self.assertIn(reason, check(item))
+
+
+class SafetyTest(ScanTestCase):
+    def test_a_financial_element_in_the_favorites_stops_the_scan_without_clicks(self):
+        for extra, fields in ((FakeItem("BUY"), 0), (FakeItem("SELL"), 0), (None, 1)):
+            with self.subTest(extra=extra and extra.text, fields=fields):
+                platform = FakePlatform()
+                if extra is not None:
+                    platform.items.append(extra)
+                platform.form_fields = fields
+                code = self.run_scan("--cycles", "1", platform=platform)
+                self.assertEqual(code, 1)
+                self.assertIn("PARADA: o seletor dos favoritos deixou de servir:", self.err)
+                self.assertEqual(self.session.clicked(), [])
+                self.assertEqual(platform.clicks, [])
+
+    def test_a_button_that_appears_in_the_list_stops_the_scan_before_the_next_click(self):
+        platform = FakePlatform()
+
+        def add_buy_button(seconds):
+            if len(platform.clicks) == 1 and not any(item.text == "BUY" for item in platform.items):
+                platform.items.append(FakeItem("BUY"))
+
+        code = self.run_scan("--cycles", "1", platform=platform, on_wait=add_buy_button)
+        self.assertEqual(code, 1)
+        self.assertEqual(self.session.clicked(), [1])  # the second click never happened
+        self.assertIn("com 'buy'", self.err)
+        self.assertEqual([row["asset"] for row in self.rows()], [EUR[0], GBP[0]])  # kept in the CSV
+
+    def test_a_favorite_that_a_click_removed_stops_the_scan(self):
+        platform = FakePlatform()
+        platform.removed_on_click.add(1)
+        code = self.run_scan("--cycles", "1", platform=platform)
+        self.assertEqual(code, 1)
+        self.assertIn("o último favorito clicado sumiu da lista de favoritos", self.err)
+        self.assertEqual(self.session.clicked(), [1])
+
+    def test_a_page_outside_pocketoption_is_neither_read_nor_clicked(self):
+        platform = FakePlatform()
+        left = []
+
+        def leave(seconds):
+            if platform.clicks and not left:
+                platform.url = "https://example.org/fora"
+                left.append(len(self.session.calls))
+
+        code = self.run_scan("--cycles", "1", platform=platform, on_wait=leave)
+        self.assertEqual(code, 1)
+        self.assertIn(
+            "PARADA: a página atual (https://example.org) não está em pocketoption.com: a varredura não lê"
+            " nem clica fora dela e parou",
+            self.err,
+        )
+        self.assertEqual(self.session.clicked(), [1])
+        self.assertEqual(self.session.calls[left[0]:], [])  # nothing was read or clicked after it left
+
+    def test_the_scan_has_a_single_click_and_only_on_a_favorite(self):
+        tree = ast.parse((ROOT / "pocketautonomo" / "scan.py").read_text(encoding="utf-8"))
+        acting = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute) and node.attr in FORBIDDEN_ATTRIBUTES | {"sleep", "screenshot"}
+        ]
+        self.assertEqual([node.attr for node in acting], ["click"])
+        names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+        self.assertEqual(names & {"getattr", "setattr", "eval", "exec", "__import__"}, set())
+        [session_class] = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "ScanSession"]
+        [method] = [node for node in ast.walk(session_class) if isinstance(node, ast.FunctionDef) and node.name == "click_favorite"]
+        calls = [
+            node
+            for node in ast.walk(method)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "click"
+        ]
+        self.assertEqual(len(calls), 1)  # the one click of the program is in click_favorite
+        self.assertEqual(calls[0].args, [])
+        self.assertEqual({keyword.arg for keyword in calls[0].keywords}, {"timeout"})  # no force, no position
+
+
+class RunTest(ScanTestCase):
+    def test_ctrl_c_keeps_the_lines_written_and_closes_everything(self):
+        platform = FakePlatform()
+
+        def press_ctrl_c(seconds):
+            if len(platform.clicks) == 1 and seconds == scan.POLL_SECONDS:
+                raise KeyboardInterrupt
+
+        code = self.run_scan("--cycles", "3", platform=platform, on_wait=press_ctrl_c)
+        self.assertEqual(code, 130)
+        self.assertEqual([row["asset"] for row in self.rows()], [EUR[0]])  # written before Ctrl+C
+        self.assertIn("Interrompido por Ctrl+C: 1 ciclo, 1 visita a favoritos, 1 clique em favoritos", self.out)
+        self.assertIn(f"  {EUR[0]}: 1 visita, 1 completa; última cotação 1.085", self.out)
+        self.assertEqual(self.session.closes, 1)
+        scan.ScanLock(self.runtime / scan.LOCK_FILE_NAME).release()  # the lock was released
+
+    def test_without_cycles_it_scans_until_ctrl_c(self):
+        platform = FakePlatform(assets=(EUR, GBP))
+        pauses = []
+
+        def stop_on_the_third_pause(seconds):
+            if seconds == 3:
+                pauses.append(seconds)
+                if len(pauses) == 3:
+                    raise KeyboardInterrupt
+
+        code = self.run_scan("--interval", "3", platform=platform, on_wait=stop_on_the_third_pause)
+        self.assertEqual(code, 130)
+        self.assertEqual(len(self.rows()), 6)  # three cycles of two favorites, line by line
+        self.assertIn("Varredura: até Ctrl+C, com 3 s entre um ciclo e o próximo", self.out)
+
+    def test_a_cycle_without_complete_readings_waits_longer(self):
+        platform = FakePlatform(assets=(("EUR/USD OTC", None, 1.0853), ("GBP/USD OTC", None, 1.2734)))
+
+        def payouts_come_back(seconds):
+            if seconds == 8:  # the longer pause after the first cycle
+                platform.assets[0][1] = platform.assets[1][1] = "+92%"
+
+        code = self.run_scan("--cycles", "3", "--interval", "4", "--load-timeout", "5", platform=platform, on_wait=payouts_come_back)
+        self.assertEqual(code, 0, self.err)
+        pauses = [seconds for seconds in self.session.waits if seconds >= 4]
+        self.assertEqual(pauses, [8, 4])  # doubled after a cycle without complete readings, then back
+        self.assertIn("Nenhuma leitura completa: próximo ciclo em 8 s, com espera maior para não insistir.", self.out)
+        self.assertEqual([row["completeness"] for row in self.rows()], ["parcial"] * 2 + ["completa"] * 4)
+        self.assertEqual(scan.pause_seconds(10, 5), 120)
+        self.assertEqual(scan.pause_seconds(200, 2), 200)
+
+    def test_a_second_scan_is_refused_while_one_runs(self):
+        lock = scan.ScanLock(self.runtime / scan.LOCK_FILE_NAME)
+        self.addCleanup(lock.release)
+        code = self.run_scan("--cycles", "1", platform=FakePlatform())
+        self.assertEqual(code, 1)
+        self.assertIn("PARADA: outra varredura já está rodando com esta pasta", self.err)
+        self.assertEqual(self.opened_profiles, [])  # the browser never opened
+
+    def test_the_configuration_must_be_there_before_the_browser_opens(self):
+        cases = (
+            ({"asset": ""}, FAVORITES, "não tem o seletor do ativo"),
+            ({}, None, "não tem o seletor dos favoritos. Rode com --configure"),
+        )
+        for sources, favorites, message in cases:
+            with self.subTest(message=message):
+                self.write_sources(**sources)
+                self.write_favorites(favorites)
+                code = self.run_scan("--cycles", "1", platform=FakePlatform())
+                self.assertEqual(code, 2)
+                self.assertIn("CONFIGURAÇÃO: ", self.err)
+                self.assertIn(message, self.err)
+                self.assertEqual(self.opened_profiles, [])
+
+    def test_the_window_closed_ends_the_scan_with_what_it_recorded(self):
+        platform = FakePlatform()
+
+        def close_window(seconds):
+            if platform.clicks:
+                self.session.window_closed = True
+
+        code = self.run_scan("--cycles", "2", platform=platform, on_wait=close_window)
+        self.assertEqual(code, 0, self.err)
+        self.assertIn("A janela do navegador foi fechada; a varredura terminou.", self.out)
+        self.assertEqual([row["asset"] for row in self.rows()], [EUR[0]])
+
+    def test_runs_with_python_dash_m(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = dict(os.environ, PYTHONPATH=str(ROOT), PYTHONIOENCODING="utf-8")
+
+            def run(*args):
+                return subprocess.run(
+                    [sys.executable, "-m", "pocketautonomo.scan", *args],
+                    cwd=directory,
+                    env=env,
+                    capture_output=True,
+                    encoding="utf-8",
+                    timeout=60,
+                )
+
+            shown_help = run("--help")
+            self.assertEqual(shown_help.returncode, 0, shown_help.stderr)
+            for option in ("--cycles", "--interval", "--load-timeout", "--configure"):
+                self.assertIn(option, shown_help.stdout)
+            self.assertEqual(run("--url", "https://example.org/?ssid=SEGREDO").returncode, 2)
+            self.assertEqual(run("--interval", "0").returncode, 2)
+            self.assertEqual(run("--load-timeout", "500").returncode, 2)
+            self.assertFalse((Path(directory) / "runtime").exists())
+
+
+class ConfigureTest(ScanTestCase):
+    def test_configure_lists_the_favorites_and_saves_the_selector(self):
+        self.write_favorites(None)
+        sources = (self.runtime / observe.SELECTORS_FILE_NAME).read_bytes()
+        platform = FakePlatform()
+        platform.items.append(FakeItem("★"))  # not an asset: listed and ignored
+        platform.other_lists[".um"] = platform.items[:1]  # like a selector copied from one favorite
+        platform.suggestions[".um"] = [(".fav", 4)]
+        answers = ["", ".um", FAVORITES, ""]  # login; one element; the right selector; accept
+        code = self.run_scan("--configure", "--cycles", "1", platform=platform, answers=answers)
+        self.assertEqual((code, self.err), (0, ""), self.out)
+        self.assertEqual(self.answers.pending, [])
+        self.assertIn("O seletor .um encontrou agora 1 elemento.", self.out)
+        self.assertIn("Para varrer, o seletor precisa encontrar todos os favoritos, não só um.", self.out)
+        self.assertIn("ainda não conferidos: .fav (4 elementos). Cole um para ver a lista.", self.out)
+        self.assertIn("O seletor .fav encontrou agora 4 elementos.", self.out)
+        self.assertIn(f"    1: {EUR[0]} (selecionado agora) | texto 'EUR/USD OTC 92%'", self.out)
+        self.assertIn("    4: ignorado, texto sem letras, não parece um ativo", self.out)
+        self.assertIn(f"O ativo selecionado agora, {EUR[0]}, é o favorito 1", self.out)
+        saved = json.loads((self.runtime / scan.SCAN_SELECTORS_FILE_NAME).read_text(encoding="utf-8"))
+        self.assertEqual(saved["favorites"], FAVORITES)
+        self.assertEqual((self.runtime / observe.SELECTORS_FILE_NAME).read_bytes(), sources)  # untouched
+        self.assertEqual(len(self.rows()), 3)
+        self.assertEqual(self.session.clicked(), [1, 2])
+
+    def test_a_refused_selector_cannot_be_accepted(self):
+        platform = FakePlatform()
+        platform.items.append(FakeItem("COMPRAR"))
+        answers = ["", "", "", "-"]  # login; keep .fav; Enter reads it again; cancel
+        code = self.run_scan("--configure", "--cycles", "1", platform=platform, answers=answers)
+        self.assertEqual(code, 2)
+        self.assertEqual(self.out.count("Este seletor não pode ser usado: o seletor também encontra o elemento 4"), 2)
+        self.assertIn("CONFIGURAÇÃO: a varredura precisa do seletor dos favoritos", self.err)
+        self.assertEqual(platform.clicks, [])
+        saved = json.loads((self.runtime / scan.SCAN_SELECTORS_FILE_NAME).read_text(encoding="utf-8"))
+        self.assertEqual(saved, {"favorites": FAVORITES})  # unchanged
+
+    def test_one_element_shows_selectors_from_its_classes(self):
+        platform = FakePlatform()
+        session = FakeScanSession(platform)
+        platform.suggestions["#um"] = [(".fav", 3), (".item.fav", 3)]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            scan.suggest_selectors(session, "#um")
+        self.assertIn("Tirados das classes desse elemento, e ainda não conferidos: .fav (3 elementos), .item.fav (3 elementos)", out.getvalue())
+
+
+class FakeElement:
+    """A Playwright locator for ScanSession: one element of FAKE_DOM, or the matches of a selector."""
+
+    def __init__(self, page, selector, index=None, inside=False):
+        self.page, self.selector, self.index, self.inside = page, selector, index, inside
+
+    def _matches(self):
+        found = self.page.dom.get(self.selector, [])
+        return found if self.index is None else found[self.index:self.index + 1]
+
+    def count(self):
+        self.page.calls.append(("count", self.selector, self.index, self.inside))
+        if self.inside:  # form fields inside the matches
+            return sum(element.get("fields", 0) for element in self.page.dom.get(self.selector, []))
+        return len(self._matches())
+
+    def all_inner_texts(self):
+        self.page.calls.append(("all_inner_texts", self.selector))
+        return [element["text"] for element in self._matches()]
+
+    def nth(self, index):
+        return FakeElement(self.page, self.selector, index)
+
+    def is_visible(self):
+        self.page.calls.append(("is_visible", self.selector, self.index))
+        return self._matches()[0].get("visible", True)
+
+    def inner_text(self, *, timeout):
+        self.page.calls.append(("inner_text", self.selector, self.index))
+        return self._matches()[0]["text"]
+
+    def bounding_box(self, *, timeout):
+        return {"x": 0, "y": 0, "width": 100, "height": 30}
+
+    def locator(self, selector):
+        return FakeElement(self.page, self.selector, self.index, inside=True)
+
+    def and_(self, other):
+        return types.SimpleNamespace(count=lambda: 0)
+
+    def click(self, *, timeout):
+        self.page.calls.append(("click", self.selector, self.index, timeout))
+        if self.page.opens_tab:
+            self.page.context.pages.append(object())
+
+
+class ScanSessionTest(unittest.TestCase):
+    """ScanSession on fake Playwright objects: what it reads, and its only click."""
+
+    def session(self, dom, opens_tab=False):
+        page = types.SimpleNamespace(dom=dom, calls=[], opens_tab=opens_tab)
+        page.locator = lambda selector: FakeElement(page, selector)
+        page.context = types.SimpleNamespace(pages=[page])
+        session = object.__new__(scan.ScanSession)
+        session._page, session._context, session._error_type = page, page.context, RuntimeError
+        return session, page
+
+    def test_listing_only_reads_and_the_click_comes_after_a_new_reading(self):
+        dom = {FAVORITES: [{"text": "EUR/USD OTC 92%"}, {"text": "GBP/USD OTC 90%"}]}
+        session, page = self.session(dom)
+        listing = session.favorite_items(FAVORITES, scan.MAX_FAVORITES)
+        self.assertEqual(listing, scan.FavoriteList(2, ("EUR/USD OTC 92%", "GBP/USD OTC 90%"), (True, True), 0))
+        self.assertNotIn("click", [call[0] for call in page.calls])
+        [target] = [item for item in scan.classify(FAVORITES, listing).usable if item.position == 2]
+        page.calls.clear()
+        self.assertIsNone(session.click_favorite(FAVORITES, 1, scan.click_check(target)))
+        kinds = [call[0] for call in page.calls]
+        self.assertEqual(kinds.count("click"), 1)
+        self.assertLess(kinds.index("inner_text"), kinds.index("click"))  # read again right before
+        self.assertEqual(page.calls[-1], ("click", FAVORITES, 1, scan.CLICK_TIMEOUT_MS))
+
+    def test_a_refused_element_is_not_clicked_and_a_new_tab_stops(self):
+        [target] = scan.classify(FAVORITES, scan.FavoriteList(1, ("EUR/USD OTC 92%",), (True,), 0)).usable
+        stale = scan.Favorite(1, "EUR/USD OTC 92%", "EUR/USD OTC")  # listed at index 1, then the list changed
+        for now_there, reason in (("GBP/USD OTC 90%", "mudou antes do clique"), ("BUY", "'buy'")):
+            with self.subTest(now_there=now_there):
+                session, page = self.session({FAVORITES: [{"text": "EUR/USD OTC 92%"}, {"text": now_there}]})
+                self.assertIn(reason, session.click_favorite(FAVORITES, 1, scan.click_check(stale)))
+                self.assertNotIn("click", [call[0] for call in page.calls])
+        session, page = self.session({FAVORITES: [{"text": "EUR/USD OTC 92%"}]}, opens_tab=True)
+        with self.assertRaises(observe.ObserverStopped) as stopped:
+            session.click_favorite(FAVORITES, 0, scan.click_check(target))
+        self.assertIn("abriu outra aba ou janela", str(stopped.exception))
+
+
+if __name__ == "__main__":
+    unittest.main()

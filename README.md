@@ -39,7 +39,7 @@ Rode todos os comandos abaixo na raiz do repositório, a pasta `claude`. No Wind
 
 No GitHub, o workflow [`.github/workflows/tests.yml`](.github/workflows/tests.yml) roda essa suíte e os dois exemplos finitos abaixo em Linux e Windows a cada push e pull request. As execuções ficam na [aba Actions](https://github.com/vickzinha9/claude/actions/workflows/tests.yml).
 
-Os testes do coletor em `tests/test_observe.py`, os da leitura visual em `tests/test_quote_reader.py` e os da preparação e dos lançadores em `tests/test_setup_observer.py` usam objetos falsos no lugar do navegador, do OCR, do `pip` e do `venv`, e imagens sintéticas de gráfico. Eles não precisam do Playwright nem do OCR. Os 4 testes de `PreparerOnWindowsTest` e o de `OpenImageOnWindowsTest` só rodam no Windows. Os 3 de `tests/test_observe_playwright.py` abrem um Chromium de verdade, sem janela, em páginas locais de teste, que não são a Pocket Option; um deles lê a cotação de um gráfico desenhado em canvas, com o OCR de verdade. Sem o Playwright ou o OCR eles aparecem como `skipped`, a menos que a variável `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1` exista: aí falham, como o job de navegador do CI exige.
+Os testes do coletor em `tests/test_observe.py`, os da leitura visual em `tests/test_quote_reader.py`, os da varredura dos favoritos em `tests/test_scan.py` e os da preparação e dos lançadores em `tests/test_setup_observer.py` usam objetos falsos no lugar do navegador, do OCR, do `pip` e do `venv`, e imagens sintéticas de gráfico. Eles não precisam do Playwright nem do OCR. Os 4 testes de `PreparerOnWindowsTest`, o de `OpenImageOnWindowsTest` e o de `ScanLauncherOnWindowsTest` só rodam no Windows. Os 4 de `tests/test_observe_playwright.py` abrem um Chromium de verdade, sem janela, em páginas locais de teste, que não são a Pocket Option; dois deles leem a cotação de um gráfico desenhado em canvas, com o OCR de verdade, e um desses varre uma barra de favoritos de teste, com cliques de verdade. Sem o Playwright ou o OCR eles aparecem como `skipped`, a menos que a variável `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1` exista: aí falham, como o job de navegador do CI exige.
 
 ## Simulação local
 
@@ -167,15 +167,16 @@ O CI roda numa máquina virtual do GitHub, com o `python` instalado pelo `setup-
 - o console interativo e um Ctrl+C de verdade;
 - o modo `--forever`, que só termina com Ctrl+C;
 - a saída redirecionada para arquivo sem `PYTHONIOENCODING=utf-8`;
-- no coletor, o que você ainda não testou: a correção do lançador sem o Python 3.12, a instalação do OCR, a leitura visual e a busca em texto da cotação, e um Ctrl+C de verdade. A janela visível, o login, o `--configure` e a leitura do ativo e do payout já funcionaram no seu computador.
+- no coletor, o que você ainda não testou: a correção do lançador sem o Python 3.12, a busca em texto da cotação e um Ctrl+C de verdade. A janela visível, o login, o `--configure`, a instalação do OCR e a leitura do ativo, da cotação, pela leitura visual, e do payout já funcionaram no seu computador;
+- a varredura dos favoritos inteira, com o `varrer_windows.cmd`.
 
 ## Coletor somente leitura da Pocket Option
 
-`python -m pocketautonomo.observe` abre a tela de operações num Chromium visível, espera você fazer o login e lê ativo, cotação do ativo e payout com as fontes que você conferiu. A cotação do ativo é o preço do ativo no gráfico, como `1.08534`; não é o valor da aposta, o campo **Amount** da Pocket Option. Nos arquivos, a cotação continua na chave `price`. Como o gráfico da Pocket Option desenha a cotação em canvas, sem texto, ela pode ser lida pela imagem do gráfico, com um OCR local (veja [Cotação do ativo](#cotação-do-ativo-texto-ou-leitura-visual)). **Não envia ordens, não clica em CALL/PUT e não faz operações financeiras.** A pesquisa, o método, o que foi comprovado e os passos de validação estão no [INTEGRATION.md](INTEGRATION.md).
+`python -m pocketautonomo.observe` abre a tela de operações num Chromium visível, espera você fazer o login e lê ativo, cotação do ativo e payout com as fontes que você conferiu. A cotação do ativo é o preço do ativo no gráfico, como `1.08534`; não é o valor da aposta, o campo **Amount** da Pocket Option. Nos arquivos, a cotação continua na chave `price`. Como o gráfico da Pocket Option desenha a cotação em canvas, sem texto, ela pode ser lida pela imagem do gráfico, com um OCR local (veja [Cotação do ativo](#cotação-do-ativo-texto-ou-leitura-visual)). **Não envia ordens, não clica em nada e não faz operações financeiras.** A [varredura dos favoritos](#varredura-dos-favoritos) usa o mesmo leitor e só acrescenta o clique nos favoritos. A pesquisa, o método, o que foi comprovado e os passos de validação estão no [INTEGRATION.md](INTEGRATION.md).
 
-### Windows: os dois lançadores
+### Windows: os lançadores
 
-Na raiz do projeto, a pasta `claude`, ficam dois arquivos. Abra-os nesta ordem, com dois cliques no Explorador de Arquivos ou pelo terminal (`.\preparar_windows.cmd` no PowerShell). Os dois entram sozinhos na pasta onde estão e esperam uma tecla no fim, para a janela não fechar antes de você ler.
+Na raiz do projeto, a pasta `claude`, ficam três arquivos. Abra os dois primeiros nesta ordem, com dois cliques no Explorador de Arquivos ou pelo terminal (`.\preparar_windows.cmd` no PowerShell); o terceiro, `varrer_windows.cmd`, faz a [varredura dos favoritos](#varredura-dos-favoritos). Os três entram sozinhos na pasta onde estão e esperam uma tecla no fim, para a janela não fechar antes de você ler.
 
 1. **`preparar_windows.cmd`** procura um Python 3.11 ou mais novo, de 64 bits, nesta ordem: `py -3.12`, `py -3` e `python`. Um candidato só é aceito se o teste dele terminar com código exatamente 0. Um código negativo, como o `-1610612730` que o `py` devolve quando falta o Python pedido, também é falha: o lançador mostra `py -3.12: nao serve (codigo -1610612730).` e tenta o próximo. Com o Python escolhido, ele roda `python -m pocketautonomo.setup_observer`, que:
    - cria `.venv` ou reutiliza a que já existe, se o Python dela servir;
@@ -285,6 +286,76 @@ As 13 primeiras colunas do CSV são as dos arquivos anteriores, na mesma ordem; 
 | 2 | argumento, link ou configuração inválidos, inclusive nenhum seletor, Playwright ausente e OCR ausente com leitura visual |
 | 130 | interrompido por Ctrl+C; as linhas já gravadas ficam no CSV |
 
+## Varredura dos favoritos
+
+`python -m pocketautonomo.scan` passa pelos seus ativos favoritos da Pocket Option, um de cada vez. Em cada um, ela clica no favorito, confere o ativo selecionado, espera os dados e lê ativo, cotação e payout com o leitor e as fontes do coletor, de `runtime/observe-selectors.json`. **O único clique é num favorito, para selecioná-lo: a varredura não envia ordens, nunca clica em BUY, SELL, CALL ou PUT e não mexe no Amount.** O método e os riscos estão nas seções 4 e 6 do [INTEGRATION.md](INTEGRATION.md).
+
+No Windows, use `varrer_windows.cmd`, que roda `python -m pocketautonomo.scan --configure` com o Python de `.venv` e passa os argumentos extras:
+
+```bat
+varrer_windows.cmd --cycles 2
+varrer_windows.cmd --interval 30
+varrer_windows.cmd
+```
+
+O último continua até Ctrl+C. O programa pede o link, abre o navegador para o seu login e, depois do Enter, pede o seletor dos favoritos (Enter mantém o gravado). Ele lê o seletor na hora e lista cada elemento encontrado: o nome do ativo tirado do texto, o motivo de cada elemento ignorado e se o ativo selecionado agora está na lista. Compare a lista com a barra de favoritos e pressione Enter para gravar e começar. O seletor precisa encontrar todos os favoritos, e só eles: use a tag e a classe comuns a eles, sem `:nth-child`. Se ele encontrar um só elemento, o programa sugere seletores tirados das classes desse elemento, ainda não conferidos. **Durante a varredura, não use a janela do navegador.**
+
+Cada favorito gera duas linhas, como estas, de um teste numa página local, que não é a Pocket Option:
+
+```
+CICLO 1 | favorito 2 de 3, GBP/USD OTC | COMPLETA | ativo GBP/USD OTC | cotação do ativo 1.27343 | payout 90% | ELEGÍVEL (payout ≥ 90%) | gravada no CSV
+  tempos: troca confirmada em 513 ms | dados em 1201 ms, 3 leituras | cotação 72 ms (captura 48 ms (elemento 5, tela 42, decodificação 2), detecção 3 ms, OCR 21 ms) | relógio local 2026-10-15T07:47:21.499+00:00
+```
+
+No fim de cada ciclo aparecem os elegíveis; no fim da varredura, ou depois de Ctrl+C, um resumo por ativo.
+
+**Elegível** quer dizer payout numérico de 90% ou mais: é o critério para uma futura primeira entrada, **não a probabilidade de vitória**. Os ativos abaixo de 90% também são gravados.
+
+**Regras contra misturar dois ativos.** Depois do clique, o nome do ativo, o payout e o gráfico mudam em momentos diferentes. Por isso:
+
+1. a troca só vale quando o campo do ativo mostra o nome do favorito, comparado só por letras e algarismos;
+2. depois da confirmação, a varredura espera 1 s e lê, a cada 0,5 s, o ativo, a cotação, o payout e o ativo de novo;
+3. um campo só é aceito quando duas leituras seguidas concordam: o mesmo ativo antes e depois, o mesmo payout e cotações a menos de 1% uma da outra;
+4. depois de uma troca, a cotação também precisa estar a mais de 0,1% da que o gráfico mostrava antes do clique, no ativo anterior. Sem essa cotação anterior, ela fica indisponível;
+5. o que não estabilizar até `--load-timeout` segundos depois do clique fica `INDISPONÍVEL (motivo)`, e a linha é gravada assim mesmo.
+
+Três trocas seguidas sem confirmação encerram o ciclo, sem clicar nos favoritos que faltam. A varredura para, com código 1 e sem clicar, quando o seletor encontra também um elemento com palavra de botão financeiro ou de dinheiro (BUY, SELL, CALL, PUT, COMPRAR, VENDER, Amount e outras), um campo de formulário ou mais de 30 elementos, quando a página sai de pocketoption.com, quando um clique abre outra aba e quando o favorito clicado some da lista. Só uma varredura roda por vez.
+
+| Opção | Significado |
+|---|---|
+| `--url LINK` | link `https://` de pocketoption.com ou de um subdomínio dele; sem ele, o programa pede o link no terminal |
+| `--configure` | depois do login, pede o seletor dos favoritos, lista o que ele encontra e o grava antes da varredura; sem esta opção, o seletor precisa estar gravado |
+| `--cycles N` | quantos ciclos fazer, cada um passando uma vez por todos os favoritos; sem esta opção, continua até Ctrl+C |
+| `--interval S` | segundos entre o fim de um ciclo e o começo do próximo (padrão 10, mínimo 1). Depois de um ciclo sem nenhuma leitura completa, a espera dobra a cada ciclo assim, até 120 s, e volta ao normal com uma leitura completa |
+| `--load-timeout S` | segundos, depois do clique, para confirmar o ativo e ter dados estáveis (padrão 20, de 5 a 120) |
+
+| Arquivo, em `runtime/` | Conteúdo |
+|---|---|
+| `scan-selectors.json` | o seletor dos favoritos (`favorites`), gravado pelo `--configure`; um arquivo inválido é guardado como `scan-selectors.invalido-<data>-<hora>-<sufixo>.json` antes de ser substituído |
+| `scan-<data>-<hora>-<sufixo>.csv` | um arquivo novo por execução, com uma linha por favorito por ciclo, gravada assim que a visita termina |
+| `scan.lock` | a trava que impede duas varreduras ao mesmo tempo; pode ficar na pasta depois do fim |
+
+O CSV da varredura tem as 16 colunas do coletor, descritas acima, e mais estas:
+
+| Coluna | Conteúdo |
+|---|---|
+| `cycle` | número do ciclo |
+| `favorite_position` | posição do favorito na lista, a partir de 1 |
+| `favorite_text` | texto do favorito, como lido |
+| `switch` | `já selecionado`, `confirmada`, `não confirmada` ou `não clicado` |
+| `previous_asset`, `previous_quote` | ativo e cotação na tela antes do clique; a cotação nova precisa ser diferente dessa |
+| `switch_ms` | milissegundos do clique até a confirmação do ativo |
+| `load_ms` | milissegundos da confirmação até os dados estáveis, ou até o limite |
+| `polls` | quantas leituras dos dados a visita fez |
+| `payout_eligible` | `sim` com payout de 90% ou mais, `não` abaixo disso, `indisponível` sem payout |
+
+| Código | Situação |
+|---|---|
+| 0 | terminou com pelo menos uma linha com dados |
+| 1 | falhou, parou por segurança ou não gravou nenhuma linha com dados |
+| 2 | argumento, link ou configuração inválidos, inclusive sem o seletor do ativo em `observe-selectors.json`, sem o seletor dos favoritos fora do `--configure` e Playwright ou OCR ausentes |
+| 130 | interrompido por Ctrl+C; as linhas já gravadas ficam no CSV |
+
 ## Situação
 
-O [STATUS.md](STATUS.md) descreve o que já funciona, as decisões em vigor e o que falta: a validação do coletor na plataforma real, a estratégia e o executor real.
+O [STATUS.md](STATUS.md) descreve o que já funciona, as decisões em vigor e o que falta: a validação da varredura na plataforma real, a análise CALL/PUT e o executor real.

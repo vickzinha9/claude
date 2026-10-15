@@ -1,12 +1,14 @@
-"""PlaywrightSession and the collector on a real Chromium, headless, with a local test page.
+"""PlaywrightSession, the collector and the favorites scan on a real Chromium, headless.
 
 These tests run only where Playwright and its Chromium are installed. Elsewhere, as in the
 main CI jobs, they are skipped, unless POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1, which makes
-a missing Playwright fail them instead: the Windows browser job of the CI sets it. The page
-below was written for these tests and is served by Playwright itself for the reserved name
-observe.test, so nothing goes to the network and nothing here touches the Pocket Option.
-Its CALL and PUT buttons count their clicks, to show that the reading never clicks them.
-Passing here says nothing about the real platform.
+a missing Playwright fail them instead: the Windows browser job of the CI sets it. The
+pages below were written for these tests and are served by Playwright itself for the
+reserved name observe.test, so nothing goes to the network and nothing here touches the
+Pocket Option. Their CALL and PUT buttons, and the BUY and SELL buttons and the Amount
+field of the favorites page, count what reaches them, to show that the reading never
+clicks them and that the scan clicks only favorites. Passing here says nothing about the
+real platform.
 """
 
 import contextlib
@@ -23,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from pocketautonomo import observe
+from pocketautonomo import observe, scan
 
 HAVE_PLAYWRIGHT = importlib.util.find_spec("playwright") is not None
 HAVE_OCR = HAVE_PLAYWRIGHT and importlib.util.find_spec("rapidocr") is not None
@@ -163,9 +165,6 @@ class RealChromiumTest(unittest.TestCase):
         self.assertIn("Navegador fechado.", out.getvalue())
         self.assertNotIn("SEGREDO", out.getvalue() + path.read_text(encoding="utf-8"))
 
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 # The local chart starts still at CALIBRATION_QUOTE, with its marker over a green candle,
@@ -330,3 +329,164 @@ class RealVisualQuoteTest(unittest.TestCase):
             capture, detection, ocr = (float(value) for value in row[13:16])
             self.assertTrue(capture > 0 and detection > 0 and ocr > 0, row)
         self.assertGreater(len({row[4] for row in rows}), 1)  # the quote changed between readings
+
+
+# The favorites page: three favorites, the asset and payout fields, a canvas chart with an
+# opaque quote marker, and BUY, SELL, CALL, PUT and an Amount field that count what reaches
+# them. A click on a favorite changes the asset's name after ASSET_DELAY ms, the payout after
+# PAYOUT_DELAY ms and the chart after CHART_DELAY ms, so that a reading right after the name
+# changed would mix the new asset with the old payout and the old quote.
+SCAN_ASSETS = (("EUR/USD OTC", 92, 1.08530), ("GBP/USD OTC", 90, 1.27340), ("AUD/CAD OTC", 85, 0.91210))
+SCAN_URL = "https://observe.test/favoritos/?ssid=SEGREDO"
+# The marker as a calibration of this chart saves it: opaque #2962ff, 78x18 px, 1 px from the
+# right edge of the canvas.
+SCAN_MARKER = {"colors": ["#2962ff"], "width": 78.0, "height": 18.0, "right_gap": 1.0, "tolerance": 40}
+SCAN_PAGE = """<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><title>Favoritos de teste local</title>
+<style>
+  body { margin: 0; background: #11131c; color: #ccc; font-family: Arial, sans-serif; }
+  #favs { display: flex; gap: 8px; padding: 8px; }
+  .fav { padding: 6px 10px; background: #222634; border-radius: 4px; cursor: pointer; }
+  #wrap { position: relative; width: 700px; height: 360px; margin: 10px; }
+  #plot { position: absolute; left: 0; top: 0; width: 700px; height: 360px; }
+</style></head>
+<body>
+<div id="favs"></div>
+<div id="asset"></div>
+<div id="payout"></div>
+<div id="wrap"><canvas id="plot"></canvas></div>
+<p>Página de teste do PocketAutonomo, com favoritos; não é a Pocket Option.</p>
+<p>Amount <input id="amount" value="10"></p>
+<button class="trade" id="buy">BUY</button> <button class="trade" id="sell">SELL</button>
+<button class="trade" id="call">CALL</button> <button class="trade" id="put">PUT</button>
+<span id="trade-clicks">0</span> <span id="amount-touches">0</span> <span id="fav-clicks">-</span>
+<script>
+const ASSETS = __ASSETS__;
+const ASSET_DELAY = 300, PAYOUT_DELAY = 1400, CHART_DELAY = 1700;
+let named = 0, paid = 0, drawn = 0, tick = 0;
+function bump(id) { const e = document.getElementById(id); e.textContent = String(Number(e.textContent) + 1); }
+document.querySelectorAll(".trade").forEach((b) => b.addEventListener("click", () => bump("trade-clicks")));
+for (const kind of ["focus", "input", "click"]) { document.getElementById("amount").addEventListener(kind, () => bump("amount-touches")); }
+ASSETS.forEach(([name, payout], i) => {
+  const item = document.createElement("div");
+  item.className = "fav";
+  item.innerHTML = name + ' <span class="pct">' + payout + "%</span>";
+  item.addEventListener("click", () => {
+    document.getElementById("fav-clicks").textContent += String(i + 1);
+    setTimeout(() => { named = i; render(); }, ASSET_DELAY);
+    setTimeout(() => { paid = i; render(); }, PAYOUT_DELAY);
+    setTimeout(() => { drawn = i; }, CHART_DELAY);
+  });
+  document.getElementById("favs").appendChild(item);
+});
+function render() {
+  document.getElementById("asset").textContent = ASSETS[named][0];
+  document.getElementById("payout").textContent = "+" + ASSETS[paid][1] + "%";
+}
+const dpr = window.devicePixelRatio || 1, W = 700, H = 360, AXIS = 620;
+const plot = document.getElementById("plot"); plot.width = W * dpr; plot.height = H * dpr;
+function draw() {
+  tick += 1;
+  const base = ASSETS[drawn][2], price = (base + 0.00003 * Math.sin(tick / 2)).toFixed(5);
+  const p = plot.getContext("2d");
+  p.setTransform(dpr, 0, 0, dpr, 0, 0);
+  p.fillStyle = "#141726"; p.fillRect(0, 0, W, H);
+  for (let x = 10, n = 0; x < AXIS - 30; x += 14, n++) {
+    p.fillStyle = n % 3 ? "#45b734" : "#ff3e1f"; p.fillRect(x, 100 + (n * 37) % 150, 9, 30 + n % 20);
+  }
+  const y = Math.round(180 + (Number(price) - base) * 200000);
+  p.fillStyle = "#2962ff"; p.fillRect(AXIS + 1, y - 9, 78, 18);
+  p.fillStyle = "#ffffff"; p.font = "12px Arial"; p.textBaseline = "middle"; p.fillText(price, AXIS + 6, y);
+}
+render(); draw(); setInterval(draw, 250);
+</script>
+</body></html>
+""".replace("__ASSETS__", json.dumps([list(asset) for asset in SCAN_ASSETS]))
+
+
+@unittest.skipUnless(HAVE_OCR or REQUIRED, "Playwright e OCR local (rapidocr) não estão instalados neste Python")
+class RealScanTest(unittest.TestCase):
+    """The favorites scan with real Chromium clicks and the real OCR, on the local favorites page."""
+
+    def setUp(self):
+        options = {"ignore_cleanup_errors": True} if sys.version_info >= (3, 10) else {}
+        directory = tempfile.TemporaryDirectory(**options)
+        self.addCleanup(directory.cleanup)
+        self.runtime = Path(directory.name) / "runtime"
+        for name, value in (
+            ("RUNTIME_DIR", self.runtime),
+            ("ALLOWED_DOMAIN", "observe.test"),
+            ("HOST_PATTERN", re.compile(r"observe\.test")),
+        ):
+            patcher = mock.patch.object(observe, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.counters = None
+
+    def open_session(self, profile_dir):
+        """A real ScanSession, headless, that reads the page's counters right before it closes."""
+        session = scan.open_scan_session(profile_dir, headless=True)
+        original_close = session.close
+        self.addCleanup(original_close)
+        session._context.route(
+            "https://observe.test/**",
+            lambda route: route.fulfill(status=200, content_type="text/html; charset=utf-8", body=SCAN_PAGE),
+        )
+
+        def close():
+            if not session.is_closed():
+                self.counters = {
+                    key: session.read(f"#{key}", 2_000).text for key in ("trade-clicks", "amount-touches", "fav-clicks")
+                }
+            original_close()
+
+        session.close = close
+        return session
+
+    def test_scan_clicks_only_favorites_and_never_mixes_two_assets(self):
+        self.runtime.mkdir(parents=True)
+        sources = {"asset": "#asset", "price": "", "payout": "#payout", "price_ocr": {"chart": "#plot", "marker": SCAN_MARKER}}
+        (self.runtime / observe.SELECTORS_FILE_NAME).write_text(json.dumps(sources), encoding="utf-8")
+        answers = iter([SCAN_URL, "", ".fav", ""])  # the link, Enter after the login, the favorites, accept
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = scan.main(
+                ["--configure", "--cycles", "2", "--interval", "1"],
+                open_session=self.open_session,
+                read_line=lambda prompt="": next(answers),
+            )
+        text = out.getvalue()
+        self.assertEqual((code, err.getvalue()), (0, ""), text)
+        self.assertEqual(list(answers), [])
+        self.assertIn("    1: EUR/USD OTC (selecionado agora) | texto 'EUR/USD OTC 92%'", text)
+        saved = json.loads((self.runtime / scan.SCAN_SELECTORS_FILE_NAME).read_text(encoding="utf-8"))
+        self.assertEqual(saved["favorites"], ".fav")
+        # Two favorite clicks in the first cycle and three in the second; nothing else was
+        # clicked, and the Amount field was never focused, clicked or typed in.
+        self.assertEqual(self.counters, {"trade-clicks": "0", "amount-touches": "0", "fav-clicks": "-23123"})
+        [path] = self.runtime.glob("scan-*.csv")
+        with open(path, newline="", encoding="utf-8") as file:
+            header, *rows = list(csv.reader(file))
+        self.assertEqual(tuple(header), scan.SCAN_COLUMNS)
+        rows = [dict(zip(header, row)) for row in rows]
+        names = [asset[0] for asset in SCAN_ASSETS]
+        self.assertEqual([row["asset"] for row in rows], names * 2)
+        self.assertEqual([row["switch"] for row in rows], ["já selecionado"] + ["confirmada"] * 5)
+        bases = {name: base for name, _, base in SCAN_ASSETS}
+        for row, (name, payout, base) in zip(rows, SCAN_ASSETS * 2):
+            # The quote, read by the OCR, and the payout are the selected asset's: never the
+            # previous asset's, although its name changed 1.1 s before its payout and 1.4 s
+            # before its chart.
+            self.assertEqual(row["completeness"], "completa", row)
+            self.assertLess(abs(float(row["price"]) - base), 0.0005, row)
+            self.assertEqual(row["payout_percent"], str(payout), row)
+            self.assertEqual(row["payout_eligible"], "sim" if payout >= 90 else "não")
+            self.assertEqual((row["price_source"], row["price_status"]), ("ocr", "ok: ocr #plot"))
+            if row["switch"] == "confirmada":
+                self.assertLess(abs(float(row["previous_quote"]) - bases[row["previous_asset"]]), 0.0005, row)
+                self.assertGreaterEqual(int(row["polls"]), 2)
+        self.assertNotIn("SEGREDO", text + path.read_text(encoding="utf-8"))
+
+
+if __name__ == "__main__":
+    unittest.main()
