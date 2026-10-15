@@ -393,6 +393,7 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
       - `tests/test_scan.py`, `ScanAnalysisTest`, 3 testes: cada visita seguida de `AGUARDAR` com o motivo, no terminal e no CSV, e o resumo do ciclo; o histórico dos CSV anteriores e `--horizon`; e, com uma regra validada numa série sintética, `CALL` ou `PUT` com a validade de 5 s, e `AGUARDAR` quando a visita foi gravada 30 s depois da captura;
       - `tests/test_setup_observer.py`: o texto do `analisar_windows.cmd` e, só no Windows, `AnalysisLauncherOnWindowsTest`, que roda o lançador pelo `cmd.exe`: sem `.venv`, código 1; com uma `.venv` sem pip, `AGUARDAR: sem cotações utilizáveis.` com código 0, e `--horizon 5` com código 2, sem criar `runtime/`.
     - **Verificação avulsa, no Linux:** numa série sintética de 6000 cotações, a validação levou 7 ms; na página local do `RealScanTest`, cada visita mostrou `AGUARDAR (dados insuficientes: ...)`.
+    - **CI:** a execução [38818166351](https://github.com/vickzinha9/claude/actions/runs/38818166351), no commit `bf2326e`, terminou com `success` nos três jobs, sem mudar o workflow. `tests`: 295 testes; no Linux, 283 passaram e 12 foram pulados; no Windows, 290 passaram, inclusive o `AnalysisLauncherOnWindowsTest` pelo `cmd.exe`, e foram pulados só os 5 que precisam do Playwright e do OCR. `windows-browser`: os 5 testes com Chromium e OCR de verdade passaram em 31,4 s, inclusive a varredura com a análise integrada.
     - **O que isto não comprova:** nenhuma regra foi testada em cotações da Pocket Option. A validação é recalculada à medida que os dados chegam, e repetir o teste aumenta a chance de uma validação falsa; o intervalo de 99% e as 200 operações reduzem essa chance, sem eliminá-la. Com a varredura de 8 favoritos, cada ativo tem no máximo umas 12 decisões por hora com horizonte de 300 s, então a validação leva dias de dados. A decisão usa a cotação lida pelo relógio deste computador, e uma ordem real teria latência e o preço do momento do envio.
 
 ## Testes
@@ -404,7 +405,7 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
 - Com o Playwright 1.64.0 e o OCR (`rapidocr` 3.10.0 e `onnxruntime` 1.31.0), no Python 3.12.13 e com `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1`, passaram 288, inclusive os 5 de `tests/test_observe_playwright.py` (4 com Chromium real e 1 com o OCR real). Foram pulados os 7 que só rodam no Windows: os 4 de `PreparerOnWindowsTest`, o de `OpenImageOnWindowsTest`, o de `ScanLauncherOnWindowsTest` e o de `AnalysisLauncherOnWindowsTest`.
 - Sem o Playwright e sem o OCR, nos Python 3.9.25, 3.10.20, 3.11.15, 3.12.13, 3.13.13 e 3.14.4, passaram 283. Também foram pulados os 5 de `tests/test_observe_playwright.py`.
 
-O motor, a simulação e a análise continuam rodando no 3.9; só o coletor e a varredura exigem o 3.11. Os resultados do CI estão nos itens 16, 18, 19, 20, 21, 22 e 23.
+O motor, a simulação e a análise continuam rodando no 3.9; só o coletor e a varredura exigem o 3.11. Os resultados do CI estão nos itens 16, 18, 19, 20, 21, 22, 23 e 24.
 
 ## Decisões em vigor
 
