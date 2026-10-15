@@ -132,14 +132,14 @@ python -m pocketautonomo.local_simulation --cycles 2 --results "LOSS,LOSS,LOSS,L
 
 No Linux os comandos rodam no bash; no Windows, no PowerShell 7. A saída usa UTF-8 (`PYTHONIOENCODING=utf-8`).
 
-Última execução verificada: [run 38660238445](https://github.com/vickzinha9/claude/actions/runs/38660238445), de 14/10/2026, no commit `8e5c556`, com os três jobs aprovados. No job `tests`:
+Última execução verificada: [run 38688877951](https://github.com/vickzinha9/claude/actions/runs/38688877951), de 15/10/2026, no commit `ea1c557`, com os três jobs aprovados. No job `tests`:
 
 | Sistema | Ambiente | Testes | `--cycles 3` LOSS,LOSS,WIN | `--cycles 2` quatro LOSS |
 |---|---|---|---|---|
-| Linux | ubuntu-24.04, Python 3.12.15 | 217: 210 OK e 7 pulados | código 0 | código 0 |
-| Windows | Windows Server 2025, Python 3.12.10 | 217: 214 OK e 3 pulados | código 0 | código 0 |
+| Linux | ubuntu-24.04, Python 3.12.15 | 230: 222 OK e 8 pulados | código 0 | código 0 |
+| Windows | Windows Server 2025 (imagem windows-2025-vs2026), Python 3.12.10 | 230: 227 OK e 3 pulados | código 0 | código 0 |
 
-No Linux ficam de fora os 4 testes que só rodam no Windows e os 3 que usam o Chromium. No Windows ficam de fora só os 3 com Chromium, porque o job `tests` não instala o Playwright; o job `windows-browser`, descrito abaixo, roda os três. A primeira execução, [run 38522223843](https://github.com/vickzinha9/claude/actions/runs/38522223843), no commit `ecc9d12`, teve 160 testes OK nos dois sistemas.
+No Linux ficam de fora os 5 testes que só rodam no Windows e os 3 que usam o Chromium. No Windows ficam de fora só os 3 com Chromium, porque o job `tests` não instala o Playwright; o job `windows-browser`, descrito abaixo, roda os três. A primeira execução, [run 38522223843](https://github.com/vickzinha9/claude/actions/runs/38522223843), no commit `ecc9d12`, teve 160 testes OK nos dois sistemas.
 
 Nos dois sistemas, os acentos da saída apareceram corretos no log. Os testes de exclusividade do banco também passaram, inclusive no Windows, onde a trava usa `msvcrt.locking`.
 
@@ -151,11 +151,11 @@ O job `windows-browser` roda só em `windows-latest` e testa o coletor em **pág
 4. roda `observar_windows.cmd --help` e `observar_windows.cmd --url http://example.org/`, que precisa terminar com código 2. Nenhum dos dois abre o navegador;
 5. confere que os dois arquivos de `runtime/` não mudaram.
 
-Na execução 38660238445, todos os passos passaram:
+Na execução 38688877951, todos os passos passaram:
 
-- o `preparar_windows.cmd` escolheu `py -3.12`, o Python 3.12.10 de 64 bits. Ele criou `.venv` e instalou o `playwright-1.64.0` e o OCR (`rapidocr-3.10.0` e `onnxruntime-1.31.0`, com `numpy-2.5.4` e `opencv-python-headless-5.0.0.93`). Também baixou o Chrome for Testing 156.0.8078.4. Depois, conferiu a instalação, e o OCR leu `1.26543` na imagem de teste: 44 s no total;
-- na segunda vez, ele reutilizou `.venv` em 6 s;
-- os 3 testes com Chromium e OCR de verdade passaram em 12,7 s, inclusive a leitura da cotação no gráfico de teste desenhado em canvas;
+- o `preparar_windows.cmd` escolheu `py -3.12`, o Python 3.12.10 de 64 bits. Ele criou `.venv` e instalou o `playwright-1.64.0` e o OCR (`rapidocr-3.10.0` e `onnxruntime-1.31.0`, com `numpy-2.5.4` e `opencv-python-headless-5.0.0.93`). Também baixou o Chrome for Testing 156.0.8078.4. Depois, conferiu a instalação, e o OCR leu `1.26543` na imagem de teste: 52 s no total;
+- na segunda vez, ele reutilizou `.venv` em 7 s;
+- os 3 testes com Chromium e OCR de verdade passaram em 13,7 s, inclusive a leitura da cotação num gráfico de teste desenhado em canvas, com a etiqueta semitransparente calibrada sobre uma vela verde e lida sobre o fundo;
 - `observar_windows.cmd --help` terminou com código 0, e o link recusado, com código 2;
 - os arquivos de `runtime/` continuaram iguais.
 

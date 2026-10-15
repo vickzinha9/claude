@@ -132,7 +132,7 @@ Isso não explica 2 a 3,5 s. A suspeita é a captura (`page.screenshot`) no nave
 | Cotação, leitura visual | imagens sintéticas com a estrutura medida (etiqueta 80% opaca sobre vela e fundo, algarismos com vãos de 2 px); as suas duas imagens, fora da suíte; Chromium real e OCR real num gráfico de teste com etiqueta semitransparente, calibrada sobre uma vela verde e lida sobre o fundo | **não comprovada**: a calibração falhou na segunda validação |
 | Cotação, busca em texto | objetos falsos; Chromium real na página de teste | **não executado** |
 | Ambíguo, ausente, cortado, inválido: INDISPONÍVEL | imagens sintéticas e gráfico de teste | na segunda validação, as prévias ficaram INDISPONÍVEIS em vez de mostrar um valor errado |
-| Imagens de conferência com nome novo | objetos falsos; no CI Windows, um arquivo mapeado na memória, como um visualizador faz, recusa ser regravado com `[Errno 22]`, e a imagem nova é gravada em outro arquivo | **não executado** |
+| Imagens de conferência com nome novo | objetos falsos; no CI Windows ([run 38688877951](https://github.com/vickzinha9/claude/actions/runs/38688877951)), um arquivo mapeado na memória, como um visualizador faz, recusou ser regravado com `[Errno 22]`, e a imagem nova foi gravada em outro arquivo | **não executado** |
 | Nenhum clique | teste no código-fonte e página local com botões CALL e PUT que contam cliques: zero cliques | não se aplica |
 | Espera do Playwright entre leituras, Ctrl+C | objetos falsos; Chromium real; SIGINT real no Linux: código 130 e o CSV preservado | **não testado no Windows** |
 
@@ -142,7 +142,7 @@ As páginas de teste são HTML escrito para os testes e servido pelo próprio Pl
 
 1. **`[Errno 22]` ao escolher o marcador de novo.** A imagem dos candidatos tinha nome fixo. A primeira cópia ainda estava aberta no visualizador, que o programa abre com `os.startfile`, e a segunda gravação tentou regravá-la.
    - Um visualizador mapeia na memória a imagem que mostra, e o Windows recusa truncar um arquivo mapeado (erro `ERROR_USER_MAPPED_FILE`). O Python mostra esse erro como `[Errno 22] Invalid argument`.
-   - O CI Windows reproduz o erro com um mapeamento de memória no lugar do visualizador; o app Fotos não foi testado.
+   - O CI Windows reproduziu o erro com um mapeamento de memória no lugar do visualizador; o visualizador que você usou não foi testado.
    - Agora cada captura grava um arquivo novo, criado com `x`, que nunca sobrescreve outro. Uma falha de gravação mostra o motivo e oferece tentar de novo, continuar sem a imagem ou desistir da leitura visual, sem fechar o navegador. A gravação final dos seletores também pode ser repetida.
 2. **Calibração aceita sem leitura válida.** Antes, um candidato sem cotação legível podia ser escolhido, e as prévias podiam ser aceitas mesmo indisponíveis. Agora o candidato é recusado, e Enter só aceita quando as 3 prévias leram uma cotação.
 3. **Etiqueta semitransparente.** A cor da etiqueta muda com o que está atrás. Uma cor conta como da etiqueta até 40 níveis por canal de uma das cores gravadas.
