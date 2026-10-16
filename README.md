@@ -2,7 +2,7 @@
 
 Núcleo em desenvolvimento para controlar ciclos de entradas com progressão fixa de 500, 1000, 2000 e 4000 centavos (R$ 5, R$ 10, R$ 20 e R$ 40), com no máximo quatro tentativas por ciclo.
 
-> **Nenhuma ordem real é enviada.** A simulação local usa uma corretora em memória, e os resultados dela são escolhidos por você em `--results`: o programa não analisa o mercado, não prevê resultados e não calcula lucratividade. O [coletor somente leitura](#coletor-somente-leitura-da-pocket-option) só lê ativo, cotação do ativo e payout da tela da Pocket Option, com seletores que você mesmo confere. A leitura na plataforma real ainda não foi comprovada (veja o [INTEGRATION.md](INTEGRATION.md)). Não há estratégia nem executor real.
+> **Nenhuma ordem real é enviada.** A simulação local usa uma corretora em memória, e os resultados dela são escolhidos por você em `--results`: o programa não analisa o mercado, não prevê resultados e não calcula lucratividade. O [coletor somente leitura](#coletor-somente-leitura-da-pocket-option) só lê ativo, cotação do ativo e payout da tela da Pocket Option, com seletores que você mesmo confere. A leitura na plataforma real ainda não foi comprovada (veja o [INTEGRATION.md](INTEGRATION.md)). A [operação simulada](#operação-simulada-análise--coordenador--executor-simulado) liga a análise ao coordenador com um simulador neste computador; não há executor real.
 
 ## Requisitos
 
@@ -39,7 +39,7 @@ Rode todos os comandos abaixo na raiz do repositório, a pasta `claude`. No Wind
 
 No GitHub, o workflow [`.github/workflows/tests.yml`](.github/workflows/tests.yml) roda essa suíte e os dois exemplos finitos abaixo em Linux e Windows a cada push e pull request. As execuções ficam na [aba Actions](https://github.com/vickzinha9/claude/actions/workflows/tests.yml).
 
-Os testes do coletor em `tests/test_observe.py`, os da leitura visual em `tests/test_quote_reader.py`, os da varredura dos favoritos em `tests/test_scan.py` e os da preparação e dos lançadores em `tests/test_setup_observer.py` usam objetos falsos no lugar do navegador, do OCR, do `pip` e do `venv`, e imagens sintéticas de gráfico. Eles não precisam do Playwright nem do OCR. Os 4 testes de `PreparerOnWindowsTest`, o de `OpenImageOnWindowsTest`, o de `ScanLauncherOnWindowsTest` e o de `AnalysisLauncherOnWindowsTest` só rodam no Windows. Os da análise local CALL/PUT, em `tests/test_analysis.py`, usam séries sintéticas e só a biblioteca padrão. Dos 7 de `tests/test_observe_playwright.py`, 6 abrem um Chromium de verdade, sem janela, em páginas locais de teste, que não são a Pocket Option; quatro deles leem a cotação de um gráfico desenhado em canvas, com o OCR de verdade, um varre uma barra de favoritos de teste, com cliques de verdade, e dois rodam o diagnóstico da captura. O sétimo confere a leitura de aquecimento do OCR de verdade. Sem o Playwright ou o OCR eles aparecem como `skipped`, a menos que a variável `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1` exista: aí falham, como o job de navegador do CI exige.
+Os testes do coletor em `tests/test_observe.py`, os da leitura visual em `tests/test_quote_reader.py`, os da varredura dos favoritos em `tests/test_scan.py` e os da preparação e dos lançadores em `tests/test_setup_observer.py` usam objetos falsos no lugar do navegador, do OCR, do `pip` e do `venv`, e imagens sintéticas de gráfico. Eles não precisam do Playwright nem do OCR. Os 4 testes de `PreparerOnWindowsTest`, o de `OpenImageOnWindowsTest`, o de `ScanLauncherOnWindowsTest`, o de `AnalysisLauncherOnWindowsTest` e o de `OperationLauncherOnWindowsTest` só rodam no Windows. Os da análise local CALL/PUT, em `tests/test_analysis.py`, usam séries sintéticas e só a biblioteca padrão. Os da operação simulada, em `tests/test_operation.py`, `tests/test_operate.py`, `tests/test_paper_broker.py` e `tests/test_coordinator_decisions.py`, usam o coordenador e o simulador de verdade, com relógio falso, decisões artificiais e a tela falsa da varredura. Dos 7 de `tests/test_observe_playwright.py`, 6 abrem um Chromium de verdade, sem janela, em páginas locais de teste, que não são a Pocket Option; quatro deles leem a cotação de um gráfico desenhado em canvas, com o OCR de verdade, um varre uma barra de favoritos de teste, com cliques de verdade, e dois rodam o diagnóstico da captura. O sétimo confere a leitura de aquecimento do OCR de verdade. Sem o Playwright ou o OCR eles aparecem como `skipped`, a menos que a variável `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1` exista: aí falham, como o job de navegador do CI exige.
 
 ## Simulação local
 
@@ -454,6 +454,41 @@ Na varredura, cada visita ganha uma terceira linha, como `  análise CALL/PUT: A
 | 1 | falha ao ler a pasta |
 | 2 | argumento inválido |
 
+## Operação simulada (análise → coordenador → executor simulado)
+
+`python -m pocketautonomo.operate` (no Windows, `operar_windows.cmd`) é a varredura dos favoritos com a operação depois de cada visita: a decisão da análise local vai para o coordenador de ciclos, e as entradas vão para um **simulador neste computador** (`pocketautonomo/paper_broker.py`), liquidado pelas cotações lidas na tela. **Nenhuma ordem vai para a Pocket Option e nenhum dinheiro é movimentado.** Mantenha o navegador restaurado ou maximizado, sem minimizá-lo, e não use a janela enquanto ele roda.
+
+```bat
+operar_windows.cmd --demonstracao
+operar_windows.cmd
+operar_windows.cmd --cycles 2 --gale-window 5
+```
+
+1. **Primeira entrada:** só com decisão `CALL` ou `PUT` de regra validada em dados separados, dentro da validade (até 5 s depois da captura da cotação) e com payout de 90% ou mais. `AGUARDAR` não inicia ciclo, e a coleta de dados continua. Uma decisão inicia um ciclo no máximo, também depois de reabrir o programa.
+2. **Ciclo:** o mesmo ativo e a mesma direção até o fim; R$ 5, R$ 10, R$ 20 e R$ 40, quatro tentativas; só LOSS confirmada avança; WIN encerra; nunca há quinta entrada. O payout só é exigido na primeira entrada.
+3. **Janelas:** cada gale tem `--gale-window` segundos (padrão 5) depois da LOSS confirmada para entrar, com uma cotação nova; vencida a janela, o ciclo é interrompido, sem ordem atrasada. Durante o ciclo, a navegação entre favoritos fica suspensa: o programa só lê o ativo do ciclo, sem clicar.
+4. **Simulador:** cada ordem entra com a cotação lida, vence `--horizon` segundos (padrão 300) depois da captura dela e é liquidada pela primeira cotação lida a partir do vencimento; sem cotação até 30 s depois, é cancelada, sem resultado inventado. Uma ordem que chega depois do prazo da tentativa é recusada. Uma resposta incerta (UNKNOWN) nunca é reenviada: a ordem é procurada no simulador pela reserva.
+5. **Reinício:** a pendência gravada é conferida no simulador, sem reenvio, e um ciclo aberto sem pendência é abandonado, porque a janela da próxima entrada não sobrevive ao reinício.
+
+| Estado no terminal | Quando |
+|---|---|
+| `COLETANDO` | nenhuma regra validada: a análise responde `AGUARDAR`, e a varredura continua coletando |
+| `AGUARDANDO DECISÃO` | há regra validada; falta uma decisão atual, dentro do prazo e com payout de 90% ou mais |
+| `CICLO ATIVO` | ciclo aberto entre uma LOSS confirmada e a entrada do gale |
+| `PENDÊNCIA` | entrada no simulador esperando o resultado, inclusive com resposta incerta |
+| `PAUSA` | recuperação depois de reabrir, ou parada por falha de gravação |
+
+O estado fica em `runtime/operacao-simulada.db` e `runtime/operacao-simulada-ordens.db`, reaproveitados a cada execução. Cada execução grava os eventos em `runtime/operacao-<data>-<hora>-<sufixo>.csv`, com os tempos de leitura, de decisão e de envio ao simulador em colunas separadas, as entradas recusadas por prazo vencido e a coluna `execution` = `simulada`. **O tempo de envio é do simulador e não comprova a latência da corretora.** As leituras do ciclo não vão para o CSV da varredura, e os resultados simulados nunca entram na análise.
+
+`--demonstracao` não abre o navegador: roda oito cenas com decisões, cotações e resultados ARTIFICIAIS e relógio simulado, em arquivos novos `runtime/demonstracao-...`, e confere cada uma. Com os dados de hoje, a operação na tela deve mostrar só `ESTADO: COLETANDO`, porque nenhuma regra está validada.
+
+| Código de `operar_windows.cmd` | Situação |
+|---|---|
+| 0 | a varredura gravou ao menos uma linha com dados, ou a demonstração passou nas conferências |
+| 1 | falhou ou parou por segurança, inclusive com o navegador fechado durante um ciclo; o estado fica preservado |
+| 2 | argumento ou configuração inválidos |
+| 130 | Ctrl+C; uma pendência fica gravada e é conferida na próxima abertura |
+
 ## Situação
 
-O [STATUS.md](STATUS.md) descreve o que já funciona, as decisões em vigor e o que falta: a validação da varredura na plataforma real, dados suficientes para a análise CALL/PUT e o executor real.
+O [STATUS.md](STATUS.md) descreve o que já funciona, as decisões em vigor e o que falta: a validação da varredura na plataforma real, dados suficientes para a análise CALL/PUT e o executor real (item 28).

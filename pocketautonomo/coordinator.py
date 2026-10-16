@@ -1,4 +1,5 @@
 import copy
+import math
 import threading
 import uuid
 from dataclasses import dataclass
@@ -21,6 +22,29 @@ class CoordinatorError(Exception):
 
 class UnknownReservationError(CoordinatorError):
     """The reservation id was not issued by this coordinator."""
+
+
+class DecisionAlreadyUsedError(CoordinatorError):
+    """The decision already started a cycle: a decision starts one cycle at most."""
+
+
+@dataclass(frozen=True)
+class ConsumedDecision:
+    """The CALL/PUT decision that starts a cycle, saved together with the cycle.
+
+    decision_id identifies the decision: one id starts one cycle at most, also after a
+    restart. captured_at, valid_until and consumed_at are ISO 8601 texts of this
+    computer's clock, in UTC: the capture of the decision's quote, the end of its
+    validity and the start of the cycle. payout, in percent, and rule, a description, are
+    kept for checking and history; the coordinator decides nothing with them.
+    """
+
+    decision_id: str
+    captured_at: str
+    valid_until: str
+    consumed_at: str
+    payout: Optional[float] = None
+    rule: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -47,6 +71,9 @@ class Status:
     submission_failure holds the storage error that stopped every new submission and
     every new NOT_SUBMITTED closure. It stays, even after resume(), until the
     coordinator is closed and reopened.
+
+    decision_id is the id of the decision that started the current cycle, or None for a
+    cycle started without one.
     """
 
     cycle_id: Optional[int] = None
@@ -62,6 +89,7 @@ class Status:
     submission_state: Optional[str] = None
     broker_order_id: Optional[str] = None
     submission_failure: Optional[str] = None
+    decision_id: Optional[str] = None
 
     @property
     def can_start_cycle(self):
@@ -78,6 +106,22 @@ class Status:
 def _check_reservation_id(reservation_id):
     if not isinstance(reservation_id, str):
         raise ValueError("reservation_id must be a string")
+
+
+def _check_decision(decision):
+    if not isinstance(decision, ConsumedDecision):
+        raise ValueError("decision must be a ConsumedDecision")
+    for name in ("decision_id", "captured_at", "valid_until", "consumed_at"):
+        value = getattr(decision, name)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"decision.{name} must be a non-empty string")
+    payout = decision.payout
+    if payout is not None and (
+        isinstance(payout, bool) or not isinstance(payout, (int, float)) or not math.isfinite(payout)
+    ):
+        raise ValueError("decision.payout must be None or a finite number")
+    if decision.rule is not None and not isinstance(decision.rule, str):
+        raise ValueError("decision.rule must be None or a string")
 
 
 class Coordinator:
@@ -101,10 +145,15 @@ class Coordinator:
     closed and reopened.
 
     A coordinator with a store restores the saved state, including the submission
-    state and order id of every reservation, and starts paused: results and
-    acceptances are accepted, but no cycle starts and no entry is released until
-    resume() is called. A restored reservation is never submitted, and a cycle
-    restored still open never releases another entry, not even after resume().
+    state and order id of every reservation and the decisions that started cycles, and
+    starts paused: results and acceptances are accepted, but no cycle starts and no
+    entry is released until resume() is called. A restored reservation is never
+    submitted, and a cycle restored still open never releases another entry, not even
+    after resume(). pause() stops new cycles and entries again in the same way.
+
+    A cycle may be started by a CALL/PUT decision, a ConsumedDecision saved with the
+    cycle in one transaction. A decision starts one cycle at most: its id is refused
+    afterwards, also after a restart.
 
     The coordinator owns its store: close() closes it, and so does a failed restore.
     After close() every operation raises CoordinatorError.
@@ -120,13 +169,15 @@ class Coordinator:
         self._resolved = {}  # reservation_id -> definitive result
         self._submissions = {}  # reservation_id -> (submission_state, broker_order_id)
         self._order_owners = {}  # broker_order_id -> reservation_id
+        self._decisions = {}  # decision_id -> the cycle_id it started
+        self._cycle_decisions = {}  # cycle_id -> decision_id
         self._restored = frozenset()  # ids of the reservations loaded from the store
         self._submission_failure = None  # storage error that stopped new submissions
         self._paused = False
         self._stale_cycle_id = None  # cycle restored still open: its decision has expired
         if store is not None:
             try:
-                self._restore(*store.load(), store.load_submissions())
+                self._restore(*store.load(), store.load_submissions(), store.load_decisions())
             except BaseException:
                 store.close()  # a refused restore must not keep the database locked
                 raise
@@ -159,10 +210,41 @@ class Coordinator:
             self._check_open()
             self._paused = False
 
-    def start_cycle(self, asset, direction):
-        """Start a new independent cycle at attempt 1 and return its id."""
+    def pause(self):
+        """Stop new cycles, entries and submissions until resume().
+
+        As after a restart, results, acceptances, NOT_SUBMITTED closures and
+        abandonments are still accepted while paused.
+        """
         with self._lock:
             self._check_open()
+            self._paused = True
+
+    def decision_cycle(self, decision_id):
+        """The id of the cycle that decision_id started, or None when it started none."""
+        with self._lock:
+            self._check_open()
+            return self._decisions.get(decision_id)
+
+    def start_cycle(self, asset, direction, decision=None):
+        """Start a new independent cycle at attempt 1 and return its id.
+
+        decision, a ConsumedDecision, is the CALL/PUT decision that starts the cycle. With
+        a store, it is saved with the cycle in one transaction. A decision that already
+        started a cycle, also before a restart, raises DecisionAlreadyUsedError, and
+        nothing changes.
+        """
+        if decision is not None:
+            _check_decision(decision)
+        with self._lock:
+            self._check_open()
+            if decision is not None:
+                used = self._decisions.get(decision.decision_id)
+                if used is not None:
+                    raise DecisionAlreadyUsedError(
+                        f"decision {decision.decision_id} already started cycle {used};"
+                        " a decision starts one cycle at most"
+                    )
             if self._paused:
                 raise CoordinatorError("the coordinator is paused; call resume() first")
             self._check_submissions_allowed()
@@ -179,8 +261,11 @@ class Coordinator:
             cycle = Cycle(asset, direction)
             cycle_id = self._cycle_id + 1
             if self._store is not None:
-                self._store.save_cycle(cycle_id, asset, direction)
+                self._store.save_cycle(cycle_id, asset, direction, decision)
             self._cycle, self._cycle_id = cycle, cycle_id
+            if decision is not None:
+                self._decisions[decision.decision_id] = cycle_id
+                self._cycle_decisions[cycle_id] = decision.decision_id
             return cycle_id
 
     def reserve_next_entry(self, balance_cents):
@@ -511,18 +596,27 @@ class Coordinator:
             submission_state=state,
             broker_order_id=order_id,
             submission_failure=self._submission_failure,
+            decision_id=self._cycle_decisions.get(self._cycle_id),
         )
 
     def _recovery_pending(self):
         return self._stale_cycle_id == self._cycle_id and self._cycle.is_active
 
-    def _restore(self, cycles, reservations, submissions):
+    def _restore(self, cycles, reservations, submissions, decisions):
         try:
             if set(submissions) != {row[0] for row in reservations}:
                 raise ValueError("the submissions do not match the reservations")
+            started = list(decisions.values())
+            unknown = sorted(set(started) - {row[0] for row in cycles})
+            if unknown:
+                raise ValueError(f"decisions of cycles that were never saved: {unknown}")
+            if len(set(started)) != len(started):
+                raise ValueError("a cycle has more than one decision")
             self._replay(cycles, reservations, submissions)
         except ValueError as error:
             raise StorageError(f"inconsistent saved state: {error}") from error
+        self._decisions = dict(decisions)
+        self._cycle_decisions = {cycle_id: decision_id for decision_id, cycle_id in decisions.items()}
         self._submissions = dict(submissions)
         self._order_owners = {
             order_id: reservation_id

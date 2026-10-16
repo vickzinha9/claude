@@ -12,6 +12,7 @@ cycle.DEFINITIVE_RESULTS once it is settled.
 
 import abc
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 
 # Explicit answers of a broker to an order.
@@ -21,12 +22,18 @@ ORDER_REJECTED = "REJECTED"
 
 @dataclass(frozen=True)
 class OrderRequest:
-    """One order with the exact data of a reservation; stake_cents is in cents."""
+    """One order with the exact data of a reservation; stake_cents is in cents.
+
+    deadline, when given, is the last moment, a datetime with a time zone, at which the
+    order may be placed. A broker that receives it later must answer with an explicit
+    rejection and never place the order late.
+    """
 
     reservation_id: str
     asset: str
     direction: str
     stake_cents: int
+    deadline: Optional[datetime] = None
 
 
 @dataclass(frozen=True)

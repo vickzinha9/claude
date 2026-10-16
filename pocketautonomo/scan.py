@@ -353,6 +353,7 @@ class Visit:
     reference: object = None  # Reference, when the previous asset's quote was read for a click
     recorded_at: object = None  # this computer's clock, in UTC, when the visit ended
     decision: object = None  # analysis.Decision right after the visit, when the analysis runs
+    decision_ms: object = None  # how long the analysis took to decide, in milliseconds
 
     @property
     def eligibility(self):
@@ -397,6 +398,11 @@ class Scan:
     progress: ScanProgress
     last_clicked: object = None  # (key, how many elements the list had) of the last click
     analyzer: object = None  # analysis.Analyzer, from the start of the scan
+    # Called around each visit, when given: hooks.before_visit(session, favorite) before
+    # the visit starts, and hooks.after_visit(session, visit) once it was recorded. The
+    # next visit waits for them, which is how the simulated operation (operate.py) holds
+    # the navigation during a cycle.
+    hooks: object = None
 
     @property
     def sources(self):
@@ -931,10 +937,16 @@ def run_scan(session, scan, args, ctx):
             unconfirmed = 0  # switches in a row that the asset field did not confirm
             try:
                 for favorite in favorites.usable:
+                    if scan.hooks is not None:
+                        scan.hooks.before_visit(session, favorite)
                     visit = visit_favorite(session, scan, favorite, cycle, favorites.total, ctx)
+                    decided = ctx.monotonic()
                     visit = with_decision(visit, scan)
+                    visit = replace(visit, decision_ms=ctx.elapsed_ms(decided))
                     record(visit, progress, ctx)
                     visits.append(visit)
+                    if scan.hooks is not None:
+                        scan.hooks.after_visit(session, visit)
                     unconfirmed = unconfirmed + 1 if visit.switch == NOT_CONFIRMED else 0
                     if unconfirmed >= MAX_UNCONFIRMED:
                         say(

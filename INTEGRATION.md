@@ -1,8 +1,8 @@
 # Integração com a Pocket Option: leitura de dados e varredura dos favoritos
 
-Pesquisa e testes feitos em 14/10/2026, no branch `feature/progression-core`. No mesmo dia entraram os lançadores do Windows, o modo `--configure`, a espera pelo Playwright e a leitura visual da cotação. Em 15/10/2026, a detecção e a configuração visual foram corrigidas com base na sua segunda validação (seções 5 e 6), e entrou a varredura dos favoritos (seção 4). Ainda em 15/10/2026, depois da sua primeira varredura, entraram a releitura da cotação anterior à troca com o motivo original, a captura só da faixa direita do gráfico, o aquecimento do OCR, o arquivo de tempos de cada leitura e a separação entre payout elegível e dados para análise. Depois da segunda varredura e do teste do coletor, entraram a aceitação das leituras do OCR que só divergem no separador decimal e o diagnóstico da captura lenta (seção 5).
+Pesquisa e testes feitos em 14/10/2026, no branch `feature/progression-core`. No mesmo dia entraram os lançadores do Windows, o modo `--configure`, a espera pelo Playwright e a leitura visual da cotação. Em 15/10/2026, a detecção e a configuração visual foram corrigidas com base na sua segunda validação (seções 5 e 6), e entrou a varredura dos favoritos (seção 4). Ainda em 15/10/2026, depois da sua primeira varredura, entraram a releitura da cotação anterior à troca com o motivo original, a captura só da faixa direita do gráfico, o aquecimento do OCR, o arquivo de tempos de cada leitura e a separação entre payout elegível e dados para análise. Depois da segunda varredura e do teste do coletor, entraram a aceitação das leituras do OCR que só divergem no separador decimal e o diagnóstico da captura lenta (seção 5). Depois do diagnóstico no seu Windows, a investigação da captura foi encerrada e entrou a operação simulada, que liga a análise ao coordenador e a um executor simulado (seção 7).
 
-> **Na plataforma real**, a sua terceira validação do coletor terminou com três observações completas de GBP/USD OTC; a primeira varredura, com oito favoritos, teve 14 leituras completas e duas parciais em 16 visitas; e a segunda, 16 completas em 16 visitas (seção 5). A correspondência de cada valor com a tela não foi conferida. A correção do OCR e o diagnóstico da captura ainda não rodaram na sua tela: foram testados com objetos falsos e em páginas locais de teste.
+> **Na plataforma real**, a sua terceira validação do coletor terminou com três observações completas de GBP/USD OTC; a primeira varredura, com oito favoritos, teve 14 leituras completas e duas parciais em 16 visitas; e a segunda, 16 completas em 16 visitas (seção 5). O diagnóstico da captura rodou no seu Windows: só a janela minimizada deixou a captura lenta (seção 5). A correspondência de cada valor com a tela não foi conferida. A operação simulada ainda não rodou na sua tela: foi testada com objetos falsos, com relógio falso e com a tela falsa da varredura.
 
 ## Resumo
 
@@ -11,6 +11,7 @@ Pesquisa e testes feitos em 14/10/2026, no branch `feature/progression-core`. No
 - **Varredura dos favoritos:** `python -m pocketautonomo.scan` (`varrer_windows.cmd`) usa o mesmo navegador, o mesmo perfil e as mesmas fontes, e acrescenta uma única ação: o clique num ativo favorito, por um seletor que você confere, para selecioná-lo. Ela nunca clica em BUY, SELL, CALL ou PUT, não mexe no Amount e não envia ordens.
 - O programa não traz nenhum seletor nem marcador pronto. Sem os seus, todo campo fica indisponível, com o motivo. Um seletor que encontra texto ou um OCR que lê um número não validam o campo: só a sua comparação com a tela valida.
 - **Análise local CALL/PUT:** usa só os CSV da varredura, sem acessar a plataforma nem a rede, e responde `AGUARDAR` até uma regra fixa ser validada em dados separados (README, seção da análise; STATUS, item 24).
+- **Operação simulada:** `python -m pocketautonomo.operate` (`operar_windows.cmd`) é a varredura com a decisão validada ligada ao coordenador e a um simulador neste computador. Nenhuma ordem vai para a plataforma: durante um ciclo, ela só lê o ativo do ciclo, sem clicar (README, seção da operação simulada; STATUS, item 28).
 
 ## 1. Fontes oficiais consultadas
 
@@ -196,6 +197,19 @@ As 48 leituras leram a cotação. Na segunda execução, [38844970510](https://g
 
 **Medições numa página local** (Linux, Chromium sem janela; não é a Pocket Option nem o seu computador): a captura direta deu os mesmos pixels que o `page.screenshot`, na faixa e no gráfico inteiro, com a escala real de 100%, 125% e 150%. Com um quadro de outro site ocupado, as duas capturas e a contagem atrasaram conforme o momento em que caíam no trabalho da página, então essa medição não separa os métodos.
 
+**Diagnóstico no seu Windows, na Pocket Option** (`diagnosticar_windows.cmd`, informado em 15/10/2026), medição no seu computador, mediana da etapa tela:
+
+| Condição | Resultado |
+|---|---|
+| navegador visível | 58 ms |
+| coberto pelo terminal | 79 ms |
+| visível de novo | 58 ms |
+| **minimizado, `page.screenshot`** | **1.521 ms, máximo de 3.026 ms** |
+| minimizado, captura direta | 1.521 ms |
+| espera de 0,5 s × 5 s, visível | 58 ms nas duas |
+
+O OCR deu cotação nas 51 leituras, e 8 delas tiveram duas leituras que só divergiram no separador decimal, aceitas. A comparação de cada cotação com a tela não foi descrita. **Conclusão:** das quatro hipóteses, só a primeira, a janela minimizada, aparece na medição; o método e a espera não fizeram diferença, e cobrir a janela, quase nenhuma. A orientação é manter o navegador restaurado ou maximizado. O método de captura continua o `page.screenshot` com a faixa direita, porque a captura direta não mostrou benefício relevante, e a investigação está encerrada, salvo uma falha concreta nova.
+
 ### Testes
 
 | Item | Com dados simulados ou em página local de teste | Na plataforma real, no seu computador |
@@ -230,7 +244,7 @@ As páginas de teste são HTML escrito para os testes e servido pelo próprio Pl
 3. **Etiqueta semitransparente.** A cor da etiqueta muda com o que está atrás. Uma cor conta como da etiqueta até 40 níveis por canal de uma das cores gravadas.
    - As duas cores medidas diferem em 32, então uma calibração sobre a vela verde cobre também o fundo, e vice-versa.
    - Sobre uma vela vermelha, a cor calculada para a mesma etiqueta (`#6e6b8d`) fica a 47 de `#3f638e` e a 37 de `#498390`. Uma calibração feita só sobre o fundo deixa a cotação indisponível ali até você somar essa cor com `n` e `+`. Esse caso foi testado só em imagem sintética.
-4. **Tempo de captura.** No coletor de 15/10/2026, em USD/JPY OTC sem troca, a etapa tela teve mediana de 1.986 ms, com a página respondendo em milissegundos; na varredura do mesmo dia, a leitura inteira teve mediana de 141 ms depois da troca. No CI Windows, uma janela minimizada levou cada captura a 1 ou 2 s. A causa no seu computador não está confirmada; as hipóteses e o diagnóstico que as testa estão na seção 5. Não minimize o navegador durante o coletor e a varredura. Na terceira validação, a captura levou de 155 a 231 ms, de 86% a 91% da leitura visual. Na primeira varredura, as leituras finais levaram de 1.076 a 1.555 ms, sem a divisão por etapa. Agora só a faixa direita do gráfico é capturada e o OCR é aquecido antes da primeira cotação, o que reduziu o tempo numa página local ociosa; numa página ocupada, quase nada mudou (seção 5). A causa da demora na varredura continua sem confirmação: o arquivo de tempos é o diagnóstico para o próximo teste. A demora de 2 a 3,5 s das prévias da segunda validação também não foi explicada.
+4. **Tempo de captura.** No coletor de 15/10/2026, em USD/JPY OTC sem troca, a etapa tela teve mediana de 1.986 ms, com a página respondendo em milissegundos; na varredura do mesmo dia, a leitura inteira teve mediana de 141 ms depois da troca. No diagnóstico no seu computador, a etapa tela levou 58 ms com o navegador visível e 1.521 ms com ele minimizado (seção 5). Mantenha o navegador restaurado ou maximizado durante o coletor, a varredura e a operação simulada. Na terceira validação, a captura levou de 155 a 231 ms, de 86% a 91% da leitura visual. Na primeira varredura, as leituras finais levaram de 1.076 a 1.555 ms, sem a divisão por etapa. Agora só a faixa direita do gráfico é capturada e o OCR é aquecido antes da primeira cotação, o que reduziu o tempo numa página local ociosa; numa página ocupada, quase nada mudou (seção 5). A causa da demora na varredura continua sem confirmação: o arquivo de tempos é o diagnóstico para o próximo teste. A demora de 2 a 3,5 s das prévias da segunda validação também não foi explicada.
 5. **Janela visível.** A captura depende de a janela do navegador estar visível e não minimizada. O gráfico precisa caber inteiro na área visível, e o mouse sobre o gráfico pode criar uma etiqueta de cursor que deixa a leitura ambígua.
 6. **Latência.** Cada leitura é um instante, e a cotação pode mudar logo depois.
 7. **Login.** Só você pode fazer. Não tentei login nem pedi credenciais.
@@ -247,11 +261,11 @@ As páginas de teste são HTML escrito para os testes e servido pelo próprio Pl
 
 ## 7. Como validar no seu Windows
 
-Os lançadores estão descritos no [README](README.md#windows-os-lançadores). Se puder, valide primeiro na conta demo. Esta validação mede a captura lenta e confere a correção do OCR, num único procedimento:
+Os lançadores estão descritos no [README](README.md#windows-os-lançadores). Use a conta demo. Esta validação confere a operação simulada, que **não envia ordens** à plataforma:
 
-1. Na pasta `claude`, rode `git pull`. O `preparar_windows.cmd` não precisa rodar de novo: as dependências não mudaram, e a `.venv`, o perfil e os seletores gravados continuam os mesmos.
-2. Rode `diagnosticar_windows.cmd`. Cole o link, faça o login se a página pedir, deixe na tela o USD/JPY OTC, o ativo do teste do coletor, e pressione Enter.
-3. Siga as quatro fases, com Enter em cada uma: **A**, o terminal num canto, sem cobrir o gráfico, e o visualizador de imagens fechado; **B**, o terminal maximizado por cima do navegador; **C**, o terminal de volta ao canto; **D**, o navegador minimizado pelo botão de minimizar da janela dele, sem clicar na página. No fim, restaure o navegador. Fora isso, não use o navegador.
-4. Me envie a saída do terminal, do começo ao fim, e o arquivo `runtime\diagnostico-captura-...csv`, que só tem horários, cotações, o nome do ativo e tempos.
+1. Na pasta `claude`, rode `git pull`. O `preparar_windows.cmd` não precisa rodar de novo: as dependências não mudaram, e a `.venv`, o perfil, os seletores e os CSV continuam os mesmos.
+2. Rode `operar_windows.cmd --demonstracao`. Ele não abre o navegador e deve terminar com `Demonstração concluída: as 8 cenas passaram nas conferências` e código 0.
+3. Rode `operar_windows.cmd --cycles 2`. Cole o link, faça o login e pressione Enter; nas duas perguntas dos favoritos, Enter mantém e aceita o seletor gravado. Deixe o navegador restaurado ou maximizado, sem minimizá-lo, e não use a janela. Acompanhe as linhas `ESTADO:`: com os dados de hoje, o esperado é `ESTADO: COLETANDO`, nenhuma entrada simulada e código 0 no fim. Ctrl+C encerra a qualquer momento.
+4. Me envie a saída do terminal dos passos 2 e 3, do começo ao fim, e o `runtime\operacao-...csv`, se ele tiver sido criado.
 
-O diagnóstico não muda nenhuma conferência e não comprova a correspondência com a tela: para isso, compare algumas cotações lidas com o que a tela mostrava.
+A operação na tela só abre um ciclo quando a análise validar uma regra em dados separados; até lá, ela continua coletando dados, como a varredura.

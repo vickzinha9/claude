@@ -21,7 +21,7 @@ else:
 
 # Schema version kept in PRAGMA user_version. Databases written before versions were
 # tracked have user_version 0.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # The tables as version 0 created them. MIGRATIONS then bring every database, new or
 # old, to SCHEMA_VERSION through the same statements.
@@ -57,6 +57,21 @@ MIGRATIONS = {
         " OR (typeof(broker_order_id) = 'text' AND trim(broker_order_id) <> ''))",
         # An order belongs to one reservation at most. NULLs never collide.
         "CREATE UNIQUE INDEX reservations_broker_order_id ON reservations (broker_order_id)",
+    ),
+    2: (
+        # The CALL/PUT decision that started a cycle, saved in the same transaction as the
+        # cycle: a decision starts one cycle at most, also after a restart, and a cycle has
+        # one decision at most. A cycle started without a decision has no row here.
+        """CREATE TABLE decisions (
+            decision_id TEXT NOT NULL PRIMARY KEY
+                CHECK (typeof(decision_id) = 'text' AND trim(decision_id) <> ''),
+            cycle_id INTEGER NOT NULL UNIQUE REFERENCES cycles (cycle_id),
+            captured_at TEXT NOT NULL,
+            valid_until TEXT NOT NULL,
+            consumed_at TEXT NOT NULL,
+            payout REAL,
+            rule TEXT
+        )""",
     ),
 }
 
@@ -161,6 +176,10 @@ class SqliteStore:
     cycle; it never gets a result, a submission start or an acceptance afterwards. A
     reservation saved before submissions were tracked is UNVERIFIED: it may have been
     submitted, so it is never submitted again.
+
+    The CALL/PUT decision that started a cycle is saved with the cycle, in one
+    transaction, and a decision id is saved once: load_decisions() tells which decisions
+    already started a cycle.
     """
 
     def __init__(self, path):
@@ -213,12 +232,34 @@ class SqliteStore:
             submissions[reservation_id] = (state, broker_order_id)
         return submissions
 
-    def save_cycle(self, cycle_id, asset, direction):
+    def load_decisions(self):
+        """Return {decision_id: cycle_id} for every decision that started a cycle."""
+        connection = self._open_connection()
+        with _translated("loading the decisions"):
+            rows = connection.execute(
+                "SELECT decision_id, cycle_id FROM decisions ORDER BY cycle_id"
+            ).fetchall()
+        return dict(rows)
+
+    def save_cycle(self, cycle_id, asset, direction, decision=None):
+        """Save a new cycle and, when given, the decision that started it, in one transaction.
+
+        decision is a coordinator.ConsumedDecision. A decision id already saved, or a
+        second decision for the cycle, raises StorageError, and neither row is kept.
+        """
         with self._transaction("saving the cycle") as connection:
             connection.execute(
                 "INSERT INTO cycles (cycle_id, asset, direction) VALUES (?, ?, ?)",
                 (cycle_id, asset, direction),
             )
+            if decision is not None:
+                connection.execute(
+                    "INSERT INTO decisions (decision_id, cycle_id, captured_at, valid_until,"
+                    " consumed_at, payout, rule) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (decision.decision_id, cycle_id, decision.captured_at,
+                     decision.valid_until, decision.consumed_at, decision.payout,
+                     decision.rule),
+                )
 
     def save_reservation(self, reservation):
         """Save a new reservation as RESERVED, without a broker order id."""

@@ -1,4 +1,5 @@
-# Runs the test suite and the two finite local simulation examples on Linux and Windows.
+# Runs the test suite, the two finite local simulation examples and the simulated
+# operation's demonstration on Linux and Windows.
 name: tests
 
 on:
@@ -75,6 +76,26 @@ jobs:
           Write-Output "exit code: $code"
           exit $code
 
+      # The simulated operation's scenes, with artificial data and a simulated clock: no
+      # browser and no broker. It fails unless every scene passes its checks.
+      - name: "Example: operate --demonstracao (bash)"
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          code=0
+          python -m pocketautonomo.operate --demonstracao || code=$?
+          echo "exit code: $code"
+          exit "$code"
+
+      - name: "Example: operate --demonstracao (PowerShell)"
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -m pocketautonomo.operate --demonstracao
+          $code = $LASTEXITCODE
+          Write-Output "exit code: $code"
+          exit $code
+
   # The collector's Windows launchers and its real-browser tests, with the local OCR.
   # Chromium opens only the local test pages that the tests serve themselves, for the
   # reserved name observe.test, one of them a canvas chart drawn by the test: nothing here
@@ -136,6 +157,14 @@ jobs:
           set CODE=%ERRORLEVEL%
           echo exit code: %CODE%
           if not "%CODE%"=="2" exit /b 1
+
+      - name: "operar_windows.cmd --demonstracao: artificial scenes, no browser opens"
+        shell: cmd
+        run: |
+          call operar_windows.cmd --demonstracao < NUL
+          set CODE=%ERRORLEVEL%
+          echo exit code: %CODE%
+          if not "%CODE%"=="0" exit /b 1
 
       - name: The local data is unchanged
         shell: pwsh

@@ -149,15 +149,20 @@ class OrderExecutor:
         self._coordinator = coordinator
         self._broker = broker
 
-    def submit(self, reservation_id):
-        """Send the pending reservation reservation_id once; return a SubmissionReport."""
+    def submit(self, reservation_id, deadline=None):
+        """Send the pending reservation reservation_id once; return a SubmissionReport.
+
+        deadline, when given, goes with the order (OrderRequest.deadline): the broker
+        rejects the order explicitly once it has passed, so a slow start of the submission
+        never places it late.
+        """
         try:
             reservation = self._coordinator.begin_submission(reservation_id)
         except Exception as error:  # refused or failed: nothing may be sent
             return SubmissionReport(NOT_STARTED, reservation_id, errors=(_describe(error),))
         entry = reservation.entry
         request = OrderRequest(
-            reservation.reservation_id, entry.asset, entry.direction, entry.stake_cents
+            reservation.reservation_id, entry.asset, entry.direction, entry.stake_cents, deadline
         )
         try:
             response = self._broker.submit_order(request)
