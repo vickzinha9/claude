@@ -597,13 +597,13 @@ class RealDiagnosticTest(unittest.TestCase):
                 self.assertEqual((direct.css_width, direct.strip_css), (usual.css_width, usual.strip_css))
                 self.assertGreater(direct.screenshot_ms, 0)
 
-    def test_the_three_phases_only_read_the_quote(self):
+    def test_the_phases_only_read_the_quote(self):
         from pocketautonomo import capture_check
 
         self.runtime.mkdir(parents=True)
         sources = {"asset": "#asset", "price": "", "payout": "#payout", "price_ocr": {"chart": "#plot", "marker": SCAN_MARKER}}
         (self.runtime / observe.SELECTORS_FILE_NAME).write_text(json.dumps(sources), encoding="utf-8")
-        answers = iter(["", "", "", ""])  # Enter after the login, then phases A, B and C
+        answers = iter(["", "", "", "", ""])  # Enter after the login, then phases A, B, C and D
         out, err = io.StringIO(), io.StringIO()
         shorter = {"SHORT_WAIT": 0.1, "LONG_WAIT": 0.3, "PAIRS": 2, "LONG_READINGS": 1}
         with contextlib.ExitStack() as stack:
@@ -622,13 +622,16 @@ class RealDiagnosticTest(unittest.TestCase):
             header, *rows = list(csv.reader(file))
         self.assertEqual(tuple(header), capture_check.DIAGNOSTIC_COLUMNS)
         rows = [dict(zip(header, row)) for row in rows]
-        self.assertEqual([row["phase"] for row in rows], ["A"] * 5 + ["B"] * 4 + ["C"] * 4)
+        self.assertEqual([row["phase"] for row in rows], ["A"] * 5 + ["B"] * 4 + ["C"] * 4 + ["D"] * 4)
         self.assertEqual({row["method"] for row in rows}, {capture_check.SCREENSHOT, capture_check.DIRECT})
         name, _, base = SCAN_ASSETS[0]  # the asset already selected: the diagnostic never switches
         for row in rows:
             self.assertEqual((row["result"], row["asset"]), ("ok", name), row)
             self.assertLess(abs(float(row["quote"]) - base), 0.0005, row)
             self.assertGreater(float(row["screenshot_ms"]), 0)
+            self.assertEqual(row["window"], "normal")  # the browser told it: nothing was minimized here
+        # Nobody minimized the window in phase D, and the diagnostic says so.
+        self.assertIn("AVISO: na fase D, o navegador não informou a janela minimizada (normal)", text)
         self.assertIn("RESULTADO DO DIAGNÓSTICO", text)
         self.assertIn("Conclusão, só sobre este computador neste momento:", text)
         # Nothing was clicked: no favorite, no trade button, and the Amount was never touched.

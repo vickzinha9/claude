@@ -9,7 +9,7 @@ Why: in the collector's test on your Windows, the step "tela" of the capture (Pl
 page.screenshot) took about 2 s, while the page answered the count of the chart element in
 milliseconds and the same code, in the scan, took 0.1 to 0.3 s. The two readings run the
 same code; what differed was around it. This diagnostic measures, on your computer and on
-the Pocket Option, three of those differences, one at a time, with the others fixed:
+the Pocket Option, those differences, one at a time, with the others fixed:
 
 1. the method of the capture: page.screenshot, the one the collector and the scan use, or
    the direct capture, Chromium's own Page.captureScreenshot with the same clip, without
@@ -17,7 +17,13 @@ the Pocket Option, three of those differences, one at a time, with the others fi
    document.fonts.ready and the restoration). The two alternate, reading by reading;
 2. the wait before a capture: 0.5 s, as between the scan's readings, or 5 s, as between the
    collector's observations;
-3. the browser window: visible, covered by this terminal, and visible again.
+3. the browser window covered: visible, covered by this terminal, and visible again;
+4. the browser window minimized, in the last phase. In the Windows job of the CI, on a
+   local page, a minimized window made each capture take about 2 s with page.screenshot
+   and 1 s with the direct capture, while a covered one did not change it.
+
+Before every reading, the browser, not the page, tells the state of its window (normal,
+maximized or minimized), so each phase shows what it really measured.
 
 Each reading is a whole visual reading, with the detection of the marker and the OCR, so
 the diagnostic also counts how the OCR's two readings agreed. Every reading goes to a new
@@ -26,12 +32,13 @@ with the medians and a conclusion that names only the differences that are clear
 times slower or more, and 300 ms or more apart. It measures your computer at that moment;
 it proves nothing about other moments.
 
-The direct capture uses a DevTools session that can send only READ_ONLY_CDP_METHODS,
-checked before every command: Page.getLayoutMetrics and Page.captureScreenshot. It exists
-only here; the collector and the scan keep page.screenshot.
+The DevTools session can send only READ_ONLY_CDP_METHODS, checked before every command:
+Browser.getWindowForTarget, which the collector also uses to read the window's state, and,
+only here, Page.getLayoutMetrics and Page.captureScreenshot for the direct capture. The
+collector and the scan keep page.screenshot.
 
-Exit codes: 0 when the three phases were measured, 1 when the diagnostic failed or
-stopped, 2 for invalid arguments or configuration, and 130 after Ctrl+C.
+Exit codes: 0 when the four phases were measured, 1 when the diagnostic failed or stopped,
+2 for invalid arguments or configuration, and 130 after Ctrl+C.
 """
 
 import argparse
@@ -52,6 +59,7 @@ from pocketautonomo.observe import (
     EXIT_FAILED,
     EXIT_INTERRUPTED,
     EXIT_OK,
+    MINIMIZED,
     BrowserError,
     Capture,
     ConfigError,
@@ -64,7 +72,8 @@ from pocketautonomo.observe import (
 )
 from pocketautonomo.quote_ocr import OcrUnavailable
 
-READ_ONLY_CDP_METHODS = ("Page.getLayoutMetrics", "Page.captureScreenshot")
+# The collector's command, which reads the window's state, and the two of the direct capture.
+READ_ONLY_CDP_METHODS = observe.READ_ONLY_CDP_METHODS + ("Page.getLayoutMetrics", "Page.captureScreenshot")
 SCREENSHOT, DIRECT = "page.screenshot", "captura direta"
 SHORT_WAIT = 0.5  # seconds before a capture, as between the scan's readings
 LONG_WAIT = 5.0  # seconds before a capture, as between the collector's observations
@@ -75,7 +84,7 @@ CLEAR_GAP_MS = 300.0  # ...and at least this far apart
 SLOW_MS = 1000.0  # a median of the step "tela" this long or longer is slow
 BUSY_COUNT_MS = 200.0  # a median count this long or longer: the page answered late
 PREFIX = "diagnostico-captura"
-DIAGNOSTIC_COLUMNS = ("phase", "method", "wait_s") + quote_timings.TIMING_COLUMNS
+DIAGNOSTIC_COLUMNS = ("phase", "method", "wait_s", "window") + quote_timings.TIMING_COLUMNS
 MOMENT = "durante o diagnóstico da captura"
 
 INTRO = (
@@ -118,7 +127,15 @@ PHASES = (
         "Restaure este terminal ao tamanho da fase A, num canto, sem cobrir o gráfico.",
         False,
     ),
+    Phase(
+        "D",
+        "navegador minimizado",
+        "Minimize o navegador pelo botão de minimizar, no canto superior direito da janela dele,"
+        " sem clicar dentro da página. No fim, restaure o navegador.",
+        False,
+    ),
 )
+WINDOW_STATES = {"normal": "normal", "maximized": "maximizada", "minimized": "minimizada", "fullscreen": "tela cheia"}
 
 
 @dataclass(frozen=True)
@@ -130,6 +147,7 @@ class Sample:
     wait_s: float
     number: int
     reading: object  # observe.FieldReading of the quote
+    window: object = None  # the browser window's state right before, as the browser told it
 
     @property
     def screenshot_ms(self):
@@ -171,6 +189,9 @@ class DirectView:
     def capture(self, selector, timeout_ms, strip=None):
         return self._session.capture_direct(selector, timeout_ms, strip=strip)
 
+    def window_state(self):
+        return self._session.window_state()
+
 
 class DiagnosticLog:
     """A new CSV file with DIAGNOSTIC_COLUMNS, flushed after every line."""
@@ -188,7 +209,7 @@ class DiagnosticLog:
 
     def write(self, sample, asset):
         row = observe.timing_row(sample.reading, moment=sample.phase, attempt=sample.number, asset=asset)
-        row.update(phase=sample.phase, method=sample.method, wait_s=sample.wait_s)
+        row.update(phase=sample.phase, method=sample.method, wait_s=sample.wait_s, window=sample.window)
         self._writer.writerow([quote_timings.cell(row.get(name)) for name in DIAGNOSTIC_COLUMNS])
         self._file.flush()
 
@@ -272,8 +293,8 @@ def build_parser():
         prog="python -m pocketautonomo.capture_check",
         description=(
             "Diagnóstico A/B da captura do gráfico, somente leitura: mede a etapa tela com o"
-            " navegador visível, coberto e visível de novo, com espera curta e longa e com dois"
-            " métodos de captura. Não envia ordens e não clica."
+            " navegador visível, coberto, visível de novo e minimizado, com espera curta e longa"
+            " e com dois métodos de captura. Não envia ordens e não clica."
         ),
     )
     parser.add_argument(
@@ -310,8 +331,10 @@ def run_phase(session, selectors, source, ctx, phase, log):
     for method, wait_s, number in plan:
         session.wait(wait_s)
         check_page(session)
+        window = session.window_state()
         view = session if method == SCREENSHOT else direct
-        sample = Sample(phase.key, method, wait_s, number, observe.read_field(view, "price", source, ctx))
+        reading = observe.read_field(view, "price", source, ctx)
+        sample = Sample(phase.key, method, wait_s, number, reading, window)
         samples.append(sample)
         log.write(sample, asset)
         say(sample_line(sample))
@@ -337,6 +360,7 @@ def sample_line(sample):
     value = observe.shown_value("price", reading)
     parts = [
         f"  {sample.phase} | {sample.method} | espera {seconds_text(sample.wait_s)} s | leitura {sample.number}",
+        f"janela {window_text(sample.window)}",
         f"cotação {value}",
         f"tela {ms_text(sample.screenshot_ms)}",
         f"leitura inteira {ms_text(reading.processing_ms)}",
@@ -344,6 +368,15 @@ def sample_line(sample):
     if timings is not None and timings.count_ms is not None:
         parts.append(f"contagem {timings.count_ms:.0f} ms")
     return " | ".join(parts)
+
+
+def window_text(state):
+    return "desconhecida" if state is None else WINDOW_STATES.get(state, state)
+
+
+def phase_windows(samples, phase):
+    """The window states that the browser told during phase, each once, in order."""
+    return list(dict.fromkeys(s.window for s in samples if s.phase == phase))
 
 
 def group(samples, phase, method, wait_s):
@@ -363,7 +396,8 @@ def describe_group(samples):
 
 
 def phase_summary(phase, samples):
-    lines = [f"Fase {phase.key} ({phase.title}):"]
+    states = ", ".join(window_text(state) for state in phase_windows(samples, phase.key))
+    lines = [f"Fase {phase.key} ({phase.title}); janela do navegador, segundo ele: {states}:"]
     for method in (SCREENSHOT, DIRECT):
         lines.append(f"  {method}, espera {seconds_text(SHORT_WAIT)} s: {describe_group(group(samples, phase.key, method, SHORT_WAIT))}")
     if phase.long_wait:
@@ -385,12 +419,38 @@ def verdict(slow, fast, slow_label, fast_label):
     return "sem diferença clara"
 
 
+@dataclass(frozen=True)
+class Medians:
+    """The medians of the step "tela" that the comparisons use, in milliseconds or None."""
+
+    screenshot_a: object
+    direct_a: object
+    long_a: object
+    covered_b: object
+    direct_b: object
+    visible_c: object
+    minimized_d: object
+    direct_d: object
+
+    @classmethod
+    def of(cls, samples):
+        return cls(
+            tela(samples, "A"),
+            tela(samples, "A", DIRECT),
+            tela(samples, "A", SCREENSHOT, LONG_WAIT),
+            tela(samples, "B"),
+            tela(samples, "B", DIRECT),
+            tela(samples, "C"),
+            tela(samples, "D"),
+            tela(samples, "D", DIRECT),
+        )
+
+
 def report_lines(samples):
     """The comparisons, one variable at a time, the OCR's agreements and a conclusion."""
-    screenshot_a, direct_a = tela(samples, "A"), tela(samples, "A", DIRECT)
-    long_a = tela(samples, "A", SCREENSHOT, LONG_WAIT)
-    visible_a, covered_b, visible_c = tela(samples, "A"), tela(samples, "B"), tela(samples, "C")
-    direct_b = tela(samples, "B", DIRECT)
+    m = Medians.of(samples)
+    screenshot_a, direct_a, long_a = m.screenshot_a, m.direct_a, m.long_a
+    visible_a, covered_b, visible_c, direct_b = m.screenshot_a, m.covered_b, m.visible_c, m.direct_b
     lines = [
         "",
         "RESULTADO DO DIAGNÓSTICO: mediana da etapa tela, uma variável por vez; diferença clara é"
@@ -399,16 +459,31 @@ def report_lines(samples):
         f" {DIRECT} {ms_text(direct_a)}: {verdict(screenshot_a, direct_a, SCREENSHOT, DIRECT)}.",
         f"  2. Espera antes da captura, na fase A, com {SCREENSHOT}: {seconds_text(SHORT_WAIT)} s {ms_text(screenshot_a)} ×"
         f" {seconds_text(LONG_WAIT)} s {ms_text(long_a)}: {verdict(long_a, screenshot_a, f'a espera de {seconds_text(LONG_WAIT)} s', f'a espera de {seconds_text(SHORT_WAIT)} s')}.",
-        f"  3. Janela, com {SCREENSHOT} e espera de {seconds_text(SHORT_WAIT)} s: visível (A) {ms_text(visible_a)} ×"
+        f"  3. Janela coberta, com {SCREENSHOT} e espera de {seconds_text(SHORT_WAIT)} s: visível (A) {ms_text(visible_a)} ×"
         f" coberta (B) {ms_text(covered_b)} × visível de novo (C) {ms_text(visible_c)}; com a {DIRECT}, coberta (B)"
         f" {ms_text(direct_b)}.",
+        f"  4. Janela minimizada, com espera de {seconds_text(SHORT_WAIT)} s: visível de novo (C) {ms_text(visible_c)} ×"
+        f" minimizada (D) {ms_text(m.minimized_d)} com {SCREENSHOT}; {ms_text(m.direct_d)} com a {DIRECT}:"
+        f" {verdict(m.minimized_d, visible_c, 'a janela minimizada', 'a janela visível')}.",
     ]
+    for phase in PHASES:
+        states = phase_windows(samples, phase.key)
+        if phase.key == "D" and states and MINIMIZED not in states:
+            lines.append(
+                "  AVISO: na fase D, o navegador não informou a janela minimizada"
+                f" ({', '.join(window_text(state) for state in states)}); a comparação 4 não mediu uma janela minimizada."
+            )
+        if phase.key != "D" and MINIMIZED in states:
+            lines.append(
+                f"  AVISO: na fase {phase.key}, o navegador informou a janela minimizada em parte das leituras;"
+                " essa fase não mediu uma janela à vista."
+            )
     counts = median(s.count_ms for s in samples)
     if counts is not None:
         answered = "atrasada: a página estava ocupada" if counts >= BUSY_COUNT_MS else "rápida"
         lines.append(f"  Resposta da página à contagem do elemento do gráfico: mediana {counts:.0f} ms, {answered}.")
     lines += ocr_lines(samples)
-    lines += conclusion_lines(screenshot_a, direct_a, long_a, visible_a, covered_b, visible_c, direct_b, counts)
+    lines += conclusion_lines(m, counts)
     return lines
 
 
@@ -428,17 +503,25 @@ def ocr_lines(samples):
     return lines
 
 
-def conclusion_lines(screenshot_a, direct_a, long_a, visible_a, covered_b, visible_c, direct_b, counts):
+def conclusion_lines(m, counts):
+    screenshot_a, direct_a, long_a = m.screenshot_a, m.direct_a, m.long_a
+    visible_a, covered_b, visible_c = m.screenshot_a, m.covered_b, m.visible_c
     window = clearly_slower(covered_b, visible_a) and clearly_slower(covered_b, visible_c)
+    minimized = clearly_slower(m.minimized_d, visible_c)
     wait = clearly_slower(long_a, screenshot_a)
     method = clearly_slower(screenshot_a, direct_a)
     found = []
     if window:
-        both = " também com a captura direta" if clearly_slower(direct_b, direct_a) else ""
+        both = " também com a captura direta" if clearly_slower(m.direct_b, direct_a) else ""
         found.append(
             "a captura fica lenta quando outra janela cobre o navegador e volta ao normal quando ele"
             f" fica visível{both}. Durante o coletor e a varredura, deixe o navegador visível, sem o"
             " terminal nem o visualizador de imagens por cima"
+        )
+    if minimized:
+        found.append(
+            "a captura fica lenta com o navegador minimizado. Durante o coletor e a varredura, não"
+            " minimize o navegador"
         )
     if wait:
         found.append(
@@ -454,7 +537,7 @@ def conclusion_lines(screenshot_a, direct_a, long_a, visible_a, covered_b, visib
     if found:
         lines += [f"  - {item}." for item in found]
     else:
-        measured = [value for value in (visible_a, covered_b, visible_c, direct_a, long_a) if value is not None]
+        measured = [value for value in (visible_a, covered_b, visible_c, direct_a, long_a, m.minimized_d) if value is not None]
         if not measured:
             lines.append("  - nenhuma captura terminou; veja os motivos acima.")
         elif max(measured) < SLOW_MS:
@@ -465,8 +548,8 @@ def conclusion_lines(screenshot_a, direct_a, long_a, visible_a, covered_b, visib
         elif min(measured) >= SLOW_MS:
             lines.append(
                 "  - a demora apareceu em todas as fases, nos dois métodos e com as duas esperas: não é a"
-                " janela coberta, nem a espera, nem a preparação do Playwright. Causa não identificada"
-                " por este diagnóstico."
+                " janela coberta nem minimizada, nem a espera, nem a preparação do Playwright. Causa não"
+                " identificada por este diagnóstico."
             )
         else:
             lines.append("  - resultado misto, sem uma diferença clara numa só variável.")
@@ -500,23 +583,14 @@ class DiagnosticSession(observe.PlaywrightSession):
     """PlaywrightSession with the direct capture, to compare it with page.screenshot.
 
     capture_direct finds the element and its strip as capture does, then sends Chromium's
-    own Page.captureScreenshot through a DevTools session, with the clip that Playwright
+    own Page.captureScreenshot through the DevTools session, with the clip that Playwright
     1.64.0 computes for page.screenshot(clip=...): the visual viewport's offset added, the
     size divided by its scale and rounded down, and that scale. Nothing runs in the page's
-    frames. _cdp is the only way to the DevTools session, and it sends only the commands of
-    READ_ONLY_CDP_METHODS, which read the viewport and capture pixels.
+    frames. The session's _cdp, the only way to DevTools, sends only READ_ONLY_CDP_METHODS:
+    they read the window's state and the viewport, and capture pixels.
     """
 
-    def __init__(self, *args):
-        self._devtools = None
-        super().__init__(*args)
-
-    def _cdp(self, method, params):
-        if method not in READ_ONLY_CDP_METHODS:
-            raise ReadError(f"comando do DevTools fora da lista de leitura: {method}")
-        if self._devtools is None:
-            self._devtools = self._context.new_cdp_session(self._page)
-        return self._devtools.send(method, params)
+    cdp_methods = READ_ONLY_CDP_METHODS
 
     def capture_direct(self, selector, timeout_ms, strip=None):
         """Capture of the only visible element of selector, or of its right strip, without Playwright's preparation."""

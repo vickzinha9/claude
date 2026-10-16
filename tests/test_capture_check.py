@@ -36,12 +36,18 @@ VISUAL = {"chart": "#grafico", "marker": BLUE_MARKER}
 
 
 class FakeDiagnosticSession:
-    """Stands in for DiagnosticSession; tela(method, wait, covered) gives the step's time."""
+    """Stands in for DiagnosticSession; tela(method, wait, window) gives the step's time.
+
+    window is visível, coberta or minimizada, as the answers to the phases leave it; the
+    browser reports minimized for minimizada and normal otherwise, unless reported says
+    something else.
+    """
 
     def __init__(self, tela, asset="USD/JPY OTC"):
         self.tela = tela
         self.asset = asset
-        self.covered = False
+        self.window = "visível"
+        self.reported = None  # what window_state answers instead, when given
         self.last_wait = None
         self.calls, self.waits = [], []
         self.window_closed = False
@@ -64,10 +70,15 @@ class FakeDiagnosticSession:
         self.waits.append(seconds)
         self.last_wait = seconds
 
+    def window_state(self):
+        if self.reported is not None:
+            return self.reported
+        return "minimized" if self.window == "minimizada" else "normal"
+
     def _capture(self, method, strip):
         self.calls.append((method, strip))
         image = chart_images.right_strip(chart_images.chart(marker_y=150), strip)
-        ms = self.tela(method, self.last_wait, self.covered)
+        ms = self.tela(method, self.last_wait, self.window)
         return observe.Capture(1, True, image, image.width, element_ms=4.0, screenshot_ms=ms, decode_ms=1.0, count_ms=2.0, strip_css=strip)
 
     def capture(self, selector, timeout_ms, strip=None):
@@ -109,14 +120,15 @@ class DiagnosticTestCase(unittest.TestCase):
         session = FakeDiagnosticSession(tela)
         self.session = session
 
-        def phase(covered):
+        def phase(window):
             def answer():
-                session.covered = covered
+                session.window = window
                 return ""
 
             return answer
 
-        answers = answers or ["", phase(False), phase(True), phase(False)]  # login, then A, B and C
+        if answers is None:  # login, then phases A, B, C and D
+            answers = ["", phase("visível"), phase("coberta"), phase("visível"), phase("minimizada")]
         self.answers = Answers(answers)
         self.opened = []
 
@@ -147,43 +159,52 @@ class DiagnosticTestCase(unittest.TestCase):
 
 class PhasesTest(DiagnosticTestCase):
     def test_a_covered_window_is_found_with_one_variable_at_a_time(self):
-        code = self.run_check(lambda method, wait, covered: 2000.0 if covered else 150.0)
+        code = self.run_check(lambda method, wait, window: 2000.0 if window == "coberta" else 150.0)
         self.assertEqual((code, self.err), (0, ""), self.out)
         self.assertEqual(self.answers.pending, [])
         # The phases, each started with Enter, and the plan of each one.
         self.assertIn("FASE A: navegador visível.", self.out)
         self.assertIn("FASE B: navegador coberto por este terminal. Maximize este terminal", self.out)
         self.assertIn("FASE C: navegador visível de novo.", self.out)
+        self.assertIn("FASE D: navegador minimizado. Minimize o navegador pelo botão de minimizar", self.out)
         strips = {call[1] for call in self.session.calls if call[0] in (capture_check.SCREENSHOT, capture_check.DIRECT)}
         self.assertEqual(strips, {observe.quote_reader.strip_width(observe.quote_reader.MarkerModel.from_json(BLUE_MARKER))})
         methods = [call[0] for call in self.session.calls if call[0] in (capture_check.SCREENSHOT, capture_check.DIRECT)]
-        self.assertEqual(len(methods), 12 + 3 + 12 + 12)
+        self.assertEqual(len(methods), 12 + 3 + 12 + 12 + 12)
         self.assertEqual(methods[:4], [capture_check.SCREENSHOT, capture_check.DIRECT, capture_check.DIRECT, capture_check.SCREENSHOT])
-        self.assertEqual(self.session.waits, [0.5] * 12 + [5.0] * 3 + [0.5] * 24)
+        self.assertEqual(self.session.waits, [0.5] * 12 + [5.0] * 3 + [0.5] * 36)
         rows = self.rows()
-        self.assertEqual(len(rows), 39)
-        self.assertEqual([row["phase"] for row in rows], ["A"] * 15 + ["B"] * 12 + ["C"] * 12)
+        self.assertEqual(len(rows), 51)
+        self.assertEqual([row["phase"] for row in rows], ["A"] * 15 + ["B"] * 12 + ["C"] * 12 + ["D"] * 12)
         self.assertEqual({row["method"] for row in rows}, {capture_check.SCREENSHOT, capture_check.DIRECT})
         self.assertEqual({row["result"] for row in rows}, {"ok"})
         self.assertEqual({row["asset"] for row in rows}, {"USD/JPY OTC"})
         self.assertEqual({row["screenshot_ms"] for row in rows if row["phase"] == "B"}, {"2000.0"})
+        self.assertEqual({row["window"] for row in rows if row["phase"] == "D"}, {"minimized"})
+        self.assertEqual({row["window"] for row in rows if row["phase"] != "D"}, {"normal"})
+        self.assertIn("Fase D (navegador minimizado); janela do navegador, segundo ele: minimizada:", self.out)
+        self.assertIn("| janela minimizada | cotação", self.out)
         # The comparisons, and the only clear difference: the covered window.
         self.assertIn("1. Método, na fase A, com espera de 0,5 s: page.screenshot 150 ms × captura direta 150 ms: sem diferença clara.", self.out)
         self.assertIn("2. Espera antes da captura, na fase A, com page.screenshot: 0,5 s 150 ms × 5 s 150 ms: sem diferença clara.", self.out)
         self.assertIn("visível (A) 150 ms × coberta (B) 2000 ms × visível de novo (C) 150 ms; com a captura direta, coberta (B) 2000 ms.", self.out)
+        self.assertIn("4. Janela minimizada, com espera de 0,5 s: visível de novo (C) 150 ms × minimizada (D) 150 ms com page.screenshot; 150 ms com a captura direta: sem diferença clara.", self.out)
         self.assertIn(
             "  - a captura fica lenta quando outra janela cobre o navegador e volta ao normal quando ele fica"
             " visível também com a captura direta.",
             self.out,
         )
         self.assertNotIn("preparação da página pelo Playwright", self.out)
+        self.assertNotIn("com o navegador minimizado", self.out)
+        self.assertNotIn("AVISO", self.out)
         self.assertIn("Resposta da página à contagem do elemento do gráfico: mediana 2 ms, rápida.", self.out)
-        self.assertIn("OCR: 39 de 39 leituras com cotação;", self.out)
+        self.assertIn("OCR: 51 de 51 leituras com cotação;", self.out)
         self.assertEqual(self.session.closes, 1)
         self.assertNotIn("click", [call[0] for call in self.session.calls])
 
     def test_each_variable_is_concluded_only_when_its_difference_is_clear(self):
         cases = {
+            "a captura fica lenta com o navegador minimizado": lambda m, w, c: 1900.0 if c == "minimizada" else 150.0,
             "o page.screenshot é mais lento que a captura direta": lambda m, w, c: 1500.0 if m == capture_check.SCREENSHOT else 120.0,
             "a captura depois de uma espera de 5 s é mais lenta": lambda m, w, c: 2000.0 if w == 5.0 else 150.0,
             "nenhuma demora apareceu": lambda m, w, c: 140.0,
@@ -197,13 +218,35 @@ class PhasesTest(DiagnosticTestCase):
                 self.assertEqual(self.run_check(tela), 0, self.out)
                 conclusion = self.out.split("Conclusão, só sobre este computador neste momento:")[1]
                 self.assertIn(expected, conclusion)
-                if expected != "a captura fica lenta quando outra janela cobre":
-                    self.assertNotIn("outra janela cobre o navegador", conclusion)
+                self.assertNotIn("outra janela cobre o navegador", conclusion)
+                if expected != "a captura fica lenta com o navegador minimizado":
+                    self.assertNotIn("com o navegador minimizado", conclusion)
+
+    def test_a_phase_whose_window_was_not_what_it_asked_for_is_flagged(self):
+        def minimized_too_early():
+            self.session.reported = "minimized"  # minimized already in phase C
+            return ""
+
+        def visible_in_d():
+            self.session.reported = "normal"  # the window was never minimized
+            return ""
+
+        answers = ["", "", "", minimized_too_early, visible_in_d]
+        code = self.run_check(lambda m, w, c: 150.0, answers=answers)
+        self.assertEqual(code, 0, self.out)
+        self.assertIn(
+            "AVISO: na fase C, o navegador informou a janela minimizada em parte das leituras; essa fase não mediu uma janela à vista.",
+            self.out,
+        )
+        self.assertIn(
+            "AVISO: na fase D, o navegador não informou a janela minimizada (normal); a comparação 4 não mediu uma janela minimizada.",
+            self.out,
+        )
 
     def test_the_ocr_agreements_on_the_separator_are_counted(self):
         code = self.run_check(lambda m, w, c: 150.0, engine=SeparatorEngine())
         self.assertEqual(code, 0, self.out)
-        self.assertIn("OCR: 39 de 39 leituras com cotação; em 39 delas, as duas leituras só divergiram no separador decimal", self.out)
+        self.assertIn("OCR: 51 de 51 leituras com cotação; em 51 delas, as duas leituras só divergiram no separador decimal", self.out)
         self.assertEqual({row["quote"] for row in self.rows()}, {"162.192"})
         self.assertIn("cotação 162.192 (as duas leituras do OCR só divergiram no separador decimal: '162,192' e '162.192')", self.out)
 
@@ -324,7 +367,11 @@ class DirectCaptureTest(unittest.TestCase):
             with self.subTest(method=method), self.assertRaises(observe.ReadError):
                 session._cdp(method, {})
         self.assertEqual((created, devtools.sent), ([], []))
-        self.assertEqual(capture_check.READ_ONLY_CDP_METHODS, ("Page.getLayoutMetrics", "Page.captureScreenshot"))
+        self.assertEqual(
+            capture_check.READ_ONLY_CDP_METHODS,
+            ("Browser.getWindowForTarget", "Page.getLayoutMetrics", "Page.captureScreenshot"),
+        )
+        self.assertEqual(capture_check.DiagnosticSession.cdp_methods, capture_check.READ_ONLY_CDP_METHODS)
 
     def test_an_answer_of_another_shape_is_a_read_error(self):
         self.device = 1.0
@@ -335,28 +382,39 @@ class DirectCaptureTest(unittest.TestCase):
 
 
 class SourceTest(unittest.TestCase):
+    def calls(self, name, attribute):
+        """(function name, call) of every call of .attribute(...) in pocketautonomo/name."""
+        tree = ast.parse((ROOT / "pocketautonomo" / name).read_text(encoding="utf-8"))
+        found = []
+        for function in ast.walk(tree):
+            if isinstance(function, ast.FunctionDef):
+                for node in ast.walk(function):
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == attribute:
+                        found.append((function.name, node))
+        return tree, found
+
     def test_the_diagnostic_only_reads_and_sends_only_read_only_commands(self):
-        tree = ast.parse((ROOT / "pocketautonomo" / "capture_check.py").read_text(encoding="utf-8"))
+        tree, _ = self.calls("capture_check.py", "send")
         attributes = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
         self.assertEqual(attributes & (FORBIDDEN_ATTRIBUTES | {"sleep", "screenshot"}), set())
         names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
         self.assertEqual(names & {"getattr", "setattr", "eval", "exec", "__import__"}, set())
-        sends = []
-        cdp_calls = []
-        for function in ast.walk(tree):
-            if not isinstance(function, ast.FunctionDef):
-                continue
-            for node in ast.walk(function):
-                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-                    if node.func.attr == "send":
-                        sends.append(function.name)
-                    if node.func.attr == "_cdp":
-                        cdp_calls.append(node)
-        self.assertEqual(sends, ["_cdp"])  # the only way to the DevTools session
-        self.assertTrue(cdp_calls)
-        for call in cdp_calls:
-            self.assertIsInstance(call.args[0], ast.Constant)
-            self.assertIn(call.args[0].value, capture_check.READ_ONLY_CDP_METHODS)
+        # The only way to the DevTools session is PlaywrightSession._cdp, in observe.py, which
+        # checks the list of its class before each command; no other send exists.
+        for name in ("capture_check.py", "scan.py", "quote_reader.py", "quote_ocr.py", "analysis.py"):
+            with self.subTest(module=name):
+                self.assertEqual(self.calls(name, "send")[1], [])
+        _, sends = self.calls("observe.py", "send")
+        self.assertEqual([function for function, _ in sends], ["_cdp"])
+        for name, allowed in (
+            ("observe.py", observe.READ_ONLY_CDP_METHODS),
+            ("capture_check.py", capture_check.READ_ONLY_CDP_METHODS),
+        ):
+            _, uses = self.calls(name, "_cdp")
+            self.assertTrue(uses, name)
+            for _, call in uses:
+                self.assertIsInstance(call.args[0], ast.Constant)
+                self.assertIn(call.args[0].value, allowed)
 
 
 if __name__ == "__main__":

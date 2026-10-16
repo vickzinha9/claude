@@ -80,6 +80,9 @@ RUNTIME_DIR = Path("runtime")  # relative to the current directory, like the sim
 PROFILE_DIR_NAME = "browser-profile"
 SELECTORS_FILE_NAME = "observe-selectors.json"
 PLAYWRIGHT_REQUIREMENT = "playwright==1.64.0"
+# The only DevTools command of the collector: it reads the browser window's state.
+READ_ONLY_CDP_METHODS = ("Browser.getWindowForTarget",)
+MINIMIZED = "minimized"
 
 FIELDS = ("asset", "price", "payout")
 # The files keep the keys asset, price and payout; only the texts shown changed. "price" is
@@ -938,20 +941,31 @@ def capture_steps(capture):
 SLOW_SCREENSHOT_MS = 1000  # the step "tela" this long or longer gets the warning, once per run
 
 
-def warn_slow_capture(ctx, capture):
+def warn_slow_capture(ctx, capture, session):
     """Warn once per run when the screenshot of the chart took SLOW_SCREENSHOT_MS or more.
 
     The count of the element is the page's answer to a light question: when it is fast and
     the screenshot slow, the time goes to producing or copying the image, not to the page.
+    Only then is the browser asked whether its window is minimized: in the Windows job of
+    the CI, on a local page, a minimized window made each capture take about 2 s.
     """
     if ctx.slow_capture_warned or capture.screenshot_ms is None or capture.screenshot_ms < SLOW_SCREENSHOT_MS:
         return
     ctx.slow_capture_warned = True
     answered = "" if capture.count_ms is None else f"; a página respondeu à contagem do elemento em {capture.count_ms:.0f} ms"
+    slow = f"a etapa tela levou {capture.screenshot_ms:.0f} ms{answered}"
+    state = session.window_state()
+    if state == MINIMIZED:
+        warn(
+            f"AVISO: a janela do navegador está minimizada, e a captura do gráfico ficou lenta: {slow}."
+            " Restaure a janela e deixe-a aberta na tela, sem minimizar; a leitura continua, mas mais"
+            " lenta. Este aviso aparece uma vez por execução."
+        )
+        return
+    shown = "" if state is None else f" (janela do navegador: {state})"
     warn(
-        f"AVISO: a captura do gráfico está lenta: a etapa tela levou {capture.screenshot_ms:.0f} ms{answered}."
-        " Deixe a janela do navegador visível, sem outra janela por cima, como o terminal ou o"
-        " visualizador de imagens, e não a minimize. O diagnosticar_windows.cmd mede a causa neste"
+        f"AVISO: a captura do gráfico está lenta: {slow}{shown}. Não minimize a janela do"
+        " navegador e deixe-a aberta na tela. O diagnosticar_windows.cmd mede a causa neste"
         " computador. Este aviso aparece uma vez por execução."
     )
 
@@ -968,7 +982,7 @@ def read_quote_visually(session, source, ctx):
     capture_ms = ctx.elapsed_ms(start)
     steps = capture_steps(capture) if capture is not None else {}
     if capture is not None:
-        warn_slow_capture(ctx, capture)
+        warn_slow_capture(ctx, capture, session)
     if capture is None:
         return VisualReading(unavailable(problem), None, None, QuoteTimings(capture_ms, **steps))
     start = ctx.monotonic()
@@ -1635,7 +1649,8 @@ def save_preview(ctx, prefix, image, labelled_boxes, read_line, title):
         ctx.show_image(path)
         say(
             "  Se a imagem abriu num visualizador, feche-o ou tire-o de cima do navegador depois de"
-            " conferi-la: as leituras e a sua comparação com a tela precisam do navegador visível."
+            " conferi-la, sem minimizar o navegador: a sua comparação com a tela precisa dele à"
+            " vista, e uma janela minimizada deixa a captura lenta."
         )
         return path
 
@@ -1787,9 +1802,17 @@ class PlaywrightSession:
     get_attribute and screenshot, which captures only the clip of the chart element and
     returns the image to memory, never to a file. Nothing here clicks, types, presses keys,
     evaluates JavaScript of its own, reads cookies or storage, or listens to the network.
+
+    window_state asks the browser, not the page, whether its window is minimized, through a
+    DevTools session that _cdp opens on first use. _cdp is the only way to that session,
+    and it sends only the commands of cdp_methods, checked before each one: here, only
+    Browser.getWindowForTarget, which reads the window's position, size and state.
     """
 
+    cdp_methods = READ_ONLY_CDP_METHODS
+
     def __init__(self, sync_playwright, error_type, profile_dir, headless):
+        self._devtools = None
         self._error_type = error_type
         self._playwright = None
         self._context = None
@@ -1838,6 +1861,25 @@ class PlaywrightSession:
 
     def is_closed(self):
         return self._page.is_closed()
+
+    def _cdp(self, method, params):
+        """Send method, one of cdp_methods, through the DevTools session; any other is refused."""
+        if method not in self.cdp_methods:
+            raise ReadError(f"comando do DevTools fora da lista de leitura: {method}")
+        if self._devtools is None:
+            self._devtools = self._context.new_cdp_session(self._page)
+        return self._devtools.send(method, params)
+
+    def window_state(self):
+        """normal, minimized, maximized or fullscreen: the browser window's state, or None.
+
+        The browser answers, not the page. None when the state could not be read: the
+        reading goes on as before.
+        """
+        try:
+            return self._cdp("Browser.getWindowForTarget", {})["bounds"]["windowState"]
+        except (self._error_type, ReadError, KeyError, TypeError):
+            return None
 
     def read(self, selector, timeout_ms):
         """ElementText for selector: the text only when exactly one visible element matches."""

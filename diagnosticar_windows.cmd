@@ -5,9 +5,9 @@ rem Usa o Python de .venv, criado por preparar_windows.cmd, para rodar
 rem     python -m pocketautonomo.capture_check
 rem O programa pede o link (se voce nao passar --url), abre o navegador com o mesmo perfil
 rem do coletor e, depois do Enter, so le a cotacao do ativo que esta na tela, pelo grafico,
-rem com a fonte gravada por observar_windows.cmd. Sao tres fases, cada uma comecada com
-rem Enter: navegador visivel, navegador coberto por este terminal maximizado e navegador
-rem visivel de novo. No fim, ele mostra as medianas da etapa tela e a conclusao.
+rem com a fonte gravada por observar_windows.cmd. Sao quatro fases, cada uma comecada
+rem com Enter: navegador visivel, coberto por este terminal maximizado, visivel de novo e
+rem minimizado. No fim, ele mostra as medianas da etapa tela e a conclusao.
 rem O diagnostico nao envia ordens, nao clica e nao troca de ativo. Ele grava so um CSV novo
 rem em runtime\, sem apagar nada. Funciona com dois cliques ou pelo terminal, de qualquer
 rem pasta: ele entra na pasta onde esta. No final, a janela espera uma tecla, a menos que

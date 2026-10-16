@@ -79,6 +79,7 @@ class FakeSession:
         self.wait_actions = wait_actions or {}
         self.captures = dict(captures or {})  # chart selector -> RgbImage, Capture or exception
         self.texts = list(texts or [])  # what find_quote_texts finds
+        self.window = None  # what window_state answers: None, as when the browser cannot tell
         self.opened = []
         self.reads = []
         self.capture_calls = []
@@ -127,6 +128,9 @@ class FakeSession:
 
     def find_quote_texts(self, limit):
         return self.texts[:limit]
+
+    def window_state(self):
+        return self.window
 
     def wait(self, seconds):
         self.waits.append(seconds)
@@ -1170,10 +1174,9 @@ class ConfigureQuoteTest(ObserveTestCase):
         self.assertEqual(
             run.err,
             "AVISO: a captura do gráfico está lenta: a etapa tela levou 2900 ms; a página respondeu à"
-            " contagem do elemento em 1 ms. Deixe a janela do navegador visível, sem outra janela por"
-            " cima, como o terminal ou o visualizador de imagens, e não a minimize. O"
-            " diagnosticar_windows.cmd mede a causa neste computador. Este aviso aparece uma vez por"
-            " execução.\n",
+            " contagem do elemento em 1 ms. Não minimize a janela do navegador e deixe-a aberta na"
+            " tela. O diagnosticar_windows.cmd mede a causa neste computador. Este aviso aparece uma"
+            " vez por execução.\n",
         )
         self.assertIn("Se a imagem abriu num visualizador, feche-o ou tire-o de cima do navegador", run.out)
         # The fake timer adds 2 ms per reading of the clock; the steps of the capture come
@@ -1183,6 +1186,26 @@ class ConfigureQuoteTest(ObserveTestCase):
             " (elemento 3, tela 2900, decodificação 12), detecção 2 ms, OCR 2 ms)",
             run.out,
         )
+
+    def test_a_slow_capture_with_the_window_minimized_says_so(self):
+        source = observe.QuoteOcrSource("#grafico", observe.quote_reader.MarkerModel.from_json(BLUE_MARKER))
+        image = chart_images.chart(marker_y=150)
+        for window, expected in (
+            ("minimized", "AVISO: a janela do navegador está minimizada, e a captura do gráfico ficou lenta: a etapa tela levou 1900 ms; a página respondeu à contagem do elemento em 2 ms. Restaure a janela"),
+            ("normal", "AVISO: a captura do gráfico está lenta: a etapa tela levou 1900 ms; a página respondeu à contagem do elemento em 2 ms (janela do navegador: normal). Não minimize"),
+        ):
+            with self.subTest(window=window):
+                slow = observe.Capture(1, True, image, image.width, screenshot_ms=1900.0, count_ms=2.0)
+                fast = observe.Capture(1, True, image, image.width, screenshot_ms=30.0, count_ms=2.0)
+                session = FakeSession(captures={"#grafico": [slow, fast, slow]})
+                session.window = window
+                ctx = context(engine=chart_images.FakeEngineHolder())
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    for _ in range(3):
+                        self.assertEqual(observe.read_field(session, "price", source, ctx).value, "1.26543")
+                self.assertEqual(err.getvalue().count("AVISO"), 1)  # once per run, the reading goes on
+                self.assertTrue(err.getvalue().startswith(expected), err.getvalue())
 
     def test_a_failed_save_of_the_selectors_can_be_retried(self):
         real_save = observe.save_selectors
@@ -1374,6 +1397,41 @@ class FakeChartPage:
         right = min(clip["x"] + clip["width"], self.window[0])
         bottom = min(clip["y"] + clip["height"], self.window[1])
         return FakePng(round((right - clip["x"]) * self.scale), round((bottom - clip["y"]) * self.scale))
+
+
+class WindowStateTest(unittest.TestCase):
+    """PlaywrightSession.window_state: the browser tells the window's state, through one command."""
+
+    def session(self, answer):
+        sent, created = [], []
+
+        class DevTools:
+            def send(self, method, params):
+                sent.append(method)
+                if isinstance(answer, Exception):
+                    raise answer
+                return answer
+
+        context = types.SimpleNamespace(new_cdp_session=lambda page: created.append(page) or DevTools())
+        session = object.__new__(observe.PlaywrightSession)
+        session._page, session._context, session._error_type, session._devtools = object(), context, RuntimeError, None
+        return session, sent, created
+
+    def test_the_state_comes_from_the_browser_and_nothing_else_is_sent(self):
+        session, sent, created = self.session({"windowId": 1, "bounds": {"windowState": "minimized"}})
+        self.assertEqual(session.window_state(), "minimized")
+        self.assertEqual(session.window_state(), "minimized")
+        self.assertEqual((sent, len(created)), (["Browser.getWindowForTarget"] * 2, 1))
+        for method in ("Runtime.evaluate", "Page.captureScreenshot", "Input.dispatchMouseEvent", "Browser.setWindowBounds"):
+            with self.subTest(method=method), self.assertRaises(observe.ReadError):
+                session._cdp(method, {})
+        self.assertEqual(observe.READ_ONLY_CDP_METHODS, ("Browser.getWindowForTarget",))
+
+    def test_an_unknown_state_is_none_and_the_reading_goes_on(self):
+        for answer in (RuntimeError("Browser.getWindowForTarget: not supported"), {"bounds": {}}, {"unexpected": 1}):
+            with self.subTest(answer=answer):
+                session, _, _ = self.session(answer)
+                self.assertIsNone(session.window_state())
 
 
 class CaptureStripTest(unittest.TestCase):

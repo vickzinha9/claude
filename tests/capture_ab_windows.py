@@ -59,6 +59,7 @@ def main():
             results = {}
 
             def measure(label):
+                print(f"{label}: o navegador informa a janela como {session.window_state()}", flush=True)
                 direct = capture_check.DirectView(session)
                 for number in range(READINGS):
                     for method in ((capture_check.SCREENSHOT, capture_check.DIRECT) if number % 2 == 0 else (capture_check.DIRECT, capture_check.SCREENSHOT)):

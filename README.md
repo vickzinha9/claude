@@ -191,7 +191,7 @@ Na raiz do projeto, a pasta `claude`, ficam cinco arquivos. Abra os dois primeir
 2. **`observar_windows.cmd`** usa o Python de `.venv` para rodar `python -m pocketautonomo.observe --configure --count 3`. Argumentos extras vão para o programa, como em `observar_windows.cmd --interval 10`.
 3. **`varrer_windows.cmd`** usa o mesmo Python para rodar `python -m pocketautonomo.scan --configure`, também com os argumentos extras, como em `varrer_windows.cmd --cycles 2`. Ele precisa das fontes gravadas pelo `observar_windows.cmd`.
 4. **`analisar_windows.cmd`** usa o mesmo Python para rodar `python -m pocketautonomo.analysis`, com os argumentos extras, como em `analisar_windows.cmd --horizon 60`. Ele só lê os CSV da varredura em `runtime/`; não abre o navegador e não grava nada.
-5. **`diagnosticar_windows.cmd`** usa o mesmo Python para rodar `python -m pocketautonomo.capture_check`, com os argumentos extras. Ele precisa da leitura visual gravada pelo `observar_windows.cmd`, só lê a cotação do ativo que está na tela e grava um CSV novo em `runtime/`.
+5. **`diagnosticar_windows.cmd`** usa o mesmo Python para rodar `python -m pocketautonomo.capture_check`, com os argumentos extras. Ele precisa da leitura visual gravada pelo `observar_windows.cmd`, só lê a cotação do ativo que está na tela, em quatro fases, e grava um CSV novo em `runtime/`.
 
 Se você apertar Ctrl+C, o `cmd` pergunta se quer finalizar o arquivo em lotes ("Deseja finalizar o arquivo em lotes (S/N)?", ou "Terminate batch job (Y/N)?" no Windows em inglês). Responda **N** para a janela continuar aberta com o resumo.
 
@@ -318,25 +318,28 @@ Tempos da leitura da cotação, mediana/máximo em ms, por momento da leitura:
 | `image_px`, `png_bytes`, `strip_css` | tamanho da imagem capturada, em pixels do dispositivo, e do PNG; largura da faixa direita capturada, em px CSS |
 | `note` | coluna nova, no fim: a observação da leitura, como as duas leituras do OCR que só divergiram no separador decimal |
 
-Se a etapa tela de uma captura levar 1 s ou mais, o coletor e a varredura mostram uma vez por execução `AVISO: a captura do gráfico está lenta: a etapa tela levou ... ms; a página respondeu à contagem do elemento em ... ms`, com o pedido de deixar o navegador visível e a indicação do diagnóstico abaixo. Depois de abrir uma imagem de conferência, a configuração lembra de fechar o visualizador ou tirá-lo de cima do navegador.
+Se a etapa tela de uma captura levar 1 s ou mais, o coletor e a varredura perguntam ao navegador o estado da janela dele e mostram, uma vez por execução, `AVISO: a janela do navegador está minimizada, e a captura do gráfico ficou lenta: ...`, quando ela está minimizada, ou `AVISO: a captura do gráfico está lenta: a etapa tela levou ... ms; a página respondeu à contagem do elemento em ... ms`, com a indicação do diagnóstico abaixo. A leitura continua. Depois de abrir uma imagem de conferência, a configuração lembra de fechar o visualizador ou tirá-lo de cima do navegador, sem minimizar o navegador.
 
 ### Diagnóstico da captura
 
-`diagnosticar_windows.cmd` (`python -m pocketautonomo.capture_check`) mede, no seu computador e na Pocket Option, por que a etapa tela da captura demora. **Ele só lê:** não clica, não digita e não troca de ativo; lê a cotação do ativo que está na tela, com a leitura visual gravada em `runtime/observe-selectors.json`. Depois do login e do Enter, ele faz três fases, cada uma começada com Enter:
+`diagnosticar_windows.cmd` (`python -m pocketautonomo.capture_check`) mede, no seu computador e na Pocket Option, por que a etapa tela da captura demora. **Ele só lê:** não clica, não digita e não troca de ativo; lê a cotação do ativo que está na tela, com a leitura visual gravada em `runtime/observe-selectors.json`. Depois do login e do Enter, ele faz quatro fases, cada uma começada com Enter:
 
 | Fase | O que você faz | O que ele lê |
 |---|---|---|
 | A, navegador visível | diminui o terminal para um canto, sem cobrir o gráfico, e fecha o visualizador de imagens | 6 leituras com `page.screenshot` e 6 com a captura direta, alternadas, com 0,5 s antes de cada uma; depois, 3 com `page.screenshot` depois de 5 s de espera |
 | B, navegador coberto | maximiza o terminal por cima do navegador, sem minimizá-lo | 6 de cada método, alternadas, com 0,5 s antes de cada uma |
 | C, navegador visível de novo | volta o terminal para o canto | o mesmo da fase B |
+| D, navegador minimizado | minimiza o navegador pelo botão de minimizar da janela, sem clicar na página; no fim, restaura | o mesmo da fase B |
 
-Cada comparação muda uma variável só, com as outras fixas: o método da captura (fase A), a espera antes dela (fase A) e a janela coberta (A, B e C). A **captura direta** é o próprio comando de captura do Chromium (`Page.captureScreenshot`), com o mesmo recorte que o Playwright calcula, mas sem a preparação que o `page.screenshot` faz antes dele: um script em cada quadro da página, a espera das fontes e a restauração. Numa página local, as duas deram imagens iguais pixel por pixel, nas escalas de 100%, 125% e 150%. Ela existe só no diagnóstico, por uma sessão do DevTools que só aceita `Page.getLayoutMetrics` e `Page.captureScreenshot`; o coletor e a varredura continuam com o `page.screenshot`.
+Cada comparação muda uma variável só, com as outras fixas: o método da captura (fase A), a espera antes dela (fase A), a janela coberta (A, B e C) e a janela minimizada (C e D). Antes de cada leitura, o próprio navegador informa o estado da janela (`normal`, `maximized` ou `minimized`), que vai para a coluna `window` do CSV; se uma fase não mediu o que pediu, como a janela que não foi minimizada na fase D, o resultado avisa. A **captura direta** é o próprio comando de captura do Chromium (`Page.captureScreenshot`), com o mesmo recorte que o Playwright calcula, mas sem a preparação que o `page.screenshot` faz antes dele: um script em cada quadro da página, a espera das fontes e a restauração. Numa página local, as duas deram imagens iguais pixel por pixel, nas escalas de 100%, 125% e 150%. Ela existe só no diagnóstico, por uma sessão do DevTools que só aceita `Page.getLayoutMetrics` e `Page.captureScreenshot`; o coletor e a varredura continuam com o `page.screenshot`.
 
-No fim, o terminal mostra a mediana da etapa tela de cada caso, a resposta da página à contagem do elemento, as leituras do OCR (inclusive as que só divergiram no separador decimal) e uma conclusão que só aponta diferenças claras: 3 vezes ou mais e 300 ms ou mais. Cada leitura vai para `runtime/diagnostico-captura-<data>-<hora>-<sufixo>.csv`, com as colunas do arquivo de tempos e mais `phase`, `method` e `wait_s`. Ele mede só aquele momento, naquele computador.
+No fim, o terminal mostra a mediana da etapa tela de cada caso, a resposta da página à contagem do elemento, as leituras do OCR (inclusive as que só divergiram no separador decimal) e uma conclusão que só aponta diferenças claras: 3 vezes ou mais e 300 ms ou mais. Cada leitura vai para `runtime/diagnostico-captura-<data>-<hora>-<sufixo>.csv`, com as colunas do arquivo de tempos e mais `phase`, `method`, `wait_s` e `window`. Ele mede só aquele momento, naquele computador.
+
+No job Windows do CI, numa página local, que não é a Pocket Option, uma medição com a janela de verdade, visível, mostrou a mesma coisa que o seu coletor: com a janela **minimizada**, cada captura levou cerca de 1,9 s com o `page.screenshot` e 1,0 s com a captura direta; coberta por outra janela, nada mudou (cerca de 20 ms). O diagnóstico confere isso no seu computador.
 
 | Código | Situação |
 |---|---|
-| 0 | as três fases foram medidas |
+| 0 | as quatro fases foram medidas |
 | 1 | falhou ou parou, inclusive com a página fora de pocketoption.com |
 | 2 | argumento ou configuração inválidos, inclusive sem a leitura visual gravada |
 | 130 | interrompido por Ctrl+C; as leituras feitas ficam no CSV |
