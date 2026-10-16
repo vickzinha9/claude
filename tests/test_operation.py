@@ -161,9 +161,9 @@ class OperationTestCase(unittest.TestCase):
         self.clock.advance(2)
         return self.start(**options)
 
-    def decision(self, action=CALL, payout=92.0, age=0.5, validated=True, asset=ASSET):
-        """An ARTIFICIAL decision whose quote was captured age seconds ago."""
-        self.clock.advance(30)
+    def decision(self, action=CALL, payout=92.0, age=0.5, validated=True, asset=ASSET, wait=30.0):
+        """An ARTIFICIAL decision whose quote was captured age seconds ago, wait seconds from now."""
+        self.clock.advance(wait)
         self.price = round(self.price + 0.001, 5)
         at = self.clock.now() - timedelta(seconds=age)
         sample = analysis.Sample(at, self.price, f"{self.price:.5f}", payout)
@@ -432,6 +432,35 @@ class DuplicateTest(OperationTestCase):
         self.assertIn("decisão já usada pelo ciclo 1", reopened.reason)
         self.assertFalse(during.started or other.started or after_win.started or reopened.started)
         self.assertEqual((len(self.orders()), self.query("SELECT COUNT(*) FROM cycles")), (1, [(1,)]))
+
+
+class NextCycleTest(OperationTestCase):
+    """After a cycle ends, there is no pause: only the gates of a first entry decide."""
+
+    def test_a_new_valid_decision_starts_a_cycle_right_after_the_previous_one_ends(self):
+        self.start()
+        first = self.decision(CALL)
+        self.consider(first)
+        self.settle(WIN)
+        ended = self.rows(operation.CYCLE_ENDED)[-1]["at_utc"]
+        refusals = {
+            "decisão já usada pelo ciclo 1": first,
+            "payout 89,9%": self.decision(PUT, payout=89.9, age=0.0, wait=0.001),
+            "nenhuma ordem atrasada": self.decision(PUT, age=5.001, wait=0.001),
+            "não vem de uma regra validada": self.decision(PUT, validated=False, age=0.0, wait=0.001),
+        }
+        for reason, decision in refusals.items():
+            with self.subTest(reason=reason):
+                result = self.consider(decision)
+                self.assertFalse(result.started)
+                self.assertIn(reason, result.reason)
+        started = self.consider(self.decision(PUT, age=0.0, wait=0.001))  # new, validated, current, 92%
+        self.assertTrue(started.started, started)
+        status = self.coordinator.status()
+        self.assertEqual((status.cycle_id, status.direction, status.attempt), (2, PUT, 1))
+        second = self.rows(operation.CYCLE_STARTED)[-1]["at_utc"]
+        self.assertLess((second - ended).total_seconds(), 0.01)  # no waiting time between the cycles
+        self.assertEqual(self.orders(), [(500, WIN), (500, "OPEN")])
 
 
 class UncertainTest(OperationTestCase):
