@@ -541,6 +541,7 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
       - `tests/test_operation.py`, `CollectionPauseTest`, 2 testes: CALL e PUT recusados na PAUSA, sem decisão consumida, e a execução seguinte sem ela; e a pendência mantida e liquidada na PAUSA.
       - `tests/test_operate.py`, `PauseOperationTest`, 3 testes: com a mesma regra validada, a tela limpa abre um ciclo; sem a PAUSA, a leitura contaminada abriria um ciclo em AUD/CAD OTC com a cotação do gráfico de GBP/USD OTC; com ela, a tela contaminada só grava `PAUSA da varredura`, sem ordem nem arquivo de cotações de ciclo, com `ESTADO: PAUSA` e código 1.
       - `tests/test_observe_playwright.py`, `RealScanTest`: com o Chromium de verdade, o favorito fechado põe a varredura em PAUSA, com o aviso e código 1, e o favorito seguinte fica com cotação e payout retidos.
+    - **CI:** a execução [38950155793](https://github.com/vickzinha9/claude/actions/runs/38950155793), no commit `6755f6c`, terminou com `success` nos três jobs: 408 testes, com 392 aprovados e 16 pulados no Linux e 400 aprovados e 8 pulados no Windows, inclusive os 6 de `AssociationTest`, os 2 de `CollectionPauseTest` e os 3 de `PauseOperationTest`; no `windows-browser`, os 8 testes com Chromium e OCR de verdade passaram, inclusive a varredura com um favorito fechado, que agora entra em PAUSA, e a demonstração passou nas 8 cenas, também pelo `operar_windows.cmd`.
     - **Plataforma real: não executado.**
 
 ## Testes
