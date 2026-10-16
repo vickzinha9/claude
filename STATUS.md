@@ -483,6 +483,7 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
 30. **Decisões: ciclos seguidos sem pausa e histórico bruto completo.** Decididas por você depois do item 29; o comportamento do programa não mudou, porque o código já as seguia. Este item as registra e fixa a primeira num teste.
     - **Ciclos seguidos:** depois do fim de um ciclo, outro pode começar na próxima oportunidade válida, sem pausa artificial. Continua exigida uma decisão nova, de regra validada em dados separados, atual e com payout de 90% ou mais na primeira entrada. Teste novo em `tests/test_operation.py`, `NextCycleTest`: logo depois de um WIN, a decisão já usada, a de payout de 89,9%, a vencida e a sem validação são recusadas, e uma decisão nova e válida inicia o ciclo seguinte menos de 10 ms depois do fim do anterior.
     - **Histórico bruto completo:** nenhuma cotação é apagada nem reduzida automaticamente, nem nos arquivos nem na análise. O crescimento fica como pendência de desempenho (Em aberto), e uma otimização futura precisa preservar os dados e os critérios da análise.
+    - **CI:** a execução [38872878706](https://github.com/vickzinha9/claude/actions/runs/38872878706), no commit `9df4407`, terminou com `success` nos três jobs: 390 testes, com 375 aprovados e 15 pulados no Linux e 383 aprovados e 7 pulados no Windows, inclusive o `NextCycleTest`; a demonstração passou nas 8 cenas nos dois sistemas e pelo `operar_windows.cmd`.
     - **Plataforma real: não executado.**
 
 ## Testes
