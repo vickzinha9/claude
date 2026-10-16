@@ -170,15 +170,26 @@ def write_scan_csv(path, rows):
             writer.writerow([row.get(name, "") for name in scan.SCAN_COLUMNS])
 
 
-def scan_row(seconds, price, ready="sim", asset="EUR/USD OTC", payout="92"):
+def scan_row(seconds, price, ready="sim", asset="EUR/USD OTC", payout="92", switch="confirmada", cycle=1):
     at = (START + timedelta(seconds=seconds)).isoformat(timespec="milliseconds")
     return {
+        "captured_at_utc": at,
         "asset": asset,
         "price": f"{price:.5f}",
         "price_captured_at_utc": at,
         "payout_percent": payout,
         "analysis_ready": ready,
+        "switch": switch,
+        "cycle": str(cycle),
     }
+
+
+def failed_switch(seconds, cycle, position, name):
+    """The line of a switch that the asset field did not confirm, as the scan writes it."""
+    row = scan_row(seconds, 0, ready="não", asset="", switch="não confirmada", cycle=cycle)
+    row.update(price="", price_captured_at_utc="", payout_percent="", favorite_position=str(position),
+               favorite_text=f"{name}\n92%")
+    return row
 
 
 class HistoryTest(unittest.TestCase):
@@ -188,8 +199,12 @@ class HistoryTest(unittest.TestCase):
         self.runtime = Path(directory.name)
 
     def test_the_columns_read_are_the_scans(self):
-        for name in a.COLUMNS:
+        for name in a.COLUMNS + (a.SWITCH_COLUMN, a.CYCLE_COLUMN, a.TIME_COLUMN, "favorite_position", "favorite_text"):
             self.assertIn(name, scan.SCAN_COLUMNS)
+        self.assertEqual(a.NOT_CONFIRMED, scan.NOT_CONFIRMED)
+        self.assertEqual(
+            set(a.SWITCH_VALUES), {scan.ALREADY, scan.CONFIRMED, scan.NOT_CONFIRMED, scan.NOT_CLICKED, scan.STANDBY}
+        )
 
     def test_only_lines_usable_for_analysis_are_loaded(self):
         write_scan_csv(
@@ -334,6 +349,227 @@ class HistoryTest(unittest.TestCase):
             self.assertGreaterEqual(validation.evaluation.trades, a.MIN_EVAL_TRADES)
             trades = validation.development.trades + validation.evaluation.trades
             self.assertLessEqual(trades, len(a.decision_moments(series, HORIZON)))
+
+    def snapshot(self):
+        """The name, bytes and modification time of every file in the runtime folder."""
+        return {path.name: (path.read_bytes(), path.stat().st_mtime_ns) for path in sorted(self.runtime.iterdir())}
+
+    def test_the_lines_from_the_first_unconfirmed_switch_on_are_left_out_and_the_files_kept(self):
+        failed = self.runtime / "scan-20261015-100000-aaaaaaaa.csv"
+        write_scan_csv(
+            failed,
+            [
+                scan_row(0, 1.08530),  # before the failure: kept
+                scan_row(30, 0.91210, asset="AUD/CAD OTC"),  # kept
+                failed_switch(60, 1, 3, "AED/CNY OTC"),  # line 4: the PAUSA starts here
+                scan_row(90, 0.91230, asset="AUD/CAD OTC"),  # the right name, maybe another asset's chart
+                scan_row(120, 1.08540, cycle=2),  # a later confirmed switch clears nothing
+                scan_row(150, 0.91250, asset="AUD/CAD OTC", cycle=2),
+                {**scan_row(180, 1.27340, asset="AED/CNY OTC", cycle=2)},  # the favorite back, still out
+                {**scan_row(210, 0, ready="não", asset="", switch="em espera", cycle=3), "price": ""},
+            ],
+        )
+        independent = self.runtime / "scan-20261015-120000-bbbbbbbb.csv"
+        write_scan_csv(independent, [scan_row(7200, 1.08600), scan_row(7230, 0.91300, asset="AUD/CAD OTC")])
+        before = self.snapshot()
+        history = a.load_history(self.runtime)
+        self.assertEqual(self.snapshot(), before)  # only read: the same files, bytes and times
+        self.assertEqual([sample.price for sample in history.get("EUR/USD OTC").samples], [1.08530, 1.08600])
+        self.assertEqual([sample.price for sample in history.get("AUD/CAD OTC").samples], [0.91210, 0.91300])
+        self.assertIsNone(history.get("AED/CNY OTC"))
+        self.assertEqual((history.files, history.usable), (2, 4))
+        # The 4 lines with data from the failed switch on; the other 2 keep their own reason.
+        self.assertEqual(history.skipped, {a.POTENTIAL: 4, "linhas sem dados para análise": 2})
+        [left] = history.left_out
+        self.assertEqual((left.path, left.lines, left.usable, left.undetermined), (failed, 6, 4, False))
+        self.assertEqual(left.detail, "a partir da linha 4 (ciclo 1, troca não confirmada para o favorito 3, AED/CNY OTC 92%)")
+        text = "\n".join(a.report_lines(history, HORIZON, START + timedelta(hours=3)))
+        self.assertIn(
+            "  scan-20261015-100000-aaaaaaaa.csv, a partir da linha 4 (ciclo 1, troca não confirmada para o favorito 3,"
+            " AED/CNY OTC 92%): 4 linhas com dados para análise excluídas, potencialmente inconsistentes, de 6 linhas"
+            " desde ali.",
+            text,
+        )
+        self.assertIn(
+            "As linhas com dados para análise excluídas por isso são potencialmente inconsistentes, o que não quer dizer"
+            " que todas tinham cotação errada.",
+            text,
+        )
+        self.assertIn("Fora da análise, sem mudar nenhum arquivo", text)
+        self.assertNotIn("scan-20261015-120000-bbbbbbbb.csv", text)  # the independent file is whole
+        self.assertIn("Dados: 2 arquivos da varredura, 4 cotações utilizáveis em 2 ativos.", text)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_lines_whose_execution_cannot_be_told_are_left_out_and_reported(self):
+        no_switch = self.runtime / "scan-20261015-100000-aaaaaaaa.csv"
+        with open(no_switch, "w", newline="", encoding="utf-8") as file:
+            writer = csv.writer(file)
+            writer.writerow(a.COLUMNS + (a.TIME_COLUMN,))
+            writer.writerow([scan_row(0, 1.08530)[name] for name in a.COLUMNS + (a.TIME_COLUMN,)])
+        merged = self.runtime / "scan-20261015-110000-bbbbbbbb.csv"  # two executions in one file
+        write_scan_csv(merged, [scan_row(3600, 1.08600), scan_row(3630, 1.08610, cycle=2), scan_row(3660, 1.08620)])
+        cut = self.runtime / "scan-20261015-120000-cccccccc.csv"  # a last line cut before the switch
+        write_scan_csv(cut, [scan_row(7200, 1.08700), scan_row(7230, 1.08710, switch="")])
+        before = self.snapshot()
+        history = a.load_history(self.runtime)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual([sample.price for sample in history.get("EUR/USD OTC").samples], [1.08600, 1.08610, 1.08700])
+        self.assertEqual(history.skipped, {a.UNDETERMINED: 3})
+        details = {item.path.name: (item.lines, item.usable, item.undetermined, item.detail) for item in history.left_out}
+        self.assertEqual(
+            details,
+            {
+                no_switch.name: (1, 1, True, "a partir da linha 2: o arquivo não tem as colunas switch e cycle, que mostram"
+                                 " as trocas e a execução"),
+                merged.name: (1, 1, True, "a partir da linha 4: o ciclo 1 vem depois do ciclo 2, então o arquivo pode ter"
+                              " mais de uma execução"),
+                cut.name: (1, 1, True, "a partir da linha 3 (ciclo 1): o valor '' da coluna switch não diz se a troca foi"
+                           " confirmada"),
+            },
+        )
+        text = "\n".join(a.left_out_lines(history))
+        self.assertIn(
+            f"  {merged.name}, a partir da linha 4: o ciclo 1 vem depois do ciclo 2, então o arquivo pode ter mais de uma"
+            " execução: 1 linha com dados para análise excluída, de execução indeterminada, de 1 linha desde ali.",
+            text,
+        )
+        self.assertIn(
+            "Também ficam fora as de execução indeterminada, em que os arquivos não permitem saber se houve uma troca não"
+            " confirmada antes delas na mesma execução.",
+            text,
+        )
+
+    def test_quotes_read_during_cycles_follow_the_execution_they_were_read_in(self):
+        write_scan_csv(
+            self.runtime / "scan-20261015-100000-aaaaaaaa.csv",
+            [scan_row(0, 1.08530), failed_switch(30, 1, 2, "GBP/USD OTC"), scan_row(120, 1.08540, cycle=2)],
+        )
+        write_scan_csv(self.runtime / "scan-20261015-110000-bbbbbbbb.csv", [scan_row(3600, 1.08600), scan_row(3660, 1.08610)])
+        cycle = {a.ORIGIN_COLUMN: a.ORIGIN_CYCLE}
+        quotes = {
+            -100: True,  # before every execution, after none that paused: kept
+            10: True,  # during the first one, before its unconfirmed switch: kept
+            70: False,  # during it, after the switch: potentially inconsistent
+            1800: False,  # after its last line and before the next one: undetermined
+            3630: True,  # during the second execution, which never paused: kept
+            5000: True,  # after it: whichever execution, none had paused
+        }
+        self.write_cycle_csv(
+            "cotacoes-ciclo-20261015-100001-cccccccc.csv",
+            [{**scan_row(seconds, 1.0 + seconds / 1e5), **cycle} for seconds in quotes],
+        )
+        before = self.snapshot()
+        history = a.load_history(self.runtime)
+        self.assertEqual(self.snapshot(), before)
+        kept = {round((sample.at - START).total_seconds()) for sample in history.get("EUR/USD OTC").samples
+                if sample.origin == a.ORIGIN_CYCLE}
+        self.assertEqual(kept, {seconds for seconds, used in quotes.items() if used})
+        # The scan's line at 120 s and the quote at 70 s; the failed switch's own line has no data.
+        self.assertEqual(history.skipped, {a.POTENTIAL: 2, a.UNDETERMINED: 1, "linhas sem dados para análise": 1})
+        lines = a.left_out_lines(history)
+        self.assertIn(
+            "  cotacoes-ciclo-20261015-100001-cccccccc.csv: 1 cotação excluída, potencialmente inconsistente, lida"
+            " durante scan-20261015-100000-aaaaaaaa.csv, depois da troca não confirmada da linha 3 (ciclo 1).",
+            lines,
+        )
+        self.assertIn(
+            "  cotacoes-ciclo-20261015-100001-cccccccc.csv: 1 cotação excluída, de execução indeterminada, lida entre o"
+            " fim de scan-20261015-100000-aaaaaaaa.csv, que já tinha troca não confirmada na linha 3 (ciclo 1), e o"
+            " começo da execução seguinte, sem como determinar de qual das duas.",
+            lines,
+        )
+        # A scan file that cannot be read may be the execution of a quote outside the others' times.
+        (self.runtime / "scan-20261015-090000-dddddddd.csv").write_bytes(b"\xff\xfe not utf-8")
+        history = a.load_history(self.runtime)
+        self.assertEqual(history.skipped["arquivos que não puderam ser lidos"], 1)
+        self.assertEqual(history.skipped[a.UNDETERMINED], 3)  # 1800 s, and now -100 s and 5000 s too
+        self.assertTrue(any("com um arquivo da varredura que não pôde ser lido" in line for line in a.left_out_lines(history)))
+
+    def cycle_quotes(self, seconds):
+        """A cycle file with a quote at each of seconds; the seconds of those that the history kept."""
+        self.write_cycle_csv(
+            "cotacoes-ciclo-20261015-100001-cccccccc.csv",
+            [{**scan_row(second, 1.0 + second / 1e5), a.ORIGIN_COLUMN: a.ORIGIN_CYCLE} for second in seconds],
+        )
+        before = self.snapshot()
+        history = a.load_history(self.runtime)
+        self.assertEqual(self.snapshot(), before)
+        series = history.get("EUR/USD OTC")
+        kept = {round((sample.at - START).total_seconds()) for sample in (series.samples if series else ())
+                if sample.origin == a.ORIGIN_CYCLE}
+        return history, kept
+
+    def test_overlapping_scan_files_are_taken_together(self):
+        clean = self.runtime / "scan-20261015-100000-aaaaaaaa.csv"
+        write_scan_csv(clean, [scan_row(0, 1.08530), scan_row(100, 1.08540)])
+        paused = self.runtime / "scan-20261015-100001-bbbbbbbb.csv"  # a copied or clock-shifted file, inside the first
+        write_scan_csv(paused, [scan_row(10, 0.91210, asset="AUD/CAD OTC"), failed_switch(15, 1, 2, "GBP/USD OTC"),
+                                scan_row(20, 0.91220, asset="AUD/CAD OTC")])
+        history, kept = self.cycle_quotes((5, 50, 200))
+        self.assertEqual(kept, {5})  # before the first PAUSA among them
+        self.assertEqual(history.skipped[a.UNDETERMINED], 2)
+        lines = a.left_out_lines(history)
+        self.assertIn(
+            f"  cotacoes-ciclo-20261015-100001-cccccccc.csv: 1 cotação excluída, de execução indeterminada, lida num"
+            f" horário em que {clean.name} e {paused.name} se sobrepõem, com troca não confirmada na linha 3 (ciclo 1) em"
+            f" {paused.name} antes dela, sem como determinar a execução.",
+            lines,
+        )
+        self.assertIn(
+            f"  cotacoes-ciclo-20261015-100001-cccccccc.csv: 1 cotação excluída, de execução indeterminada, lida depois do"
+            f" fim de {paused.name}, que já tinha troca não confirmada na linha 3 (ciclo 1), sem como determinar se é dela"
+            " ou de uma execução seguinte.",
+            lines,
+        )
+
+    def test_quotes_during_an_undetermined_execution_or_beside_a_file_without_times(self):
+        merged = self.runtime / "scan-20261015-100000-aaaaaaaa.csv"
+        write_scan_csv(merged, [scan_row(0, 1.08530), scan_row(30, 1.08540, cycle=2), scan_row(60, 1.08550),
+                                scan_row(90, 1.08560)])
+        history, kept = self.cycle_quotes((10, 70, 1000))
+        self.assertEqual(kept, {10})  # before line 4, where the execution becomes undetermined
+        lines = a.left_out_lines(history)
+        self.assertIn(
+            f"  cotacoes-ciclo-20261015-100001-cccccccc.csv: 1 cotação excluída, de execução indeterminada, lida durante"
+            f" {merged.name}, depois da linha 4, de onde a execução é indeterminada.",
+            lines,
+        )
+        self.assertIn(
+            f"  cotacoes-ciclo-20261015-100001-cccccccc.csv: 1 cotação excluída, de execução indeterminada, lida depois do"
+            f" fim de {merged.name}, que já tinha execução indeterminada a partir da linha 4, sem como determinar se é"
+            " dela ou de uma execução seguinte.",
+            lines,
+        )
+        write_scan_csv(merged, [scan_row(0, 1.08530), scan_row(90, 1.08560)])  # now a clean execution
+        history, kept = self.cycle_quotes((10, 1000))
+        self.assertEqual(kept, {10, 1000})
+        timeless = self.runtime / "scan-20261015-090000-dddddddd.csv"
+        write_scan_csv(timeless, [{**scan_row(500, 1.08600), "captured_at_utc": ""}])
+        history, kept = self.cycle_quotes((10, 1000))
+        self.assertEqual(kept, {10})  # 1000 s may be of the execution without times
+        self.assertTrue(any("com um arquivo da varredura que não pôde ser lido ou sem horários" in line
+                            for line in a.left_out_lines(history)))
+
+    def test_the_start_of_a_scan_lists_only_the_files_that_lost_data(self):
+        lost = self.runtime / "scan-20261015-100000-aaaaaaaa.csv"
+        write_scan_csv(lost, [scan_row(0, 1.08530), failed_switch(30, 1, 2, "GBP/USD OTC"), scan_row(60, 1.08540)])
+        paused = self.runtime / "scan-20261015-110000-bbbbbbbb.csv"  # with the PAUSA, nothing usable after the failure
+        write_scan_csv(paused, [scan_row(3600, 1.08600), failed_switch(3630, 1, 2, "GBP/USD OTC"),
+                                scan_row(3660, 1.08610, ready="não")])
+        history = a.load_history(self.runtime)
+        full, start = a.left_out_lines(history), a.left_out_lines(history, everything=False)
+        self.assertIn(
+            f"  {paused.name}, a partir da linha 3 (ciclo 1, troca não confirmada para o favorito 2, GBP/USD OTC 92%):"
+            " nenhuma linha com dados para análise a excluir, de 2 linhas desde ali.",
+            full,
+        )
+        self.assertEqual([line for line in start if line.startswith(f"  {lost.name}")], [line for line in full if line.startswith(f"  {lost.name}")])
+        self.assertFalse([line for line in start if paused.name in line])
+        self.assertEqual(
+            start[-1],
+            "  Mais 1 arquivo com troca não confirmada ou execução indeterminada, sem nenhuma linha com dados para"
+            " análise a excluir; a lista completa está no analisar_windows.cmd.",
+        )
 
     def test_the_report_waits_and_says_why(self):
         rows = [scan_row(i * 60, 1.08 + 0.0001 * math.sin(i)) for i in range(30)]

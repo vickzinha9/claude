@@ -1045,6 +1045,8 @@ def run_scan(session, scan, args, ctx):
         f" {count(history.files, 'arquivo anterior', 'arquivos anteriores')}{origins}. Sem regra validada em"
         f" dados separados, a decisão é {analysis.WAIT}. {analysis.DISCLAIMER}"
     )
+    for line in analysis.left_out_lines(history, everything=False):
+        say(line)
     streak = 0  # cycles in a row without any complete reading
     while args.cycles is None or progress.cycles < args.cycles:
         if session.is_closed():

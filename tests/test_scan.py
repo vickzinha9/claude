@@ -278,7 +278,10 @@ class ScanTestCase(unittest.TestCase):
         with open(files[0], newline="", encoding="utf-8") as file:
             header, *rows = list(csv.reader(file))
         self.assertEqual(tuple(header), scan.SCAN_COLUMNS)
-        return [dict(zip(header, row)) for row in rows]
+        rows = [dict(zip(header, row)) for row in rows]
+        # The history's PAUSA knows every value of the switch column: another one makes the lines undetermined.
+        self.assertLessEqual({row["switch"] for row in rows}, set(scan.analysis.SWITCH_VALUES))
+        return rows
 
 
 def in_range(quote, base):
@@ -920,6 +923,47 @@ class AssociationTest(ScanTestCase):
         self.assertNotIn("PAUSA", self.out + self.err)
         self.assertEqual({row["verdict"] for row in self.timings() if row["moment"] == "depois da troca"} - {""},
                          {"aceita", "recusada: falta uma segunda leitura da cotação, para conferir que ela não saltou"})
+
+
+class OldHistoryTest(ScanTestCase):
+    """A scan file of before the PAUSA, with usable lines after an unconfirmed switch, in a later run."""
+
+    def read(self, path):
+        with open(path, newline="", encoding="utf-8") as file:
+            return list(csv.DictReader(file))
+
+    def test_a_later_run_leaves_out_the_lines_after_the_failure_and_keeps_the_rest(self):
+        old = FakePlatform()
+        old.ignored.add(1)  # GBP/USD OTC never switches, as AED/CNY OTC from cycle 516 on
+        with mock.patch.object(scan, "with_pause", lambda state, visit: visit):  # the scan before the PAUSA
+            self.assertEqual(self.run_scan("--cycles", "2", "--interval", "3", "--load-timeout", "5", platform=old), 0)
+        [path] = self.runtime.glob("scan-*.csv")
+        rows = self.read(path)
+        self.assertEqual(
+            [row["switch"] for row in rows],
+            ["já selecionado", "não confirmada", "confirmada", "confirmada", "não confirmada", "confirmada"],
+        )
+        self.assertEqual([row["analysis_ready"] for row in rows], ["sim", "não", "sim"] * 2)  # used, before the PAUSA
+        original = path.read_bytes()
+        later = FakePlatform()
+        later.t = old.t + 600  # the next run, ten minutes later, with every favorite switching
+        self.assertEqual(self.run_scan("--cycles", "1", "--load-timeout", "5", platform=later), 0, self.err)
+        self.assertIn("1 cotações utilizáveis de 1 arquivo anterior.", self.out)  # only EUR/USD OTC of cycle 1
+        self.assertIn(
+            f"  {path.name}, a partir da linha 3 (ciclo 1, troca não confirmada para o favorito 2, {GBP[0]} 90%): 3"
+            " linhas com dados para análise excluídas, potencialmente inconsistentes, de 5 linhas desde ali.",
+            self.out,
+        )
+        self.assertIn("o que não quer dizer que todas tinham cotação errada", self.out)
+        self.assertEqual(path.read_bytes(), original)  # the old file stays as it was
+        [new] = [item for item in self.runtime.glob("scan-*.csv") if item != path]
+        self.assertEqual([row["analysis_ready"] for row in self.read(new)], ["sim"] * 3)
+        history = scan.analysis.load_history(self.runtime)
+        self.assertEqual(len(history.get(EUR[0]).samples), 2)  # cycle 1 of the old run, and the new run
+        self.assertEqual(len(history.get(AUD[0]).samples), 1)  # only the new run: the old ones came after the failure
+        self.assertEqual(len(history.get(GBP[0]).samples), 1)
+        self.assertEqual([item.path for item in history.left_out], [path])  # the independent run is whole
+        self.assertEqual(path.read_bytes(), original)
 
 
 def starting_off_the_favorites(assets=(EUR, GBP, AUD)):

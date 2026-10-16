@@ -14,8 +14,13 @@ For each asset:
    payout only when it was confirmed). Every quote has its capture time from this
    computer's clock (price_captured_at_utc). Lines of files written before that column
    existed, or without it, lines of another origin and the same quote at the same moment
-   twice are skipped and counted, never guessed. Results of the simulator, decisions and
-   demonstrations are never read.
+   twice are skipped and counted, never guessed. In each scan file, which holds one
+   execution, the line of the first switch that the asset field did not confirm and every
+   line after it are left out as potentially inconsistent, the scan's PAUSA: from that switch
+   on, the chart may be another asset's while the asset's name is right. So are the quotes
+   read during cycles after it in the same execution, and the lines whose execution the files
+   cannot tell, as undetermined. Each file with lines left out is reported, and no file is
+   ever changed. Results of the simulator, decisions and demonstrations are never read.
 2. Hypothetical operations of a horizon H (--horizon, 300 s by default). An operation
    decided at the capture time t of a quote is a WIN for CALL when the first quote at or
    after t + H, at most LABEL_TOLERANCE_FRACTION of H later, is above the quote at t, a
@@ -86,6 +91,20 @@ ORIGIN_LABELS = {
     ORIGIN_SCAN: "de visitas da varredura",
     ORIGIN_CYCLE: "de leituras da tela durante ciclos da operação simulada",
 }
+
+# The scan's PAUSA (scan.Pause), applied when the history is loaded. A scan file holds one
+# execution: the scan writes a new file in each run and never writes to an older one, with the
+# lines in the order of the visits. In each file, the line of the first switch that the asset
+# field did not confirm and every line after it are left out of the analysis: from that switch
+# on, the chart may be another asset's while the asset's name is right, and nothing in the files
+# tells it. Those lines are potentially inconsistent, not necessarily wrong, and the files are
+# only read, never changed.
+SWITCH_COLUMN, CYCLE_COLUMN, TIME_COLUMN = "switch", "cycle", "captured_at_utc"
+NOT_CONFIRMED = "não confirmada"  # scan.NOT_CONFIRMED; the tests check the values against the scan's
+SWITCH_VALUES = ("já selecionado", "confirmada", NOT_CONFIRMED, "não clicado", "em espera")
+# The reasons of the lines with data for analysis that the PAUSA leaves out; the others keep theirs.
+POTENTIAL = "linhas com dados para análise, potencialmente inconsistentes, a partir de uma troca não confirmada"
+UNDETERMINED = "linhas com dados para análise, de execução indeterminada"
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -500,6 +519,7 @@ class History:
     skipped: dict = field(default_factory=dict)  # reason -> count
     origins: dict = field(default_factory=dict)  # origin -> usable quotes
     cycle_files: int = 0
+    left_out: list = field(default_factory=list)  # LeftOut of each file with lines left out by the PAUSA
 
     def skip(self, reason, count=1):
         if count:
@@ -519,6 +539,103 @@ class History:
         return self.series.get(asset_key(name))
 
 
+@dataclass
+class LeftOut:
+    """The lines of one file left out of the analysis by the PAUSA, and where and why they start."""
+
+    path: Path
+    detail: str  # where they start and why, as in "a partir da linha 12 (ciclo 3, troca não confirmada ...)"
+    undetermined: bool = False  # the files cannot tell whether a switch not confirmed came before them
+    cycle_file: bool = False  # lines of a file of quotes read during cycles
+    lines: int = 0  # lines from where they start; in a cycle file, only the quotes left out
+    usable: int = 0  # of them, those that the other criteria would have used: the ones left out
+
+
+@dataclass(frozen=True)
+class Execution:
+    """One scan file: when its lines were recorded, and the line from which nothing of it is used."""
+
+    path: Path
+    first: object = None  # the earliest captured_at_utc of its lines, or None
+    last: object = None  # the latest one
+    paused: object = None  # the captured_at_utc of the line from which nothing is used, or None
+    line: int = 0  # that line of the file, counting the header as line 1
+    cycle: object = None  # its cycle
+    undetermined: bool = False  # from that line on, the execution cannot be told
+
+
+class Timeline:
+    """The executions of the scan in time: which one a quote read during a cycle belongs to.
+
+    One scan runs at a time (runtime/scan.lock), and the quotes of a cycle are read between the
+    visits of its execution, before its first visit (an entry left pending by the last run) or
+    after its last one, never during a visit. So a quote read between the first and the last
+    line of a scan file is of that execution, and it is left out from that execution's PAUSA on.
+    One read after the last line of an execution that had reached its PAUSA may be of it or of
+    the next one: it is undetermined, and so is one read outside the files' times when a scan
+    file could not be read. Files whose times overlap, which one scan at a time never writes,
+    are taken together: from the first PAUSA among them on, a quote read during them is
+    undetermined.
+    """
+
+    def __init__(self, executions, complete=True):
+        self.groups = []  # [first, last, executions], with the executions whose times overlap together
+        for item in sorted((item for item in executions if item.first is not None), key=lambda item: item.first):
+            if self.groups and item.first <= self.groups[-1][1]:
+                group = self.groups[-1]
+                group[1] = max(group[1], item.last)
+                group[2].append(item)
+            else:
+                self.groups.append([item.first, item.last, [item]])
+        self.firsts = [group[0] for group in self.groups]
+        self.complete = complete  # every scan file could be read, each with the times of its lines
+
+    def reason(self, moment):
+        """None when a quote read at moment may be used; otherwise (detail, undetermined)."""
+        index = bisect.bisect_right(self.firsts, moment) - 1
+        if index >= 0:
+            _, last, members = self.groups[index]
+            paused = [item for item in members if item.paused is not None]
+            if moment <= last:  # during the executions of the group
+                if not paused or moment < min(item.paused for item in paused):
+                    return None
+                if len(members) > 1:
+                    names = " e ".join(item.path.name for item in members)
+                    earliest = min(paused, key=lambda item: item.paused)
+                    return (
+                        f"num horário em que {names} se sobrepõem, com {mark(earliest)} em {earliest.path.name} antes"
+                        " dela, sem como determinar a execução"
+                    ), True
+                item = members[0]
+                if item.undetermined:
+                    return f"durante {item.path.name}, depois da linha {item.line}, de onde a execução é indeterminada", True
+                return f"durante {item.path.name}, depois da troca não confirmada da linha {item.line} (ciclo {item.cycle})", False
+            if paused:  # after the last line of an execution that had reached its PAUSA
+                prior = max(paused, key=lambda item: item.last)
+                if index + 1 < len(self.groups):
+                    return (
+                        f"entre o fim de {prior.path.name}, que já tinha {mark(prior)}, e o começo da execução seguinte,"
+                        " sem como determinar de qual das duas"
+                    ), True
+                return (
+                    f"depois do fim de {prior.path.name}, que já tinha {mark(prior)}, sem como determinar se é dela ou"
+                    " de uma execução seguinte"
+                ), True
+        if not self.complete:
+            return (
+                "fora dos horários dos arquivos da varredura lidos, com um arquivo da varredura que não pôde ser lido"
+                " ou sem horários, sem como determinar a execução"
+            ), True
+        return None
+
+
+def mark(execution):
+    """Where the execution stops being used, in a few words."""
+    if execution.undetermined:
+        return f"execução indeterminada a partir da linha {execution.line}"
+    return f"troca não confirmada na linha {execution.line} (ciclo {execution.cycle})"
+
+
 def scan_files(runtime_dir):
     return sorted(path for path in Path(runtime_dir).glob(f"{SCAN_PREFIX}*.csv") if path.is_file())
 
@@ -534,34 +651,163 @@ def load_history(runtime_dir, exclude=()):
     the analysis_ready column, which does not tell whether its data was complete and current,
     and the lines of a cycle file without the origin of a reading of the screen. A quote at
     the moment of one already loaded for the same asset counts once.
+
+    The PAUSA of the scan applies to every file (uncertainty()): in a scan file, the lines from
+    the first switch not confirmed on are left out, potentially inconsistent; so are the quotes
+    of the cycles read during that execution after it. Lines whose execution the files cannot
+    tell are left out too, as undetermined. Each file with lines left out gets a LeftOut in
+    history.left_out. The files are only read.
     """
     history = History()
     excluded = {Path(path).resolve() for path in exclude}
-    sources = [(path, ORIGIN_SCAN) for path in scan_files(runtime_dir)]
-    sources += [(path, ORIGIN_CYCLE) for path in cycle_files(runtime_dir)]
-    for path, origin in sources:
+    executions, complete = [], True
+    for path in scan_files(runtime_dir):
         if path.resolve() in excluded:
             continue
-        try:
-            with open(path, newline="", encoding="utf-8") as file:
-                reader = csv.DictReader(file)
-                rows = list(reader)
-                columns = reader.fieldnames or ()
-        except (OSError, UnicodeDecodeError, csv.Error):
+        table = read_table(path)
+        if table is None:
             history.skip("arquivos que não puderam ser lidos")
+            complete = False
             continue
         history.files += 1
-        history.cycle_files += origin == ORIGIN_CYCLE
+        columns, rows = table
         if any(name not in columns for name in COLUMNS):
             history.skip("linhas de arquivos anteriores à coluna analysis_ready", len(rows))
             continue
-        for row in rows:
-            name, sample = sample_of(row, origin)
-            if name is None:
-                history.skip(sample)
-            else:
-                history.add(name, sample)
+        execution = load_scan_file(path, columns, rows, history)
+        executions.append(execution)
+        complete = complete and (execution.first is not None or not rows)  # without times, no span to place
+    timeline = Timeline(executions, complete)
+    for path in cycle_files(runtime_dir):
+        if path.resolve() in excluded:
+            continue
+        table = read_table(path)
+        if table is None:
+            history.skip("arquivos que não puderam ser lidos")
+            continue
+        history.files += 1
+        history.cycle_files += 1
+        columns, rows = table
+        if any(name not in columns for name in COLUMNS):
+            history.skip("linhas de arquivos anteriores à coluna analysis_ready", len(rows))
+            continue
+        load_cycle_file(path, rows, history, timeline)
     return history
+
+
+def read_table(path):
+    """(columns, rows) of a CSV file, only read; None when it cannot be read."""
+    try:
+        with open(path, newline="", encoding="utf-8") as file:
+            reader = csv.DictReader(file)
+            rows = list(reader)
+            return tuple(reader.fieldnames or ()), rows
+    except (OSError, UnicodeDecodeError, csv.Error):
+        return None
+
+
+def uncertainty(columns, rows):
+    """(index, detail, undetermined) of the first line of a scan file not to be used, or None.
+
+    From the first switch not confirmed on, the chart may be another asset's: the lines are
+    potentially inconsistent. A file without the switch or the cycle column, a value of switch
+    that the scan never writes, as in a cut last line, and a cycle that is not a number or is
+    lower than the one before, as two executions in one file would be, leave the lines from
+    there on of an undetermined execution. Lines are counted from the header, line 1, as in a
+    spreadsheet.
+    """
+    if SWITCH_COLUMN not in columns or CYCLE_COLUMN not in columns:
+        return 0, "a partir da linha 2: o arquivo não tem as colunas switch e cycle, que mostram as trocas e a execução", True
+    previous = None
+    for index, row in enumerate(rows):
+        line = index + 2
+        text = (row.get(CYCLE_COLUMN) or "").strip()
+        if not (text.isascii() and text.isdigit()):
+            return index, f"a partir da linha {line}: o ciclo {text!r} não é um número, e a execução não pode ser delimitada", True
+        cycle = int(text)
+        if previous is not None and cycle < previous:
+            return index, (
+                f"a partir da linha {line}: o ciclo {cycle} vem depois do ciclo {previous}, então o arquivo pode ter"
+                " mais de uma execução"
+            ), True
+        previous = cycle
+        switch = row.get(SWITCH_COLUMN)
+        if switch == NOT_CONFIRMED:
+            favorite = " ".join((row.get("favorite_text") or "").split())
+            favorite = favorite if len(favorite) <= 60 else favorite[:60] + "..."
+            which = f"o favorito {row.get('favorite_position') or '?'}" + (f", {favorite}" if favorite else "")
+            return index, f"a partir da linha {line} (ciclo {cycle}, troca não confirmada para {which})", False
+        if switch not in SWITCH_VALUES:
+            shown = "" if switch is None else switch
+            return index, (
+                f"a partir da linha {line} (ciclo {cycle}): o valor {shown!r} da coluna switch não diz se a troca foi"
+                " confirmada"
+            ), True
+    return None
+
+
+def utc_moment(text):
+    """The moment of a time with its time zone in the files, in UTC, or None."""
+    try:
+        moment = datetime.fromisoformat(text or "")
+        return moment.astimezone(timezone.utc) if moment.tzinfo is not None else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def load_scan_file(path, columns, rows, history):
+    """Add the usable lines of one scan file before its uncertainty to history; return its Execution."""
+    found = uncertainty(columns, rows)
+    end = len(rows) if found is None else found[0]
+    for row in rows[:end]:
+        add_row(history, row, ORIGIN_SCAN)
+    times = [moment for moment in (utc_moment(row.get(TIME_COLUMN)) for row in rows) if moment is not None]
+    first, last = (min(times), max(times)) if times else (None, None)
+    if found is None:
+        return Execution(path, first, last)
+    index, detail, undetermined = found
+    usable = 0
+    for row in rows[index:]:  # the lines without data for analysis keep their own reason
+        name, reason = sample_of(row)
+        if name is None:
+            history.skip(reason)
+        else:
+            usable += 1
+    history.left_out.append(LeftOut(path, detail, undetermined, False, len(rows) - index, usable))
+    history.skip(UNDETERMINED if undetermined else POTENTIAL, usable)
+    later = [moment for moment in (utc_moment(row.get(TIME_COLUMN)) for row in rows[index:]) if moment is not None]
+    paused = min(later) if later else last
+    cycle = (rows[index].get(CYCLE_COLUMN) or "").strip() if index < len(rows) else ""
+    return Execution(path, first, last, paused, index + 2, cycle or "?", undetermined)
+
+
+def load_cycle_file(path, rows, history, timeline):
+    """Add the usable quotes of one cycle file to history, except those that the PAUSA leaves out."""
+    groups = {}
+    for row in rows:
+        name, sample = sample_of(row, ORIGIN_CYCLE)
+        if name is None:
+            history.skip(sample)
+            continue
+        found = timeline.reason(sample.at)
+        if found is None:
+            history.add(name, sample)
+            continue
+        left = groups.get(found)
+        if left is None:
+            left = groups[found] = LeftOut(path, found[0], found[1], True)
+            history.left_out.append(left)
+        left.lines += 1
+        left.usable += 1
+        history.skip(UNDETERMINED if found[1] else POTENTIAL)
+
+
+def add_row(history, row, origin):
+    name, sample = sample_of(row, origin)
+    if name is None:
+        history.skip(sample)
+    else:
+        history.add(name, sample)
 
 
 class Analyzer:
@@ -644,6 +890,56 @@ def data_line(history):
     return line
 
 
+def plural(number, one, many):
+    return f"{number} {one if number == 1 else many}"
+
+
+def left_out_lines(history, everything=True):
+    """The terminal lines about what the PAUSA left out, file by file; none without it.
+
+    everything=False lists only the files with lines for analysis left out, and counts the
+    others in one line, as the start of a scan does.
+    """
+    if not history.left_out:
+        return []
+    lines = [
+        "Fora da análise, sem mudar nenhum arquivo: em cada execução da varredura, a linha da primeira troca não"
+        " confirmada e as seguintes, porque depois dela o gráfico pode ser de outro ativo sem que o nome do ativo"
+        " mostre isso. As linhas com dados para análise excluídas por isso são potencialmente inconsistentes, o que"
+        " não quer dizer que todas tinham cotação errada. Também ficam fora as de execução indeterminada, em que os"
+        " arquivos não permitem saber se houve uma troca não confirmada antes delas na mesma execução. Por arquivo:"
+    ]
+    quiet = 0
+    for item in history.left_out:
+        one = item.usable == 1
+        if item.undetermined:
+            kind = "de execução indeterminada"
+        else:
+            kind = "potencialmente inconsistente" if one else "potencialmente inconsistentes"
+        if item.cycle_file:
+            text = (
+                f"{plural(item.usable, 'cotação', 'cotações')} {'excluída' if one else 'excluídas'}, {kind},"
+                f" {'lida' if one else 'lidas'} {item.detail}"
+            )
+        elif item.usable:
+            text = (
+                f"{item.detail}: {plural(item.usable, 'linha', 'linhas')} com dados para análise"
+                f" {'excluída' if one else 'excluídas'}, {kind}, de {plural(item.lines, 'linha', 'linhas')} desde ali"
+            )
+        elif not everything:
+            quiet += 1
+            continue
+        else:
+            text = f"{item.detail}: nenhuma linha com dados para análise a excluir, de {plural(item.lines, 'linha', 'linhas')} desde ali"
+        lines.append(f"  {item.path.name}{':' if item.cycle_file else ','} {text}.")
+    if quiet:
+        lines.append(
+            f"  Mais {plural(quiet, 'arquivo', 'arquivos')} com troca não confirmada ou execução indeterminada, sem"
+            " nenhuma linha com dados para análise a excluir; a lista completa está no analisar_windows.cmd."
+        )
+    return lines
+
+
 def report_lines(history, horizon, now):
     """The terminal lines of an analysis of the whole history, at now."""
     lines = [
@@ -652,6 +948,7 @@ def report_lines(history, horizon, now):
     ]
     for reason, count in sorted(history.skipped.items()):
         lines.append(f"  Ignoradas: {count} {reason}.")
+    lines += left_out_lines(history)
     if not history.series:
         lines.append(
             f"{WAIT}: sem cotações utilizáveis. Rode a varredura (varrer_windows.cmd) para juntar dados;"
