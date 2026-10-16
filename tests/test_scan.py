@@ -380,9 +380,17 @@ class SwitchTest(ScanTestCase):
         )
         self.assertTrue(unconfirmed["price_status"].startswith("indisponível: não lida: a troca para"))
         self.assertEqual(unconfirmed["payout_eligible"], "indisponível")
-        self.assertEqual((rows[2]["asset"], rows[2]["completeness"]), (AUD[0], "completa"))
+        self.assertEqual(unconfirmed["quote_association"], "")  # the abandoned visit has no quote of its own
+        # The favorite after the abandoned click reads its own asset, but its quote is held back:
+        # the abandoned click could still update the chart with a delay (association uncertain).
+        after = rows[2]
+        self.assertEqual((after["asset"], after["price"], after["analysis_ready"]), (AUD[0], "", "não"))
+        self.assertEqual(after["completeness"], "parcial")
+        self.assertTrue(after["price_status"].startswith(f"indisponível: associação ativo/cotação incerta: o clique em {GBP[0]}"))
+        self.assertEqual(after["quote_association"], after["price_status"].split(": ", 1)[1])
         self.assertIn("troca NÃO confirmada em ", self.out)
         self.assertIn(f"SEM CAMPOS | SEM LEITURA: a troca para {GBP[0]} não foi confirmada em 5 s", self.out)
+        self.assertIn(f"  cotação fora da análise: associação ativo/cotação incerta: o clique em {GBP[0]}", self.out)
         # What the screen and the list showed, read without any click, for finding the cause.
         diagnostic = unconfirmed["switch_diagnostic"]
         self.assertRegex(diagnostic, rf"^ativo na tela durante a espera: {EUR[0]} em \d+ leituras; ")
@@ -532,9 +540,22 @@ class StandbyTest(ScanTestCase):
         self.assertTrue(all(row["switch_diagnostic"] for row in gbp if row["switch"] == "não confirmada"))
         self.assertTrue(all(row["switch_diagnostic"] == "" for row in gbp if row["switch"] == "em espera"))
         self.assertIn("na nova verificação do favorito em espera", gbp[3]["asset_status"])
-        # The others are read in every cycle, each with its own quote.
-        for name in (EUR[0], AUD[0]):
-            self.assertEqual([row["completeness"] for row in self.by_asset(rows, name)], ["completa"] * 12)
+        # EUR/USD OTC comes before GBP/USD OTC and is read in every cycle, each with its own quote.
+        self.assertEqual([row["completeness"] for row in self.by_asset(rows, EUR[0])], ["completa"] * 12)
+        # AUD/CAD OTC comes right after GBP/USD OTC: in the cycles where GBP was clicked (1, 2, 4, 7
+        # and 12), its quote is held back as uncertain; in the standby cycles, GBP is not clicked
+        # and AUD is complete again. The asset and the payout are always read.
+        aud = self.by_asset(rows, AUD[0])
+        clicked_cycles = {1, 2, 4, 7, 12}
+        self.assertEqual(
+            [row["completeness"] for row in aud],
+            ["parcial" if cycle in clicked_cycles else "completa" for cycle in range(1, 13)],
+        )
+        for row in aud:
+            self.assertEqual(row["asset"], AUD[0])
+            held = int(row["cycle"]) in clicked_cycles
+            self.assertEqual(bool(row["quote_association"]), held)
+            self.assertEqual((row["price"] == "", row["analysis_ready"] == "não"), (held, held))
         self.check_own_quotes(rows)
         self.assertIn(f"Em espera, sem clique: {GBP[0]}.", self.out)
         self.assertIn("SEM CAMPOS | SEM LEITURA: favorito em espera, sem clique: 2 trocas", self.out)
@@ -599,9 +620,11 @@ class StandbyTest(ScanTestCase):
             self.assertGreater(float(row["switch_ms"]), 5_000)
             self.assertEqual((row["asset"], row["completeness"]), (GBP[0], "completa"))
         self.assertTrue(gbp[3]["favorite_standby"].startswith("de volta: a troca foi confirmada na nova verificação"))
-        # Nothing of GBP/USD OTC reached the favorite after it: its click was over when the next one began.
-        for row in self.by_asset(rows, AUD[0]):
-            self.assertEqual((row["asset"], row["completeness"]), (AUD[0], "completa"))
+        # AUD/CAD OTC follows GBP/USD OTC: its quote is held back only in the cycles where GBP's
+        # click was abandoned (1 and 2); from cycle 3 on GBP is skipped or switches, so AUD is clean.
+        aud = self.by_asset(rows, AUD[0])
+        self.assertEqual([row["completeness"] for row in aud], ["parcial", "parcial"] + ["completa"] * 4)
+        self.assertTrue(all(row["asset"] == AUD[0] for row in aud))
         self.check_own_quotes(rows)
 
     def test_the_verification_that_finds_the_favorite_already_selected_brings_it_back(self):
@@ -664,6 +687,133 @@ class StandbyTest(ScanTestCase):
         self.assertEqual([row["switch"] for row in third], ["confirmada", "não confirmada", "em espera", "não confirmada", "não confirmada"])
         self.assertIn("3 trocas seguidas não foram confirmadas: o ciclo 3 termina aqui", self.out)
         self.assertNotIn(5, [index for _, index in platform.clicks[-4:]])  # USD/JPY OTC was not clicked in cycle 3
+
+
+class LeakPlatform(FakePlatform):
+    """GBP/USD OTC's click is never confirmed, and its chart leaks onto the next favorite's visit.
+
+    GBP (index 1) is ignored, so its click never switches the asset name: it is an abandoned
+    click. When AUD/CAD OTC (index 2) is clicked, GBP's delayed chart finally lands, so during
+    AUD's visit the asset field names AUD while the chart still shows GBP's quote: the dangerous
+    state the review found, a correct name with a stale chart. The leak clears when the favorite
+    after AUD (index 3) is clicked.
+    """
+
+    def __init__(self, assets):
+        super().__init__(assets=assets)
+        self.ignored.add(1)  # GBP's click never changes the asset name: abandoned
+        self._leak = False
+
+    def click(self, index):
+        super().click(index)
+        if index == 2:  # moving to AUD: GBP's delayed chart lands now, after the reference was read
+            self._leak = True
+        elif index == 3:
+            self._leak = False  # it clears before the next favorite
+
+    def quote(self, index):
+        return super().quote(1 if self._leak else index)  # the chart shows GBP's leftover while leaking
+
+
+class AssociationTest(ScanTestCase):
+    """A quote is never attributed to the wrong asset while the chart's asset is uncertain."""
+
+    def timings(self):
+        [path] = sorted(self.runtime.glob("tempos-scan-*.csv"))
+        with open(path, newline="", encoding="utf-8") as file:
+            return list(csv.DictReader(file))
+
+    def test_update_association_tracks_an_abandoned_click_and_pauses_when_unresolved(self):
+        state = types.SimpleNamespace(sources={"price": True}, pending_switch=None)
+        favorite = types.SimpleNamespace(name=GBP[0])
+        abandoned = types.SimpleNamespace(switch=scan.NOT_CONFIRMED, favorite=favorite, quote_settled=False)
+        clean = types.SimpleNamespace(switch=scan.CONFIRMED, favorite=favorite, quote_settled=True)
+        unsettled = types.SimpleNamespace(switch=scan.CONFIRMED, favorite=favorite, quote_settled=False)
+        self.assertIsNone(scan.update_association(state, abandoned, 1))  # the uncertainty starts
+        self.assertEqual((state.pending_switch.asset, state.pending_switch.since), (GBP[0], 1))
+        self.assertIsNone(scan.update_association(state, unsettled, 1))  # a quote that did not settle: still uncertain
+        self.assertIsNotNone(state.pending_switch)
+        self.assertIsNone(scan.update_association(state, clean, 2))  # a confirmed, settled visit clears it
+        self.assertIsNone(state.pending_switch)
+        off = types.SimpleNamespace(sources={"price": False}, pending_switch=None)
+        self.assertIsNone(scan.update_association(off, abandoned, 1))  # no quote source: no chart to misattribute
+        self.assertIsNone(off.pending_switch)
+        scan.update_association(state, abandoned, 1)
+        self.assertIsNone(scan.update_association(state, abandoned, 2))  # a second cycle still uncertain
+        pause = scan.update_association(state, abandoned, 3)
+        self.assertIn("a associacao entre o ativo e a cotacao ficou incerta por 3 ciclos".replace("associacao", "associa\u00e7\u00e3o").replace("cotacao", "cota\u00e7\u00e3o"), pause)
+        self.assertIn("desde o clique nao confirmado em ".replace("nao", "n\u00e3o") + GBP[0] + " (ciclo 1)", pause)
+
+    def test_a_stale_chart_during_the_next_visit_is_not_attributed_to_it(self):
+        platform = LeakPlatform(assets=(EUR, GBP, AUD, ("NZD/USD OTC", "+88%", 0.59870)))
+        code = self.run_scan("--cycles", "1", "--load-timeout", "5", platform=platform)
+        self.assertEqual(code, 0, self.err)
+        rows = self.rows()
+        self.assertEqual(
+            [row["switch"] for row in rows],
+            ["j\u00e1 selecionado", "n\u00e3o confirmada", "confirmada", "confirmada"],
+        )
+        aud = rows[2]
+        # AUD was read as AUD, but the chart was GBP's leftover. The normal checks accepted that
+        # quote (it is far from the reference and stable), yet the association hold withheld it.
+        leaked = [row for row in self.timings()
+                  if row["favorite_position"] == "3" and row["moment"] == "depois da troca" and row["verdict"] == "aceita"]
+        self.assertTrue(leaked and all(in_range(row["quote"], GBP[2]) for row in leaked), leaked)
+        self.assertEqual((aud["asset"], aud["price"], aud["analysis_ready"]), (AUD[0], "", "n\u00e3o"))
+        self.assertTrue(aud["price_status"].startswith("indispon\u00edvel: associa\u00e7\u00e3o ativo/cota\u00e7\u00e3o incerta: o clique em " + GBP[0]))
+        self.assertTrue(aud["quote_association"].startswith("associa\u00e7\u00e3o ativo/cota\u00e7\u00e3o incerta"))
+        # The next favorite recovers: the chart is its own again, and the hold is cleared.
+        nzd = rows[3]
+        self.assertEqual((nzd["asset"], nzd["analysis_ready"], nzd["quote_association"]), ("NZD/USD OTC", "sim", ""))
+        self.assertTrue(in_range(nzd["price"], 0.59870), nzd)
+
+    def test_close_prices_and_two_stable_wrong_readings_are_still_withheld(self):
+        # GBP's quote is within QUOTE_JUMP of AUD's, so the jump limit alone cannot tell the charts
+        # apart; two consecutive readings of the wrong chart agree. The hold withholds it anyway.
+        close_gbp = ("GBP/USD OTC", "+90%", 0.91260)  # AUD/CAD OTC is 0.91210
+        platform = LeakPlatform(assets=(EUR, close_gbp, AUD, ("NZD/USD OTC", "+88%", 0.59870)))
+        code = self.run_scan("--cycles", "1", "--load-timeout", "5", platform=platform)
+        self.assertEqual(code, 0, self.err)
+        aud = self.rows()[2]
+        after = [row for row in self.timings() if row["favorite_position"] == "3" and row["moment"] == "depois da troca"]
+        wrong = [row for row in after if in_range(row["quote"], close_gbp[2])]
+        self.assertGreaterEqual(len(wrong), 2)  # two consecutive readings of the wrong chart
+        accepted = [row for row in wrong if row["verdict"] == "aceita"]
+        self.assertTrue(accepted)  # the jump and reference checks accepted the wrong chart
+        for row in accepted:
+            self.assertLess(abs(float(row["quote"]) - AUD[2]), AUD[2] * scan.QUOTE_JUMP)  # close to AUD's real quote
+        self.assertEqual((aud["asset"], aud["price"], aud["analysis_ready"]), (AUD[0], "", "n\u00e3o"))
+        self.assertTrue(aud["quote_association"].startswith("associa\u00e7\u00e3o ativo/cota\u00e7\u00e3o incerta"))
+
+    def test_a_single_unavailable_favorite_waits_in_standby_without_pausing(self):
+        # One dead favorite among healthy ones never pauses the scan: the healthy visits are
+        # coherent and clear the uncertainty, and the dead one waits in standby (item 32).
+        platform = FakePlatform()
+        platform.ignored.add(1)  # GBP/USD OTC never switches
+        code = self.run_scan("--cycles", "5", "--interval", "3", platform=platform)
+        self.assertEqual(code, 0, self.err)
+        self.assertIn(f"Em espera, sem clique: {GBP[0]}.", self.out)  # it stood by, no pause
+        eur = [row for row in self.rows() if row["favorite_position"] == "1"]  # EUR/USD OTC
+        self.assertEqual([row["completeness"] for row in eur], ["completa"] * 5)
+
+    def test_the_scan_pauses_when_no_favorite_yields_a_coherent_visit(self):
+        platform = FakePlatform(assets=(EUR, GBP, AUD))
+        del platform.items[0]  # the screen is EUR, a non-favorite; the favorites are GBP and AUD
+        platform.ignored.update({0, 1})  # both favorites' clicks change nothing: no visit is ever coherent
+        code = self.run_scan("--cycles", "8", "--interval", "3", "--load-timeout", "5", platform=platform)
+        self.assertEqual(code, 1)
+        # Cycles 1 and 2 abandon the clicks, cycle 3 stands by, and a re-check keeps failing: with
+        # no coherent visit for at least MAX_UNCERTAIN_CYCLES cycles, the scan pauses.
+        self.assertRegex(
+            self.err,
+            r"PARADA: a associa\u00e7\u00e3o entre o ativo e a cota\u00e7\u00e3o ficou incerta por \d+ ciclos, desde o"
+            r" clique n\u00e3o confirmado em " + GBP[0] + r" \(ciclo 1\)",
+        )
+        self.assertIn("n\u00e3o permitem confirmar a qual ativo a cota\u00e7\u00e3o pertence", self.err)
+        rows = self.rows()  # what it recorded before pausing is kept
+        self.assertTrue(rows)
+        self.assertEqual({row["price"] for row in rows}, {""})  # no quote was ever attributed
+        scan.ScanLock(self.runtime / scan.LOCK_FILE_NAME).release()  # the lock was released
 
 
 def starting_off_the_favorites(assets=(EUR, GBP, AUD)):
@@ -807,8 +957,10 @@ class AnalysisReadinessTest(ScanTestCase):
             (unconfirmed["analysis_ready"], unconfirmed["analysis_note"]),
             ("não", "a troca de ativo não foi confirmada, e nada foi lido"),
         )
-        self.assertEqual((no_payout["analysis_ready"], no_payout["analysis_note"]), ("não", "falta o payout"))
+        # USD/JPY OTC has no payout and, after GBP's abandoned click, its quote is held back too.
+        self.assertEqual((no_payout["analysis_ready"], no_payout["analysis_note"]), ("não", "faltam a cotação do ativo e o payout"))
         self.assertEqual(no_payout["payout_eligible"], "indisponível")
+        self.assertTrue(no_payout["quote_association"].startswith(f"associação ativo/cotação incerta: o clique em {GBP[0]}"))
 
     def test_the_summary_never_puts_a_quote_beside_the_payout_of_another_visit(self):
         platform = FakePlatform(assets=(EUR, GBP))

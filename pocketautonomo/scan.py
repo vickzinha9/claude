@@ -35,7 +35,15 @@ field does not confirm leaves the visit without data, with a diagnostic of what 
 the favorites list showed (switch_diagnostic). A favorite whose switch fails STANDBY_AFTER
 times in a row is set aside: it gets a line without a click and without readings, and is
 verified again, by a normal visit, after 1, 2, 4 and at most STANDBY_MAX_CYCLES cycles, until a
-confirmed switch brings it back to every cycle. The other favorites go on as before. Only one
+confirmed switch brings it back to every cycle. The other favorites go on as before.
+
+An abandoned click, whose switch the asset field never confirmed, may still update the name and
+the chart with a delay during a later visit, so that the asset field names the new favorite while
+the chart is still the abandoned one's. Then the asset a quote belongs to is uncertain: the quote
+of the following visits is withheld from the analysis (quote_association), without touching the
+asset or the payout, until a visit confirms the asset and its chart settles. If no such visit
+happens for MAX_UNCERTAIN_CYCLES cycles, the asset name and the chart image cannot say which asset
+the quote belongs to, and the scan pauses, keeping what it recorded. Only one
 navigation runs at a time: the next click waits for the end of the current visit, and
 runtime/scan.lock keeps a second scan from starting.
 
@@ -139,6 +147,13 @@ MAX_UNCONFIRMED = 3  # switches in a row without confirmation end the cycle, wit
 # selected, brings it back to every cycle.
 STANDBY_AFTER = 2
 STANDBY_MAX_CYCLES = 8
+# A click that the asset field never confirms (an abandoned click) may still update the asset
+# name and the chart with a delay, during a later visit. While that is outstanding, the asset
+# that a chart belongs to is uncertain, so the quote of the following visits is withheld from the
+# analysis until a visit confirms the asset and its chart. If no such visit happens for
+# MAX_UNCERTAIN_CYCLES cycles, the current sources (the asset name and the chart image) cannot say
+# which asset the quote belongs to, and the scan pauses, keeping what it recorded.
+MAX_UNCERTAIN_CYCLES = 3
 
 # The value of the switch column.
 ALREADY = "já selecionado"
@@ -146,6 +161,7 @@ CONFIRMED = "confirmada"
 NOT_CONFIRMED = "não confirmada"
 NOT_CLICKED = "não clicado"
 STANDBY = "em espera"  # a favorite set aside after unconfirmed switches: not clicked, nothing read
+VERIFIED = "verificada"  # the asset/quote association of a visit: the chart belongs to the asset read
 # The value of the payout_eligible column.
 ELIGIBLE, NOT_ELIGIBLE, UNKNOWN_ELIGIBILITY = "sim", "não", "indisponível"
 # The value of the analysis_ready column: data complete and current, usable for analysis.
@@ -181,6 +197,8 @@ SCAN_COLUMNS = observe.CSV_COLUMNS + (
     # Added after a prolonged scan in which one favorite stopped switching.
     "switch_diagnostic",  # for a switch not confirmed: what the screen and the favorites list showed
     "favorite_standby",  # the favorite set aside after unconfirmed switches, its verification or return
+    # Added with the protection against attributing a quote to the wrong asset.
+    "quote_association",  # empty when verified; otherwise why the asset/quote association is uncertain
 )
 
 # Words of the trade buttons, of the Amount and of money operations, in English and in
@@ -381,6 +399,8 @@ class Visit:
     decision_ms: object = None  # how long the analysis took to decide, in milliseconds
     diagnostic: object = None  # switch_diagnostic() of a switch that was not confirmed
     standby: object = None  # the favorite set aside, verified again or back: what and until when
+    association: object = None  # why the quote was withheld as uncertain, or None when verified
+    quote_settled: bool = False  # the quote passed the normal checks, before any uncertainty hold
 
     @property
     def eligibility(self):
@@ -430,6 +450,7 @@ class Scan:
     last_clicked: object = None  # (key, how many elements the list had) of the last click
     last_target: object = None  # (Favorite clicked, how many elements the list had) of the last click
     standby: dict = field(default_factory=dict)  # favorite key -> Standby, after unconfirmed switches
+    pending_switch: object = None  # Uncertainty of an abandoned click whose late effects may still land
     analyzer: object = None  # analysis.Analyzer, from the start of the scan
     # Called around each visit, when given: hooks.before_visit(session, favorite) before
     # the visit starts, and hooks.after_visit(session, visit) once it was recorded. The
@@ -460,6 +481,16 @@ class Standby:
     @property
     def set_aside(self):
         return self.skip > 0
+
+
+@dataclass(frozen=True)
+class Uncertainty:
+    """An abandoned click whose late name or chart may still land, making a quote uncertain."""
+
+    asset: str  # the favorite whose click was not confirmed
+    since: int  # the cycle of the first abandoned click still unresolved
+    last: int  # the cycle of the most recent abandoned click
+    reason: str  # why the following visits' quotes are withheld
 
 
 class ScanLock:
@@ -1007,6 +1038,9 @@ def run_scan(session, scan, args, ctx):
                     visits.append(visit)
                     if scan.hooks is not None:
                         scan.hooks.after_visit(session, visit)
+                    pause = update_association(scan, visit, cycle)
+                    if pause is not None:
+                        raise ObserverStopped(pause)
                     if visit.switch != STANDBY:  # a pass without a click says nothing about the page
                         unconfirmed = unconfirmed + 1 if visit.switch == NOT_CONFIRMED else 0
                     if unconfirmed >= MAX_UNCONFIRMED:
@@ -1082,6 +1116,7 @@ def visit_favorite(session, scan, favorite, cycle, total, ctx, recheck=False):
     the new verification of a favorite set aside; it changes only the reason given.
     """
     selectors = scan.selectors
+    pending = scan.pending_switch  # an abandoned click, read at the start, makes this quote uncertain
     check_window(session)
     ensure_on_platform(session)
     start = ctx.monotonic()
@@ -1149,10 +1184,18 @@ def visit_favorite(session, scan, favorite, cycle, total, ctx, recheck=False):
         session.wait(POLL_SECONDS)
     if not settled:
         readings = with_time_limit(readings, scan)
+    # The quote passed the normal checks when the visit settled with the quote available: that is
+    # what a clean visit needs to clear an uncertainty. It is judged before any uncertainty hold.
+    quote_settled = settled and (not scan.sources["price"] or readings["price"].available)
+    association = None
+    if pending is not None and scan.sources["price"]:
+        association = pending.reason
+        readings = dict(readings)
+        readings["price"] = refuse(readings["price"], association) if readings["price"].available else readings["price"]
     observation = observe.Observation(poll.captured_at, poll.page, readings, poll.duration_ms)
     return Visit(
         cycle, favorite, total, switch, observation, previous_asset, previous_quote, switch_ms,
-        ctx.elapsed_ms(load_start), polls, reference, ctx.now(),
+        ctx.elapsed_ms(load_start), polls, reference, ctx.now(), association=association, quote_settled=quote_settled,
     )
 
 
@@ -1492,6 +1535,48 @@ def update_standby(scan, favorite, visit, cycle):
     return None
 
 
+def update_association(scan, visit, cycle):
+    """Track the asset/quote uncertainty of an abandoned click; return a pause reason, or None.
+
+    A visit whose switch the asset field never confirmed (NOT_CONFIRMED) is an abandoned click: its
+    name and chart may still land late, so the quote of the following visits is uncertain, and
+    scan.pending_switch is set. A coherent visit (the switch confirmed or already there and the
+    quote settled by the normal checks) clears it; it does not prove the chart's identity, which
+    the sources cannot (see STATUS item 33), so it only lifts the hold from the window right after
+    the abandoned click. When abandoned clicks keep coming and no visit is coherent for
+    MAX_UNCERTAIN_CYCLES cycles, no baseline can be established and a pause reason is returned.
+    Without a quote source there is no chart to misattribute.
+    """
+    if not scan.sources["price"]:
+        return None
+    pending = scan.pending_switch
+    if visit.switch == NOT_CONFIRMED:  # an abandoned click: only a real click waits and fails to confirm
+        if pending is None:
+            reason = (
+                f"associação ativo/cotação incerta: o clique em {visit.favorite.name} (ciclo {cycle}) não foi"
+                " confirmado e pode atualizar o nome e o gráfico com atraso; a cotação fica fora da análise até"
+                " uma visita confirmar o ativo e o gráfico"
+            )
+            scan.pending_switch = pending = Uncertainty(visit.favorite.name, cycle, cycle, reason)
+        else:  # the uncertainty keeps its origin (asset and since); only its latest cycle moves
+            scan.pending_switch = pending = replace(pending, last=cycle)
+    elif pending is not None and visit.switch in (CONFIRMED, ALREADY) and visit.quote_settled:
+        scan.pending_switch = pending = None  # a coherent visit: the chart is treated as the asset's
+    # The pause is a safety valve, checked only on a new abandoned click: it fires when abandoned
+    # clicks keep coming and no visit has been coherent for MAX_UNCERTAIN_CYCLES cycles, so no
+    # baseline can be established. A favorite parked in standby (not clicked) never triggers it, so
+    # the standby wait of an unavailable favorite is preserved and the other favorites go on.
+    if visit.switch == NOT_CONFIRMED and pending is not None and cycle - pending.since + 1 >= MAX_UNCERTAIN_CYCLES:
+        return (
+            f"a associação entre o ativo e a cotação ficou incerta por {count(cycle - pending.since + 1, 'ciclo', 'ciclos')},"
+            f" desde o clique não confirmado em {pending.asset} (ciclo {pending.since}). As fontes atuais, o nome do"
+            " ativo e a imagem do gráfico, não permitem confirmar a qual ativo a cotação pertence, e nenhuma visita"
+            " confirmou o ativo e o gráfico desde então. A varredura parou, com tudo o que já gravou; confira a tela"
+            " e os favoritos antes de rodar de novo"
+        )
+    return None
+
+
 def switch_diagnostic(session, scan, favorite, seen, reading):
     """What the screen and the favorites list showed when the switch to favorite was not confirmed.
 
@@ -1718,6 +1803,7 @@ def scan_row(visit):
         decision_note(decision) if decision is not None else "",
         spreadsheet_safe(visit.diagnostic or ""),
         visit.standby or "",
+        visit.association or "",
     ]
     return row
 
@@ -1797,6 +1883,8 @@ def visit_lines(visit):
         lines += (f"  diagnóstico da troca: {visit.diagnostic}",)
     if visit.standby is not None and visit.switch != STANDBY:
         lines += (f"  favorito: {visit.standby}",)
+    if visit.association is not None:
+        lines += (f"  cotação fora da análise: {visit.association}",)
     if visit.decision is not None:
         lines += (f"  análise CALL/PUT: {visit.decision.describe()}",)
     return lines

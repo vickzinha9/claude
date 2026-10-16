@@ -381,7 +381,9 @@ No fim de cada ciclo aparecem, separados, os ativos com payout elegível e dados
 
 **Troca não confirmada e favorito em espera.** Uma troca que o campo do ativo não confirma deixa a visita sem nenhum dado (`SEM CAMPOS`): nada é lido como o ativo pedido. A linha ganha um diagnóstico, só com leituras, do que a tela e a lista mostravam: o ativo lido durante a espera, quantos elementos a lista tinha no clique e agora, em que posições o ativo pedido aparece, e o texto, a visibilidade, a posição, o tamanho, a classe, o título, o `aria-disabled` e o HTML interno do elemento clicado, de outro elemento com o mesmo ativo e do elemento do ativo na tela. Depois de 2 trocas não confirmadas seguidas do mesmo favorito, ele fica **em espera**: ganha uma linha sem clique e sem leituras, com o motivo, e os outros seguem normalmente. Uma nova verificação, numa visita normal, com o mesmo `--load-timeout`, acontece depois de 1, 2, 4 e no máximo 8 ciclos; confirmada a troca, o favorito volta a todos os ciclos. O resumo do ciclo diz `Em espera, sem clique: <ativo>`.
 
-Três trocas seguidas sem confirmação encerram o ciclo, sem clicar nos favoritos que faltam; uma passagem em espera não conta nessa sequência. A varredura para, com código 1 e sem clicar, quando o seletor encontra também um elemento com palavra de botão financeiro ou de dinheiro (BUY, SELL, CALL, PUT, COMPRAR, VENDER, Amount e outras), um campo de formulário ou mais de 30 elementos, quando a página sai de pocketoption.com, quando um clique abre outra aba e quando o favorito clicado some da lista. Só uma varredura roda por vez.
+Três trocas seguidas sem confirmação encerram o ciclo, sem clicar nos favoritos que faltam; uma passagem em espera não conta nessa sequência.
+
+**Cotação retida enquanto o gráfico é incerto.** Um clique não confirmado pode atualizar o nome do ativo e o gráfico com atraso, numa visita seguinte: o campo do ativo já mostra o novo favorito, mas o gráfico ainda é o do abandonado. Como as fontes (o nome e a imagem do gráfico) não provam a qual ativo o gráfico pertence — com preços próximos, até o limite de salto é insuficiente —, uma troca não confirmada marca a associação ativo/cotação como incerta, e a cotação das visitas seguintes fica retida: `price` vazio, `quote_association` com o motivo e `analysis_ready` em `não`, fora da análise. O nome do ativo e o payout continuam gravados. A retenção é limpa pela primeira visita limpa (troca confirmada ou favorito já selecionado, com a cotação estável). Se nenhuma visita limpa acontecer por 3 ciclos, a varredura para com código 1 e um motivo claro, preservando o CSV e `runtime/`. A varredura para, com código 1 e sem clicar, quando o seletor encontra também um elemento com palavra de botão financeiro ou de dinheiro (BUY, SELL, CALL, PUT, COMPRAR, VENDER, Amount e outras), um campo de formulário ou mais de 30 elementos, quando a página sai de pocketoption.com, quando um clique abre outra aba e quando o favorito clicado some da lista. Só uma varredura roda por vez.
 
 | Opção | Significado |
 |---|---|
@@ -399,7 +401,7 @@ Três trocas seguidas sem confirmação encerram o ciclo, sem clicar nos favorit
 | `tempos-scan-<data>-<hora>-<sufixo>.csv` | uma linha por leitura da cotação dessa execução, inclusive as tentativas antes de cada clique e as leituras recusadas, com o tempo de cada etapa (veja [Tempos de cada leitura](#tempos-de-cada-leitura-da-cotação)) |
 | `scan.lock` | a trava que impede duas varreduras ao mesmo tempo; pode ficar na pasta depois do fim |
 
-O CSV da varredura tem as 16 colunas do coletor, descritas acima, e mais estas; as 2 últimas são novas:
+O CSV da varredura tem as 16 colunas do coletor, descritas acima, e mais estas; as 3 últimas são novas:
 
 | Coluna | Conteúdo |
 |---|---|
@@ -420,6 +422,7 @@ O CSV da varredura tem as 16 colunas do coletor, descritas acima, e mais estas; 
 | `analysis_decision`, `analysis_decision_note` | o que a [análise local](#análise-local-callput) disse logo depois da visita, `CALL`, `PUT` ou `AGUARDAR`, e o motivo |
 | `switch_diagnostic` | numa troca não confirmada, o que a tela e a lista de favoritos mostravam; vazio nas outras |
 | `favorite_standby` | o favorito posto em espera, a passagem sem clique, ou a volta depois de uma nova verificação; vazio nas outras |
+| `quote_association` | por que a cotação foi retida como incerta (depois de um clique não confirmado); vazio quando a associação ativo/cotação está verificada |
 
 | Código | Situação |
 |---|---|

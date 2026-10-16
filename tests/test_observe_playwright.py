@@ -528,9 +528,10 @@ class RealScanTest(unittest.TestCase):
         )
         self.assertIn("título 'Ativo fechado', html 'GBP/USD OTC <span class=\"pct\">90%</span>'", diagnostic)
         self.assertIn(f"  diagnóstico da troca: {diagnostic}", text)
-        # The asset after it was read as itself, and nothing but the two favorites was clicked.
-        self.assertEqual((rows[2]["asset"], rows[2]["completeness"]), ("AUD/CAD OTC", "completa"))
-        self.assertLess(abs(float(rows[2]["price"]) - SCAN_ASSETS[2][2]), 0.0005, rows[2])
+        # The asset after the abandoned click was read as itself, but its quote is held back as
+        # uncertain: GBP's click, never confirmed, could still update the chart with a delay.
+        self.assertEqual((rows[2]["asset"], rows[2]["price"], rows[2]["analysis_ready"]), ("AUD/CAD OTC", "", "não"))
+        self.assertTrue(rows[2]["quote_association"].startswith("associação ativo/cotação incerta: o clique em GBP/USD OTC"))
         self.assertEqual(self.counters, {"trade-clicks": "0", "amount-touches": "0", "fav-clicks": "-23"})
 
     def test_scan_clicks_only_favorites_and_never_mixes_two_assets(self):
