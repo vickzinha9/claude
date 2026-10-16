@@ -519,16 +519,17 @@ Branch `feature/progression-core`. Usa só a biblioteca padrão do Python. O est
     - **Comprovado:** com objetos falsos, um clique abandonado em GBP/USD OTC cujo gráfico vaza para a visita de AUD/CAD OTC tem a cotação retida, mesmo quando as conferências aceitaram o gráfico errado (longe da referência e estável), e com preços próximos (dentro do limite de salto); a visita seguinte, com o gráfico já correto, volta a ser aproveitada; e, com todos os favoritos falhando, a varredura pausa depois de alguns ciclos sem nenhuma visita coerente, sem nunca ter atribuído uma cotação, enquanto um favorito morto sozinho entre saudáveis apenas espera em standby.
     - **Limitação que resta:** as fontes não carregam a identidade do ativo no gráfico, então não dá para provar que um gráfico é do ativo nomeado. A retenção cobre a janela logo após o clique abandonado (uma visita, onde o atraso é mais provável) e pausa quando a incerteza não se resolve. Um gráfico atrasado que persistisse além da primeira visita limpa, com o nome do ativo sempre certo, não seria pego; separá-lo exigiria uma fonte que identificasse o ativo no próprio gráfico. Uma troca confirmada cujo gráfico atrase para a visita seguinte continua coberta só pelas conferências de referência e de salto, não por esta retenção.
     - **Testes na suíte:** `tests/test_scan.py`, `AssociationTest`, 6 testes (a regressão do clique aplicado depois dos 20 s, com nome e gráfico em momentos diferentes na visita seguinte; preços próximos e duas leituras do gráfico errado, ainda retidas; um favorito indisponível sozinho que espera em standby sem pausar; a pausa quando nenhum favorito dá visita coerente, com o estado preservado; e o acompanhamento de `update_association`, inclusive sem fonte de cotação). As trocas normais, a espera dos favoritos indisponíveis e a recuperação continuam em `SwitchTest` e `StandbyTest`, atualizados para a retenção da visita após um clique abandonado.
+    - **CI:** a execução [38938356604](https://github.com/vickzinha9/claude/actions/runs/38938356604), no commit `ed2429d`, terminou com `success` nos três jobs: 402 testes, com 386 aprovados e 16 pulados no Linux e 394 aprovados e 8 pulados no Windows, inclusive os 6 de `AssociationTest`; no `windows-browser`, os 8 testes com Chromium e OCR de verdade passaram, inclusive a varredura com um favorito fechado, e a demonstração passou nas 8 cenas.
     - **Plataforma real: não executado.**
 
 ## Testes
 
     python3 -m unittest discover -s tests -v
 
-Último resultado local, em Linux: 401 testes.
+Último resultado local, em Linux: 402 testes.
 
-- Com o Playwright 1.64.0 e o OCR (`rapidocr` 3.10.0 e `onnxruntime` 1.31.0), no Python 3.12.13 e com `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1`, passaram 393, inclusive os 8 de `tests/test_observe_playwright.py` (7 com Chromium real e 1 com o OCR real). Foram pulados os 8 que só rodam no Windows: os 4 de `PreparerOnWindowsTest`, o de `OpenImageOnWindowsTest`, o de `ScanLauncherOnWindowsTest`, o de `AnalysisLauncherOnWindowsTest` e o de `OperationLauncherOnWindowsTest`.
-- Sem o Playwright e sem o OCR, nos Python 3.9.25, 3.10.20, 3.11.15, 3.12.13, 3.13.13 e 3.14.4, passaram 385. Também foram pulados os 8 de `tests/test_observe_playwright.py`.
+- Com o Playwright 1.64.0 e o OCR (`rapidocr` 3.10.0 e `onnxruntime` 1.31.0), no Python 3.12.13 e com `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1`, passaram 394, inclusive os 8 de `tests/test_observe_playwright.py` (7 com Chromium real e 1 com o OCR real). Foram pulados os 8 que só rodam no Windows: os 4 de `PreparerOnWindowsTest`, o de `OpenImageOnWindowsTest`, o de `ScanLauncherOnWindowsTest`, o de `AnalysisLauncherOnWindowsTest` e o de `OperationLauncherOnWindowsTest`.
+- Sem o Playwright e sem o OCR, nos Python 3.9.25, 3.10.20, 3.11.15, 3.12.13, 3.13.13 e 3.14.4, passaram 386. Também foram pulados os 8 de `tests/test_observe_playwright.py`.
 
 O motor, a simulação, a análise e a operação simulada (inclusive a `--demonstracao`) rodam no 3.9; só o coletor, a varredura e a operação na tela exigem o 3.11. Os resultados do CI estão nos itens 16, 18, 19, 20, 21, 22, 23, 24, 25, 26, 28, 29, 30, 32 e 33.
 
