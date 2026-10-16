@@ -19,8 +19,8 @@ the Pocket Option, those differences, one at a time, with the others fixed:
    collector's observations;
 3. the browser window covered: visible, covered by this terminal, and visible again;
 4. the browser window minimized, in the last phase. In the Windows job of the CI, on a
-   local page, a minimized window made each capture take about 2 s with page.screenshot
-   and 1 s with the direct capture, while a covered one did not change it.
+   local page, a minimized window made each capture take 1 or 2 s, with both methods,
+   while a covered one did not change it.
 
 Before every reading, the browser, not the page, tells the state of its window (normal,
 maximized or minimized), so each phase shows what it really measured.

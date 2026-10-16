@@ -335,7 +335,7 @@ Cada comparação muda uma variável só, com as outras fixas: o método da capt
 
 No fim, o terminal mostra a mediana da etapa tela de cada caso, a resposta da página à contagem do elemento, as leituras do OCR (inclusive as que só divergiram no separador decimal) e uma conclusão que só aponta diferenças claras: 3 vezes ou mais e 300 ms ou mais. Cada leitura vai para `runtime/diagnostico-captura-<data>-<hora>-<sufixo>.csv`, com as colunas do arquivo de tempos e mais `phase`, `method`, `wait_s` e `window`. Ele mede só aquele momento, naquele computador.
 
-No job Windows do CI, numa página local, que não é a Pocket Option, uma medição com a janela de verdade, visível, mostrou a mesma coisa que o seu coletor: com a janela **minimizada**, cada captura levou cerca de 1,9 s com o `page.screenshot` e 1,0 s com a captura direta; coberta por outra janela, nada mudou (cerca de 20 ms). O diagnóstico confere isso no seu computador.
+No job Windows do CI, numa página local, que não é a Pocket Option, uma medição com a janela de verdade, visível, mostrou algo parecido com o seu coletor: com a janela **minimizada**, cada captura levou de 1 a 2 s, pelos dois métodos, em duas execuções; coberta por outra janela, nada mudou (de 9 a 26 ms de mediana). O diagnóstico confere isso no seu computador.
 
 | Código | Situação |
 |---|---|

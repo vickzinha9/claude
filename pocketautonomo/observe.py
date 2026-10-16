@@ -947,7 +947,7 @@ def warn_slow_capture(ctx, capture, session):
     The count of the element is the page's answer to a light question: when it is fast and
     the screenshot slow, the time goes to producing or copying the image, not to the page.
     Only then is the browser asked whether its window is minimized: in the Windows job of
-    the CI, on a local page, a minimized window made each capture take about 2 s.
+    the CI, on a local page, a minimized window made each capture take 1 or 2 s.
     """
     if ctx.slow_capture_warned or capture.screenshot_ms is None or capture.screenshot_ms < SLOW_SCREENSHOT_MS:
         return
