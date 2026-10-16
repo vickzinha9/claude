@@ -43,9 +43,9 @@ AUD = ("AUD/CAD OTC", "+85%", 0.91210)
 class FakeItem:
     """One element of the favorites selector; target is the asset its click selects, or None."""
 
-    def __init__(self, text, target=None, visible=True, width=110.0, height=32.0, fields=0):
+    def __init__(self, text, target=None, visible=True, width=110.0, height=32.0, fields=0, classes="fav"):
         self.text, self.target, self.visible = text, target, visible
-        self.width, self.height, self.fields = width, height, fields
+        self.width, self.height, self.fields, self.classes = width, height, fields, classes
 
 
 class FakePlatform:
@@ -193,6 +193,19 @@ class FakeScanSession:
 
     def class_suggestions(self, selector, limit):
         return self.platform.suggestions.get(selector, [])
+
+    def favorite_details(self, selector, indices):
+        self.platform.advance(0.01)
+        self.calls.append(("details", tuple(indices)))
+        items = self.platform.items if selector == FAVORITES else []
+        return {
+            index: scan.FavoriteItem(
+                items[index].text, items[index].visible, items[index].width, items[index].height,
+                items[index].fields, 100.0 + 120.0 * index, 64.0, items[index].classes,
+            )
+            for index in indices
+            if 0 <= index < len(items)
+        }
 
     def wait(self, seconds):
         self.waits.append(seconds)
@@ -370,6 +383,17 @@ class SwitchTest(ScanTestCase):
         self.assertEqual((rows[2]["asset"], rows[2]["completeness"]), (AUD[0], "completa"))
         self.assertIn("troca NÃO confirmada em ", self.out)
         self.assertIn(f"SEM CAMPOS | SEM LEITURA: a troca para {GBP[0]} não foi confirmada em 5 s", self.out)
+        # What the screen and the list showed, read without any click, for finding the cause.
+        diagnostic = unconfirmed["switch_diagnostic"]
+        self.assertRegex(diagnostic, rf"^ativo na tela durante a espera: {EUR[0]} em \d+ leituras; ")
+        self.assertIn(f"lista: 3 elementos no clique e 3 agora; {GBP[0]} na posição 2 no clique, e agora na(s) posição(ões) 2", diagnostic)
+        self.assertIn(f"posição 1 (ativo na tela): texto '{EUR[0]} 92%', visível, 110x32 px em (100, 64), classe 'fav'", diagnostic)
+        self.assertIn(f"posição 2 (clicado): texto '{GBP[0]} 90%', visível, 110x32 px em (220, 64), classe 'fav'", diagnostic)
+        self.assertIn(f"  diagnóstico da troca: {diagnostic}", self.out)
+        self.assertEqual([call for call in self.session.calls if call[0] == "details"], [("details", (0, 1))])
+        self.assertEqual(unconfirmed["favorite_standby"], "")  # one failure does not set it aside
+        for row in (rows[0], rows[2]):
+            self.assertEqual((row["switch_diagnostic"], row["favorite_standby"]), ("", ""))
 
     def test_switches_that_keep_failing_end_the_cycle_without_more_clicks(self):
         assets = (EUR, GBP, AUD, ("NZD/USD OTC", "+88%", 0.59870), ("USD/CHF OTC", "+91%", 0.88120))
@@ -438,6 +462,208 @@ class SwitchTest(ScanTestCase):
             self.assertEqual((row["price_source"], row["price_status"]), ("ocr", f"ok: ocr {CHART}"))
             self.assertGreater(float(row["price_capture_ms"]), 0)
         self.assertRegex(self.out, r"cotação \d+ ms \(captura \d+ ms \(elemento 3, tela 40, decodificação 5\), detecção \d+ ms, OCR \d+ ms\)")
+
+
+class SlowFavoritePlatform(FakePlatform):
+    """A FakePlatform where the favorites in slow switch only after their own delays."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.slow = {}  # favorite index -> (named, paid, drawn) delays
+
+    def click(self, index):
+        if index not in self.slow or index in self.ignored:
+            return super().click(index)
+        self.clicks.append((round(self.t, 3), index))
+        for attribute, delay in zip(("named", "paid", "drawn"), self.slow[index]):
+            self.pending.append((self.t + delay, attribute, self.items[index].target))
+
+
+class StandbyTest(ScanTestCase):
+    """A favorite whose switch is never confirmed is set aside and verified again, without mixing."""
+
+    ASSETS = (EUR, GBP, AUD)  # in the order of the favorites
+
+    def by_asset(self, rows, name):
+        [position] = [index + 1 for index, asset in enumerate(self.ASSETS) if asset[0] == name]
+        return [row for row in rows if row["favorite_position"] == str(position)]
+
+    def check_own_quotes(self, rows):
+        """Every quote recorded belongs to the asset of its line: never another asset's."""
+        for row in rows:
+            name, _, base = self.ASSETS[int(row["favorite_position"]) - 1]
+            if row["price"]:
+                self.assertEqual(row["asset"], name, row)
+                self.assertTrue(in_range(row["price"], base), row)
+            if row["switch"] in ("não confirmada", "em espera"):
+                self.assertEqual((row["asset"], row["price"], row["payout_percent"], row["analysis_ready"]), ("", "", "", "não"))
+
+    def test_a_favorite_that_never_switches_is_set_aside_and_verified_less_often(self):
+        platform = FakePlatform()
+        platform.ignored.add(1)  # GBP/USD OTC: its click never changes the screen, which stays on EUR/USD OTC
+        code = self.run_scan("--cycles", "12", "--interval", "3", platform=platform)
+        self.assertEqual(code, 0, self.err)
+        rows = self.rows()
+        gbp = self.by_asset(rows, GBP[0])
+        self.assertEqual(len(gbp), 12)  # one line per cycle, also without a click
+        tried = ["não confirmada"]
+        self.assertEqual(
+            [row["switch"] for row in gbp],
+            tried * 2 + ["em espera"] + tried + ["em espera"] * 2 + tried + ["em espera"] * 4 + tried,
+        )
+        self.assertEqual([index for _, index in platform.clicks].count(1), 5)  # cycles 1, 2, 4, 7 and 12, not 12
+        waits = [float(row["switch_ms"]) for row in gbp if row["switch"] == "não confirmada"]
+        self.assertTrue(all(20_000 <= ms < 20_400 for ms in waits), waits)  # each verification: the whole 20 s
+        self.assertEqual({row["switch_ms"] for row in gbp if row["switch"] == "em espera"}, {""})
+        self.assertIn(
+            "2 trocas não confirmadas seguidas desde o ciclo 1: o favorito fica em espera, sem clique, no ciclo 3;"
+            " nova verificação no ciclo 4",
+            gbp[1]["favorite_standby"],
+        )
+        self.assertIn("nos ciclos 5 a 6; nova verificação no ciclo 7", gbp[3]["favorite_standby"])
+        self.assertIn("nos ciclos 8 a 11; nova verificação no ciclo 12", gbp[6]["favorite_standby"])
+        self.assertIn("nos ciclos 13 a 20; nova verificação no ciclo 21", gbp[11]["favorite_standby"])  # at most 8
+        self.assertEqual(gbp[2]["favorite_standby"], "em espera até o ciclo 3, sem clique")
+        self.assertEqual(
+            gbp[2]["asset_status"],
+            "indisponível: favorito em espera, sem clique: 2 trocas não confirmadas seguidas desde o ciclo 1;"
+            " nova verificação no ciclo 4",
+        )
+        self.assertTrue(all(row["switch_diagnostic"] for row in gbp if row["switch"] == "não confirmada"))
+        self.assertTrue(all(row["switch_diagnostic"] == "" for row in gbp if row["switch"] == "em espera"))
+        self.assertIn("na nova verificação do favorito em espera", gbp[3]["asset_status"])
+        # The others are read in every cycle, each with its own quote.
+        for name in (EUR[0], AUD[0]):
+            self.assertEqual([row["completeness"] for row in self.by_asset(rows, name)], ["completa"] * 12)
+        self.check_own_quotes(rows)
+        self.assertIn(f"Em espera, sem clique: {GBP[0]}.", self.out)
+        self.assertIn("SEM CAMPOS | SEM LEITURA: favorito em espera, sem clique: 2 trocas", self.out)
+        self.assertIn("Concluído: 12 ciclos, 29 visitas a favoritos", self.out)
+        self.assertIn("7 passagens de favoritos em espera, sem clique", self.out)
+        self.assertIn(f"  {GBP[0]}: 5 visitas, 0 completas, 0 com dados para análise; nenhuma leitura completa", self.out)
+        self.assertIn("; 5 trocas não confirmadas e 7 passagens em espera, sem clique (último registro: ", self.out)
+        history = scan.analysis.load_history(self.runtime)
+        self.assertNotIn(scan.asset_key(GBP[0]), history.series)  # nothing of it reached the analysis
+
+    def test_a_favorite_set_aside_comes_back_once_its_switch_is_confirmed(self):
+        platform = FakePlatform()
+        platform.ignored.add(1)
+        pauses = []
+
+        def becomes_available(seconds):
+            if seconds == 3:  # the pause between two cycles
+                pauses.append(seconds)
+                if len(pauses) == 5:  # after cycle 5: GBP/USD OTC switches again
+                    platform.ignored.discard(1)
+
+        code = self.run_scan("--cycles", "10", "--interval", "3", platform=platform, on_wait=becomes_available)
+        self.assertEqual(code, 0, self.err)
+        rows = self.rows()
+        gbp = self.by_asset(rows, GBP[0])
+        self.assertEqual(
+            [row["switch"] for row in gbp],
+            ["não confirmada"] * 2 + ["em espera", "não confirmada", "em espera", "em espera"] + ["confirmada"] * 4,
+        )
+        back = gbp[6]  # cycle 7: the verification confirmed the switch
+        self.assertTrue(back["favorite_standby"].startswith("de volta: a troca foi confirmada na nova verificação,"))
+        self.assertIn("depois de 3 trocas não confirmadas desde o ciclo 1 e 3 passagens em espera", back["favorite_standby"])
+        for row in gbp[6:]:
+            self.assertEqual((row["asset"], row["completeness"], row["analysis_ready"]), (GBP[0], "completa", "sim"))
+            self.assertEqual(row["previous_asset"], EUR[0])
+            self.assertTrue(in_range(row["price"], GBP[2]), row)
+            self.assertEqual(row["switch_diagnostic"], "")
+        self.assertEqual([row["favorite_standby"] for row in gbp[7:]], ["", "", ""])  # back to every cycle
+        self.check_own_quotes(rows)
+        self.assertIn("  favorito: de volta: a troca foi confirmada na nova verificação", self.out)
+        history = scan.analysis.load_history(self.runtime)
+        self.assertEqual(len(history.get(GBP[0]).samples), 4)  # only the readings of its own visits
+
+    def test_a_favorite_that_comes_back_slower_is_confirmed_in_its_verification(self):
+        platform = SlowFavoritePlatform()
+        platform.ignored.add(1)
+        pauses = []
+
+        def slow_from_cycle_4(seconds):
+            if seconds == 3:  # the pause between two cycles
+                pauses.append(seconds)
+                if len(pauses) == 3:  # it switches again, but its name after 5,2 s and its chart after 6,5 s
+                    platform.ignored.discard(1)
+                    platform.slow[1] = (5.2, 5.3, 6.5)
+
+        code = self.run_scan("--cycles", "6", "--interval", "3", platform=platform, on_wait=slow_from_cycle_4)
+        self.assertEqual(code, 0, self.err)
+        rows = self.rows()
+        gbp = self.by_asset(rows, GBP[0])
+        self.assertEqual([row["switch"] for row in gbp], ["não confirmada"] * 2 + ["em espera"] + ["confirmada"] * 3)
+        for row in gbp[3:]:  # the verification waited for it, and the chart of the previous asset was refused
+            self.assertGreater(float(row["switch_ms"]), 5_000)
+            self.assertEqual((row["asset"], row["completeness"]), (GBP[0], "completa"))
+        self.assertTrue(gbp[3]["favorite_standby"].startswith("de volta: a troca foi confirmada na nova verificação"))
+        # Nothing of GBP/USD OTC reached the favorite after it: its click was over when the next one began.
+        for row in self.by_asset(rows, AUD[0]):
+            self.assertEqual((row["asset"], row["completeness"]), (AUD[0], "completa"))
+        self.check_own_quotes(rows)
+
+    def test_the_verification_that_finds_the_favorite_already_selected_brings_it_back(self):
+        state = scan.Standby(5, failures=3, skip=2, retry_cycle=9, passes=2)
+        stub = types.SimpleNamespace(standby={"GBPUSDOTC": state})
+        favorite = scan.Favorite(1, GBP[0], GBP[0])
+        note = scan.update_standby(stub, favorite, types.SimpleNamespace(switch=scan.ALREADY), 9)
+        self.assertEqual(
+            note,
+            "de volta: o favorito já estava selecionado na tela na nova verificação, sem clique, depois de 3 trocas"
+            " não confirmadas desde o ciclo 5 e 2 passagens em espera; o favorito volta a todos os ciclos",
+        )
+        self.assertEqual(stub.standby, {})
+        stub.standby["GBPUSDOTC"] = scan.Standby(5, failures=1)
+        self.assertIsNone(scan.update_standby(stub, favorite, types.SimpleNamespace(switch=scan.NOT_CLICKED), 6))
+        self.assertEqual(stub.standby["GBPUSDOTC"].failures, 1)  # nothing was tried: the count stays
+
+    def test_the_diagnostic_never_stops_the_scan(self):
+        platform = FakePlatform()
+        session = FakeScanSession(platform)
+        stub = types.SimpleNamespace(favorites_selector=FAVORITES, last_target=None)
+        favorite = scan.Favorite(1, GBP[0], GBP[0])
+        reading = observe.FieldReading(EUR[0], "ok: #ativo")
+        seen = {EUR[0]: 80}
+
+        def failing(*args):
+            raise scan.ReadError("TimeoutError: simulada")
+
+        session.favorite_details = failing
+        text = scan.switch_diagnostic(session, stub, favorite, seen, reading)
+        self.assertEqual(
+            text,
+            f"ativo na tela durante a espera: {EUR[0]} em 80 leituras; lista: None elementos no clique e 3 agora;"
+            f" {GBP[0]} na posição ? no clique, e agora na(s) posição(ões) 2; a leitura dos detalhes falhou"
+            " (TimeoutError: simulada)",
+        )
+        session.favorite_items = failing
+        self.assertIn("a lista de favoritos não pôde ser lida agora (a leitura dos favoritos falhou: TimeoutError: simulada)",
+                      scan.switch_diagnostic(session, stub, favorite, seen, reading))
+        platform.url = "https://example.org/"
+        self.assertTrue(scan.switch_diagnostic(session, stub, favorite, seen, reading).endswith(
+            "não está em pocketoption.com: nada mais foi lido"
+        ))
+
+    def test_a_pass_in_standby_neither_counts_nor_resets_the_unconfirmed_streak(self):
+        assets = (EUR, AUD, GBP, ("NZD/USD OTC", "+88%", 0.59870), ("USD/CHF OTC", "+91%", 0.88120), ("USD/JPY OTC", "+90%", 151.235))
+        platform = FakePlatform(assets=assets)
+        platform.ignored.add(2)  # GBP/USD OTC never switches: in standby from cycle 3
+        pauses = []
+
+        def three_more_fail(seconds):
+            if seconds == 3:
+                pauses.append(seconds)
+                if len(pauses) == 2:  # cycle 3: AUD, NZD and USD/CHF stop switching too
+                    platform.ignored.update({1, 3, 4})
+
+        code = self.run_scan("--cycles", "3", "--interval", "3", "--load-timeout", "5", platform=platform, on_wait=three_more_fail)
+        self.assertEqual(code, 0, self.err)
+        third = [row for row in self.rows() if row["cycle"] == "3"]
+        self.assertEqual([row["switch"] for row in third], ["confirmada", "não confirmada", "em espera", "não confirmada", "não confirmada"])
+        self.assertIn("3 trocas seguidas não foram confirmadas: o ciclo 3 termina aqui", self.out)
+        self.assertNotIn(5, [index for _, index in platform.clicks[-4:]])  # USD/JPY OTC was not clicked in cycle 3
 
 
 def starting_off_the_favorites(assets=(EUR, GBP, AUD)):

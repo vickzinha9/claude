@@ -30,9 +30,14 @@ asset's chart right before the click; closer than that, the chart may still be t
 asset's, and the quote waits. Without that earlier quote, nothing tells the two charts
 apart, and the quote is unavailable. The payout is read after the quote, so a payout read
 once the chart has changed comes after the change of asset. What does not settle within
---load-timeout seconds of the click is unavailable, with the reason. Only one navigation
-runs at a time: the next click waits for the end of the current visit, and runtime/scan.lock
-keeps a second scan from starting.
+--load-timeout seconds of the click is unavailable, with the reason. A switch that the asset
+field does not confirm leaves the visit without data, with a diagnostic of what the screen and
+the favorites list showed (switch_diagnostic). A favorite whose switch fails STANDBY_AFTER
+times in a row is set aside: it gets a line without a click and without readings, and is
+verified again, by a normal visit, after 1, 2, 4 and at most STANDBY_MAX_CYCLES cycles, until a
+confirmed switch brings it back to every cycle. The other favorites go on as before. Only one
+navigation runs at a time: the next click waits for the end of the current visit, and
+runtime/scan.lock keeps a second scan from starting.
 
 Each visit is written as soon as it ends to a new CSV file in runtime/, one line per
 favorite per cycle, with observe's columns and the scan's own. payout_eligible is sim when
@@ -126,12 +131,21 @@ MAX_FAVORITE_WIDTH, MAX_FAVORITE_HEIGHT = 400, 120  # CSS pixels: a favorite is 
 CLICK_TIMEOUT_MS = 5_000
 REMOVED_RECHECK_SECONDS = 1.0
 MAX_UNCONFIRMED = 3  # switches in a row without confirmation end the cycle, with no more clicks
+# A favorite whose switch the asset field did not confirm STANDBY_AFTER times in a row is set
+# aside: it is passed without a click for 1 cycle, then, after each new failure, 2, 4 and at most
+# STANDBY_MAX_CYCLES cycles. Each new verification is a normal visit, with the whole
+# --load-timeout: a shorter wait would let a click that the platform takes long to apply change
+# the screen during the next favorite's visit. A confirmed switch, or the favorite found already
+# selected, brings it back to every cycle.
+STANDBY_AFTER = 2
+STANDBY_MAX_CYCLES = 8
 
 # The value of the switch column.
 ALREADY = "já selecionado"
 CONFIRMED = "confirmada"
 NOT_CONFIRMED = "não confirmada"
 NOT_CLICKED = "não clicado"
+STANDBY = "em espera"  # a favorite set aside after unconfirmed switches: not clicked, nothing read
 # The value of the payout_eligible column.
 ELIGIBLE, NOT_ELIGIBLE, UNKNOWN_ELIGIBILITY = "sim", "não", "indisponível"
 # The value of the analysis_ready column: data complete and current, usable for analysis.
@@ -164,6 +178,9 @@ SCAN_COLUMNS = observe.CSV_COLUMNS + (
     "data_age_ms",  # from the capture of the quote to the recording of the visit
     "analysis_decision",  # CALL, PUT or AGUARDAR: what the local analysis said right after the visit
     "analysis_decision_note",  # its reason; a CALL or PUT also says until when it is valid
+    # Added after a prolonged scan in which one favorite stopped switching.
+    "switch_diagnostic",  # for a switch not confirmed: what the screen and the favorites list showed
+    "favorite_standby",  # the favorite set aside after unconfirmed switches, its verification or return
 )
 
 # Words of the trade buttons, of the Amount and of money operations, in English and in
@@ -251,6 +268,13 @@ class FavoriteItem:
     width: float = 0.0  # CSS pixels
     height: float = 0.0
     form_fields: int = 0
+    # Read only for the diagnostic of a switch that was not confirmed.
+    x: object = None  # CSS pixels, from the left and the top of the page's window
+    y: object = None
+    classes: str = ""  # the class attribute
+    title: str = ""  # the title attribute, a tooltip
+    disabled: str = ""  # the aria-disabled attribute
+    markup: str = ""  # the HTML inside the element: its parts, icons and their attributes
 
 
 @dataclass(frozen=True)
@@ -344,7 +368,7 @@ class Visit:
     cycle: int
     favorite: Favorite
     total: int  # favorites in the list of that cycle
-    switch: str  # ALREADY, CONFIRMED, NOT_CONFIRMED or NOT_CLICKED
+    switch: str  # ALREADY, CONFIRMED, NOT_CONFIRMED, NOT_CLICKED or STANDBY
     observation: object  # observe.Observation
     previous_asset: object = None
     previous_quote: object = None
@@ -355,6 +379,8 @@ class Visit:
     recorded_at: object = None  # this computer's clock, in UTC, when the visit ended
     decision: object = None  # analysis.Decision right after the visit, when the analysis runs
     decision_ms: object = None  # how long the analysis took to decide, in milliseconds
+    diagnostic: object = None  # switch_diagnostic() of a switch that was not confirmed
+    standby: object = None  # the favorite set aside, verified again or back: what and until when
 
     @property
     def eligibility(self):
@@ -373,6 +399,9 @@ class AssetSummary:
     ready: int = 0  # visits with data complete and current, usable for analysis
     last_ready: object = None  # the last such Visit: its quote and payout were read together
     last_visit: object = None  # the last Visit, whatever its data
+    unconfirmed: int = 0  # visits whose switch was not confirmed
+    standby: int = 0  # passes without a click while the favorite was set aside; not visits
+    standby_note: object = None  # the last Visit.standby of the favorite
 
 
 @dataclass
@@ -383,6 +412,7 @@ class ScanProgress:
     complete: int = 0
     ready: int = 0
     clicks: int = 0
+    standby: int = 0  # passes of favorites set aside, without a click; not counted as visits
     csv: object = None  # ScanCsv, created with the first visit
     csv_path: object = None  # its path, chosen when the scan starts
     timings: object = None  # quote_timings.TimingRecorder of every reading of the quote
@@ -398,6 +428,8 @@ class Scan:
     load_timeout: float
     progress: ScanProgress
     last_clicked: object = None  # (key, how many elements the list had) of the last click
+    last_target: object = None  # (Favorite clicked, how many elements the list had) of the last click
+    standby: dict = field(default_factory=dict)  # favorite key -> Standby, after unconfirmed switches
     analyzer: object = None  # analysis.Analyzer, from the start of the scan
     # Called around each visit, when given: hooks.before_visit(session, favorite) before
     # the visit starts, and hooks.after_visit(session, visit) once it was recorded. The
@@ -408,6 +440,26 @@ class Scan:
     @property
     def sources(self):
         return {name: bool(self.selectors.get(name)) for name in FIELDS}
+
+
+@dataclass
+class Standby:
+    """The switches of one favorite that the asset field did not confirm, in a row.
+
+    The favorite is set aside once there are STANDBY_AFTER of them: skip is then the number of
+    cycles passed without a click after the last failure, and retry_cycle the cycle of its next
+    verification.
+    """
+
+    since: int  # the cycle of the first of them
+    failures: int = 0
+    skip: int = 0
+    retry_cycle: int = 0
+    passes: int = 0  # passes without a click so far
+
+    @property
+    def set_aside(self):
+        return self.skip > 0
 
 
 class ScanLock:
@@ -941,7 +993,13 @@ def run_scan(session, scan, args, ctx):
                 for favorite in favorites.usable:
                     if scan.hooks is not None:
                         scan.hooks.before_visit(session, favorite)
-                    visit = visit_favorite(session, scan, favorite, cycle, favorites.total, ctx)
+                    waiting = scan.standby.get(favorite.key)
+                    if waiting is not None and waiting.set_aside and cycle < waiting.retry_cycle:
+                        visit = standby_visit(session, favorite, cycle, favorites.total, waiting, ctx)
+                    else:
+                        recheck = waiting is not None and waiting.set_aside
+                        visit = visit_favorite(session, scan, favorite, cycle, favorites.total, ctx, recheck)
+                        visit = replace(visit, standby=update_standby(scan, favorite, visit, cycle))
                     decided = ctx.monotonic()
                     visit = with_decision(visit, scan)
                     visit = replace(visit, decision_ms=ctx.elapsed_ms(decided))
@@ -949,7 +1007,8 @@ def run_scan(session, scan, args, ctx):
                     visits.append(visit)
                     if scan.hooks is not None:
                         scan.hooks.after_visit(session, visit)
-                    unconfirmed = unconfirmed + 1 if visit.switch == NOT_CONFIRMED else 0
+                    if visit.switch != STANDBY:  # a pass without a click says nothing about the page
+                        unconfirmed = unconfirmed + 1 if visit.switch == NOT_CONFIRMED else 0
                     if unconfirmed >= MAX_UNCONFIRMED:
                         say(
                             f"{MAX_UNCONFIRMED} trocas seguidas não foram confirmadas: o ciclo {cycle}"
@@ -1015,8 +1074,13 @@ def removed(favorites, clicked):
     return favorites.problem is None and favorites.total < total and key not in named
 
 
-def visit_favorite(session, scan, favorite, cycle, total, ctx):
-    """Select favorite when needed, wait for its data to settle and keep one reading."""
+def visit_favorite(session, scan, favorite, cycle, total, ctx, recheck=False):
+    """Select favorite when needed, wait for its data to settle and keep one reading.
+
+    A switch that the asset field does not confirm within scan.load_timeout of the click leaves
+    the visit without any data, with switch_diagnostic() in it. recheck tells that the visit is
+    the new verification of a favorite set aside; it changes only the reason given.
+    """
     selectors = scan.selectors
     check_window(session)
     ensure_on_platform(session)
@@ -1036,7 +1100,10 @@ def visit_favorite(session, scan, favorite, cycle, total, ctx):
             return failed_visit(session, cycle, favorite, total, NOT_CLICKED, reason, previous_asset, reference, ctx)
         start = clicked_at = ctx.monotonic()
         reading = observe.read_field(session, "asset", selectors["asset"], ctx)
+        seen = {}  # what the asset field showed while the switch was not confirmed
         while not on_favorite(reading, favorite) and ctx.monotonic() - start < scan.load_timeout:
+            shown = reading.value if reading.available else f"INDISPONÍVEL ({reading.reason})"
+            seen[shown] = seen.get(shown, 0) + 1
             check_window(session)
             session.wait(ASSET_POLL_SECONDS)
             ensure_on_platform(session)
@@ -1044,13 +1111,17 @@ def visit_favorite(session, scan, favorite, cycle, total, ctx):
         switch_ms = ctx.elapsed_ms(start)
         if not on_favorite(reading, favorite):
             shown = reading.value if reading.available else f"INDISPONÍVEL ({reading.reason})"
+            seen[shown] = seen.get(shown, 0) + 1
+            check = ", na nova verificação do favorito em espera" if recheck else ""
             reason = (
-                f"a troca para {favorite.name} não foi confirmada em {seconds_text(scan.load_timeout)} s:"
+                f"a troca para {favorite.name} não foi confirmada em {seconds_text(scan.load_timeout)} s{check}:"
                 f" o ativo na tela continuou {shown}"
             )
-            return failed_visit(
+            diagnostic = switch_diagnostic(session, scan, favorite, seen, reading)
+            visit = failed_visit(
                 session, cycle, favorite, total, NOT_CONFIRMED, reason, previous_asset, reference, ctx, switch_ms
             )
+            return replace(visit, diagnostic=diagnostic)
         switch = CONFIRMED
         session.wait(SETTLE_SECONDS)
     switched = switch == CONFIRMED
@@ -1158,6 +1229,7 @@ def click(session, scan, favorite):
     if problem is None:
         scan.progress.clicks += 1
         scan.last_clicked = (target.key, favorites.total)
+        scan.last_target = (target, favorites.total)
     return problem
 
 
@@ -1370,6 +1442,115 @@ def failed_visit(
     )
 
 
+def standby_visit(session, favorite, cycle, total, state, ctx):
+    """The pass of a favorite set aside: no reading and no click, only the reason, in a line."""
+    state.passes += 1
+    reason = (
+        f"favorito em espera, sem clique: {count(state.failures, 'troca não confirmada', 'trocas não confirmadas')}"
+        f" seguidas desde o ciclo {state.since}; nova verificação no ciclo {state.retry_cycle}"
+    )
+    visit = failed_visit(session, cycle, favorite, total, STANDBY, reason, None, None, ctx)
+    return replace(visit, standby=f"em espera até o ciclo {state.retry_cycle - 1}, sem clique")
+
+
+def update_standby(scan, favorite, visit, cycle):
+    """Count an unconfirmed switch of favorite, or forget them once it switches; the note, or None.
+
+    The favorite is set aside after STANDBY_AFTER unconfirmed switches in a row; each new
+    failure doubles the cycles it is passed without a click, up to STANDBY_MAX_CYCLES. A
+    favorite that was not clicked keeps its count, because nothing was tried.
+    """
+    state = scan.standby.get(favorite.key)
+    if visit.switch == NOT_CONFIRMED:
+        if state is None:
+            state = scan.standby[favorite.key] = Standby(cycle)
+        state.failures += 1
+        if state.failures < STANDBY_AFTER:
+            return None
+        state.skip = 1 if not state.set_aside else min(state.skip * 2, STANDBY_MAX_CYCLES)
+        state.retry_cycle = cycle + state.skip + 1
+        skipped = f"no ciclo {cycle + 1}" if state.skip == 1 else f"nos ciclos {cycle + 1} a {cycle + state.skip}"
+        return (
+            f"{count(state.failures, 'troca não confirmada', 'trocas não confirmadas')} seguidas desde o ciclo"
+            f" {state.since}: o favorito fica em espera, sem clique, {skipped}; nova verificação no ciclo"
+            f" {state.retry_cycle}"
+        )
+    if visit.switch in (CONFIRMED, ALREADY) and state is not None:
+        del scan.standby[favorite.key]
+        if state.set_aside:
+            how = (
+                "a troca foi confirmada na nova verificação"
+                if visit.switch == CONFIRMED
+                else "o favorito já estava selecionado na tela na nova verificação, sem clique"
+            )
+            return (
+                f"de volta: {how}, depois de"
+                f" {count(state.failures, 'troca não confirmada', 'trocas não confirmadas')} desde o ciclo"
+                f" {state.since} e {count(state.passes, 'passagem', 'passagens')} em espera; o favorito volta a"
+                " todos os ciclos"
+            )
+    return None
+
+
+def switch_diagnostic(session, scan, favorite, seen, reading):
+    """What the screen and the favorites list showed when the switch to favorite was not confirmed.
+
+    seen counts what the asset field showed during the wait, and reading is its last reading.
+    The rest is read now, only read: the list of favorites, and the text, visibility, position,
+    size, class and title of the element clicked, of every element that names the requested
+    asset and of the one that names the asset on the screen. Nothing is clicked.
+    """
+    parts = ["ativo na tela durante a espera: " + ", ".join(
+        f"{shown} em {count(times, 'leitura', 'leituras')}" for shown, times in seen.items()
+    )]
+    target, total_then = scan.last_target if scan.last_target is not None else (None, None)
+    outside = platform_problem(session)
+    if outside is not None:
+        return "; ".join(parts + [f"{outside}: nada mais foi lido"])
+    now = list_favorites(session, scan.favorites_selector)
+    if now.problem is not None and not now.items:
+        return "; ".join(parts + [f"a lista de favoritos não pôde ser lida agora ({now.problem})"])
+    same = [item for item in now.items if item.name and item.key == favorite.key]
+    clicked = target.index if target is not None else None
+    positions = ", ".join(str(item.index + 1) for item in same) or "nenhuma"
+    clicked_at = "?" if clicked is None else clicked + 1
+    parts.append(
+        f"lista: {total_then} elementos no clique e {now.total} agora; {favorite.name} na posição"
+        f" {clicked_at} no clique, e agora na(s) posição(ões) {positions}"
+    )
+    labels = {}
+    if clicked is not None:
+        labels[clicked] = "clicado"
+    for item in same:
+        labels.setdefault(item.index, "mesmo ativo")
+    if reading.available:
+        for item in now.items:
+            if item.name and item.key == asset_key(reading.value):
+                labels.setdefault(item.index, "ativo na tela")
+    try:
+        details = session.favorite_details(scan.favorites_selector, sorted(labels))
+    except ReadError as error:
+        return "; ".join(parts + [f"a leitura dos detalhes falhou ({error})"])
+    for index in sorted(labels):
+        item = details.get(index)
+        if item is None:
+            parts.append(f"posição {index + 1} ({labels[index]}): não existe mais")
+            continue
+        state = "visível" if item.visible else "não visível"
+        if item.visible and item.x is not None:
+            state += f", {item.width:.0f}x{item.height:.0f} px em ({item.x:.0f}, {item.y:.0f})"
+        text = f"posição {index + 1} ({labels[index]}): texto {preview(' '.join(item.text.split()), 60)}, {state},"
+        text += f" classe {preview(item.classes, 80) if item.classes else '(nenhuma)'}"
+        if item.title:
+            text += f", título {preview(item.title, 60)}"
+        if item.disabled:
+            text += f", aria-disabled {preview(item.disabled, 20)}"
+        if item.markup:
+            text += f", html {preview(' '.join(observe.redact(item.markup).split()), 300)}"
+        parts.append(text)
+    return "; ".join(parts)
+
+
 ARTICLES = {"asset": "o ativo", "price": "a cotação do ativo", "payout": "o payout"}
 
 
@@ -1386,6 +1567,8 @@ def analysis_of(visit):
     """
     if visit.switch == NOT_CLICKED:
         return Analysis(False, "o favorito não foi clicado, e nada foi lido")
+    if visit.switch == STANDBY:
+        return Analysis(False, "o favorito está em espera, sem clique, e nada foi lido")
     if visit.switch == NOT_CONFIRMED:
         return Analysis(False, "a troca de ativo não foi confirmada, e nada foi lido")
     readings = visit.observation.readings
@@ -1463,14 +1646,23 @@ def record(visit, progress, ctx):
     progress.csv.write(visit)
     observation = visit.observation
     ready = visit.analysis.ready
+    summary = progress.assets.setdefault(visit.favorite.key, AssetSummary(visit.favorite.name))
+    if visit.standby is not None:
+        summary.standby_note = visit.standby
+    if visit.switch == STANDBY:  # a line of the CSV, but not a visit: nothing was clicked or read
+        progress.standby += 1
+        summary.standby += 1
+        for line in visit_lines(visit):
+            say(line)
+        return
     progress.visits += 1
     progress.valid += observation.valid
     progress.complete += observation.completeness == COMPLETE
     progress.ready += ready
-    summary = progress.assets.setdefault(visit.favorite.key, AssetSummary(visit.favorite.name))
     summary.visits += 1
     summary.complete += observation.completeness == COMPLETE
     summary.ready += ready
+    summary.unconfirmed += visit.switch == NOT_CONFIRMED
     summary.last_visit = visit
     if ready:
         summary.last_ready = visit  # its quote and payout were read together, never mixed with older ones
@@ -1524,6 +1716,8 @@ def scan_row(visit):
         "" if state.age_ms is None else f"{state.age_ms:.1f}",
         decision.action if decision is not None else "",
         decision_note(decision) if decision is not None else "",
+        spreadsheet_safe(visit.diagnostic or ""),
+        visit.standby or "",
     ]
     return row
 
@@ -1579,7 +1773,7 @@ def visit_lines(visit):
         f"CICLO {visit.cycle} | favorito {visit.favorite.position} de {visit.total}, {visit.favorite.name}",
         observe.KIND_LABELS[observation.completeness],
     ]
-    if visit.switch in (NOT_CONFIRMED, NOT_CLICKED):
+    if visit.switch in (NOT_CONFIRMED, NOT_CLICKED, STANDBY):
         parts.append(f"SEM LEITURA: {observation.readings['asset'].reason}")  # one reason for all fields
     else:
         parts += [f"{LABELS[name]} {observe.shown_value(name, observation.readings[name])}" for name in FIELDS]
@@ -1599,6 +1793,10 @@ def visit_lines(visit):
         times.append(detail)
     times.append(f"relógio local {utc_text(observation.captured_at)}")
     lines = (" | ".join(parts), "  tempos: " + " | ".join(times))
+    if visit.diagnostic is not None:
+        lines += (f"  diagnóstico da troca: {visit.diagnostic}",)
+    if visit.standby is not None and visit.switch != STANDBY:
+        lines += (f"  favorito: {visit.standby}",)
     if visit.decision is not None:
         lines += (f"  análise CALL/PUT: {visit.decision.describe()}",)
     return lines
@@ -1618,10 +1816,14 @@ def switch_text(visit):
         return f"troca confirmada em {visit.switch_ms:.0f} ms"
     if visit.switch == NOT_CONFIRMED:
         return f"troca NÃO confirmada em {visit.switch_ms:.0f} ms"
+    if visit.switch == STANDBY:
+        return "sem clique, favorito em espera"
     return "sem clique"
 
 
 def cycle_summary(cycle, visits, seconds):
+    waiting = [visit.favorite.name for visit in visits if visit.switch == STANDBY]
+    visits = [visit for visit in visits if visit.switch != STANDBY]
     complete = sum(visit.observation.completeness == COMPLETE for visit in visits)
     ready = sum(visit.analysis.ready for visit in visits)
     duration = f"{seconds:.1f}".replace(".", ",")
@@ -1640,6 +1842,8 @@ def cycle_summary(cycle, visits, seconds):
         line += f" Payout elegível (≥ {ELIGIBLE_PAYOUT}%) e dados para análise: {', '.join(usable) or 'nenhum'}."
         if only_payout:
             line += f" Payout elegível, mas SEM dados para análise: {'; '.join(only_payout)}."
+    if waiting:
+        line += f" Em espera, sem clique: {', '.join(waiting)}."
     return line
 
 
@@ -1651,6 +1855,9 @@ def written_summary(progress):
         f" {count(progress.complete, 'leitura completa', 'leituras completas')} e"
         f" {count(partial, 'parcial', 'parciais')},"
         f" {count(progress.ready, 'com dados para análise', 'com dados para análise')}"
+    ) + (
+        f", {count(progress.standby, 'passagem de favorito em espera', 'passagens de favoritos em espera')},"
+        " sem clique" if progress.standby else ""
     )
 
 
@@ -1683,6 +1890,13 @@ def report(progress):
             if last is not None and last is not ready:
                 kind = observe.KIND_LABELS[last.observation.completeness]
                 line += f"; última visita, do ciclo {last.cycle}: {kind}, {analysis_text(last.analysis)}"
+            if summary.unconfirmed or summary.standby:
+                line += (
+                    f"; {count(summary.unconfirmed, 'troca não confirmada', 'trocas não confirmadas')} e"
+                    f" {count(summary.standby, 'passagem em espera', 'passagens em espera')}, sem clique"
+                )
+                if summary.standby_note:
+                    line += f" (último registro: {summary.standby_note})"
             say(line)
     observe.report_timings(progress.timings)
     if progress.csv is not None:
@@ -1722,7 +1936,7 @@ class ScanSession(observe.PlaywrightSession):
     with Playwright's own checks of the click (the element is visible, stable, enabled and
     the one that receives it) and without changing any option of the click. Besides that,
     this class only reads: locator, count, all_inner_texts, nth, is_visible, inner_text,
-    bounding_box, get_attribute and and_, the pages of the context, and what
+    inner_html, bounding_box, get_attribute and and_, the pages of the context, and what
     PlaywrightSession reads.
     """
 
@@ -1772,6 +1986,41 @@ class ScanSession(observe.PlaywrightSession):
                 " uma única navegação. Feche a aba nova e confira o seletor dos favoritos"
             )
         return None
+
+    def favorite_details(self, selector, indices):
+        """{index: FavoriteItem} of the elements of selector at indices that exist now; only reads.
+
+        For the diagnostic of a switch that was not confirmed: the text, the visibility, the
+        position and the size, the form fields, the class, title and aria-disabled attributes,
+        and the HTML inside the element, which may show a mark of an unavailable asset.
+        """
+        found = {}
+        try:
+            locator = self._page.locator(selector)
+            total = locator.count()
+            for index in indices:
+                if not 0 <= index < total:
+                    continue
+                element = locator.nth(index)
+                visible = element.is_visible()
+                text = element.inner_text(timeout=observe.READ_TIMEOUT_MS)
+                box = element.bounding_box(timeout=observe.READ_TIMEOUT_MS) if visible else None
+                found[index] = FavoriteItem(
+                    text,
+                    visible,
+                    box["width"] if box else 0.0,
+                    box["height"] if box else 0.0,
+                    self._form_fields(element),
+                    box["x"] if box else None,
+                    box["y"] if box else None,
+                    element.get_attribute("class", timeout=observe.READ_TIMEOUT_MS) or "",
+                    element.get_attribute("title", timeout=observe.READ_TIMEOUT_MS) or "",
+                    element.get_attribute("aria-disabled", timeout=observe.READ_TIMEOUT_MS) or "",
+                    element.inner_html(timeout=observe.READ_TIMEOUT_MS),
+                )
+        except self._error_type as error:
+            raise ReadError(describe(error)) from error
+        return found
 
     def class_suggestions(self, selector, limit):
         """(selector, count) from the classes of the only element of selector, finding 2 to limit."""

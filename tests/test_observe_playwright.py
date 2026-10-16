@@ -377,7 +377,7 @@ SCAN_URL = "https://observe.test/favoritos/?ssid=SEGREDO"
 # The marker as a calibration of this chart saves it: opaque #2962ff, 78x18 px, 1 px from the
 # right edge of the canvas.
 SCAN_MARKER = {"colors": ["#2962ff"], "width": 78.0, "height": 18.0, "right_gap": 1.0, "tolerance": 40}
-SCAN_PAGE = """<!doctype html>
+SCAN_PAGE_TEMPLATE = """<!doctype html>
 <html lang="pt-BR"><head><meta charset="utf-8"><title>Favoritos de teste local</title>
 <style>
   body { margin: 0; background: #11131c; color: #ccc; font-family: Arial, sans-serif; }
@@ -398,6 +398,7 @@ SCAN_PAGE = """<!doctype html>
 <span id="trade-clicks">0</span> <span id="amount-touches">0</span> <span id="fav-clicks">-</span>
 <script>
 const ASSETS = __ASSETS__;
+const DEAD = __DEAD__;  // favorites whose click changes nothing, as an asset that became unavailable
 const ASSET_DELAY = 300, PAYOUT_DELAY = 1400, CHART_DELAY = 1700;
 let named = 0, paid = 0, drawn = 0, tick = 0;
 function bump(id) { const e = document.getElementById(id); e.textContent = String(Number(e.textContent) + 1); }
@@ -405,10 +406,12 @@ document.querySelectorAll(".trade").forEach((b) => b.addEventListener("click", (
 for (const kind of ["focus", "input", "click"]) { document.getElementById("amount").addEventListener(kind, () => bump("amount-touches")); }
 ASSETS.forEach(([name, payout], i) => {
   const item = document.createElement("div");
-  item.className = "fav";
+  item.className = DEAD.includes(i) ? "fav fechado" : "fav";
+  if (DEAD.includes(i)) item.title = "Ativo fechado";
   item.innerHTML = name + ' <span class="pct">' + payout + "%</span>";
   item.addEventListener("click", () => {
     document.getElementById("fav-clicks").textContent += String(i + 1);
+    if (DEAD.includes(i)) return;
     setTimeout(() => { named = i; render(); }, ASSET_DELAY);
     setTimeout(() => { paid = i; render(); }, PAYOUT_DELAY);
     setTimeout(() => { drawn = i; }, CHART_DELAY);
@@ -437,7 +440,16 @@ function draw() {
 render(); draw(); setInterval(draw, 250);
 </script>
 </body></html>
-""".replace("__ASSETS__", json.dumps([list(asset) for asset in SCAN_ASSETS]))
+"""
+
+
+def scan_page(dead=()):
+    """The favorites page; the favorites at the indices in dead never switch the asset."""
+    assets = json.dumps([list(asset) for asset in SCAN_ASSETS])
+    return SCAN_PAGE_TEMPLATE.replace("__ASSETS__", assets).replace("__DEAD__", json.dumps(list(dead)))
+
+
+SCAN_PAGE = scan_page()
 
 
 @unittest.skipUnless(HAVE_OCR or REQUIRED, "Playwright e OCR local (rapidocr) não estão instalados neste Python")
@@ -458,15 +470,17 @@ class RealScanTest(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.counters = None
+        self.page = SCAN_PAGE
 
     def open_session(self, profile_dir):
         """A real ScanSession, headless, that reads the page's counters right before it closes."""
         session = scan.open_scan_session(profile_dir, headless=True)
         original_close = session.close
         self.addCleanup(original_close)
+        page = self.page
         session._context.route(
             "https://observe.test/**",
-            lambda route: route.fulfill(status=200, content_type="text/html; charset=utf-8", body=SCAN_PAGE),
+            lambda route: route.fulfill(status=200, content_type="text/html; charset=utf-8", body=page),
         )
 
         def close():
@@ -478,6 +492,46 @@ class RealScanTest(unittest.TestCase):
 
         session.close = close
         return session
+
+    def test_an_unconfirmed_switch_gets_a_diagnostic_read_from_the_page(self):
+        self.page = scan_page(dead=(1,))  # GBP/USD OTC: its click never switches the asset
+        self.runtime.mkdir(parents=True)
+        sources = {"asset": "#asset", "price": "", "payout": "#payout", "price_ocr": {"chart": "#plot", "marker": SCAN_MARKER}}
+        (self.runtime / observe.SELECTORS_FILE_NAME).write_text(json.dumps(sources), encoding="utf-8")
+        (self.runtime / scan.SCAN_SELECTORS_FILE_NAME).write_text(json.dumps({"favorites": ".fav"}), encoding="utf-8")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = scan.main(
+                ["--url", SCAN_URL, "--cycles", "1", "--load-timeout", "5"],
+                open_session=self.open_session,
+                read_line=lambda prompt="": "",
+            )
+        text = out.getvalue()
+        self.assertEqual((code, err.getvalue()), (0, ""), text)
+        [path] = self.runtime.glob("scan-*.csv")
+        with open(path, newline="", encoding="utf-8") as file:
+            rows = list(csv.DictReader(file))
+        self.assertEqual([row["switch"] for row in rows], ["já selecionado", "não confirmada", "confirmada"])
+        unconfirmed = rows[1]
+        self.assertEqual((unconfirmed["asset"], unconfirmed["price"], unconfirmed["analysis_ready"]), ("", "", "não"))
+        diagnostic = unconfirmed["switch_diagnostic"]
+        self.assertRegex(
+            diagnostic,
+            r"^ativo na tela durante a espera: EUR/USD OTC em \d+ leituras; lista: 3 elementos no clique e 3 agora;"
+            r" GBP/USD OTC na posição 2 no clique, e agora na\(s\) posição\(ões\) 2; ",
+        )
+        self.assertRegex(diagnostic, r"posição 1 \(ativo na tela\): texto 'EUR/USD OTC 92%', visível, \d+x\d+ px em \(\d+, \d+\), classe 'fav'")
+        self.assertRegex(
+            diagnostic,
+            r"posição 2 \(clicado\): texto 'GBP/USD OTC 90%', visível, \d+x\d+ px em \(\d+, \d+\), classe 'fav fechado',"
+            r" título 'Ativo fechado'",
+        )
+        self.assertIn("título 'Ativo fechado', html 'GBP/USD OTC <span class=\"pct\">90%</span>'", diagnostic)
+        self.assertIn(f"  diagnóstico da troca: {diagnostic}", text)
+        # The asset after it was read as itself, and nothing but the two favorites was clicked.
+        self.assertEqual((rows[2]["asset"], rows[2]["completeness"]), ("AUD/CAD OTC", "completa"))
+        self.assertLess(abs(float(rows[2]["price"]) - SCAN_ASSETS[2][2]), 0.0005, rows[2])
+        self.assertEqual(self.counters, {"trade-clicks": "0", "amount-touches": "0", "fav-clicks": "-23"})
 
     def test_scan_clicks_only_favorites_and_never_mixes_two_assets(self):
         self.runtime.mkdir(parents=True)

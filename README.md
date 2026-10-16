@@ -39,7 +39,7 @@ Rode todos os comandos abaixo na raiz do repositório, a pasta `claude`. No Wind
 
 No GitHub, o workflow [`.github/workflows/tests.yml`](.github/workflows/tests.yml) roda essa suíte e os dois exemplos finitos abaixo em Linux e Windows a cada push e pull request. As execuções ficam na [aba Actions](https://github.com/vickzinha9/claude/actions/workflows/tests.yml).
 
-Os testes do coletor em `tests/test_observe.py`, os da leitura visual em `tests/test_quote_reader.py`, os da varredura dos favoritos em `tests/test_scan.py` e os da preparação e dos lançadores em `tests/test_setup_observer.py` usam objetos falsos no lugar do navegador, do OCR, do `pip` e do `venv`, e imagens sintéticas de gráfico. Eles não precisam do Playwright nem do OCR. Os 4 testes de `PreparerOnWindowsTest`, o de `OpenImageOnWindowsTest`, o de `ScanLauncherOnWindowsTest`, o de `AnalysisLauncherOnWindowsTest` e o de `OperationLauncherOnWindowsTest` só rodam no Windows. Os da análise local CALL/PUT, em `tests/test_analysis.py`, usam séries sintéticas e só a biblioteca padrão. Os da operação simulada, em `tests/test_operation.py`, `tests/test_operate.py`, `tests/test_paper_broker.py` e `tests/test_coordinator_decisions.py`, usam o coordenador e o simulador de verdade, com relógio falso, decisões artificiais e a tela falsa da varredura. Dos 7 de `tests/test_observe_playwright.py`, 6 abrem um Chromium de verdade, sem janela, em páginas locais de teste, que não são a Pocket Option; quatro deles leem a cotação de um gráfico desenhado em canvas, com o OCR de verdade, um varre uma barra de favoritos de teste, com cliques de verdade, e dois rodam o diagnóstico da captura. O sétimo confere a leitura de aquecimento do OCR de verdade. Sem o Playwright ou o OCR eles aparecem como `skipped`, a menos que a variável `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1` exista: aí falham, como o job de navegador do CI exige.
+Os testes do coletor em `tests/test_observe.py`, os da leitura visual em `tests/test_quote_reader.py`, os da varredura dos favoritos em `tests/test_scan.py` e os da preparação e dos lançadores em `tests/test_setup_observer.py` usam objetos falsos no lugar do navegador, do OCR, do `pip` e do `venv`, e imagens sintéticas de gráfico. Eles não precisam do Playwright nem do OCR. Os 4 testes de `PreparerOnWindowsTest`, o de `OpenImageOnWindowsTest`, o de `ScanLauncherOnWindowsTest`, o de `AnalysisLauncherOnWindowsTest` e o de `OperationLauncherOnWindowsTest` só rodam no Windows. Os da análise local CALL/PUT, em `tests/test_analysis.py`, usam séries sintéticas e só a biblioteca padrão. Os da operação simulada, em `tests/test_operation.py`, `tests/test_operate.py`, `tests/test_paper_broker.py` e `tests/test_coordinator_decisions.py`, usam o coordenador e o simulador de verdade, com relógio falso, decisões artificiais e a tela falsa da varredura. Dos 8 de `tests/test_observe_playwright.py`, 7 abrem um Chromium de verdade, sem janela, em páginas locais de teste, que não são a Pocket Option; quatro deles leem a cotação de um gráfico desenhado em canvas, com o OCR de verdade, dois varrem uma barra de favoritos de teste, com cliques de verdade, um deles com um favorito que não troca o ativo, e dois rodam o diagnóstico da captura. O oitavo confere a leitura de aquecimento do OCR de verdade. Sem o Playwright ou o OCR eles aparecem como `skipped`, a menos que a variável `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1` exista: aí falham, como o job de navegador do CI exige.
 
 ## Simulação local
 
@@ -379,7 +379,9 @@ No fim de cada ciclo aparecem, separados, os ativos com payout elegível e dados
 4. depois de uma troca, a cotação também precisa estar a mais de 0,1% da que o gráfico mostrava antes do clique, no ativo anterior. Essa cotação anterior é lida antes do clique, em até 3 tentativas curtas, com 0,3 s entre elas e nenhuma começando mais de 2,5 s depois da primeira; cada tentativa só vale se o ativo na tela continuar o mesmo depois dela. Sem essa cotação, a cotação nova fica indisponível, com o **motivo original** de cada tentativa, como `a cotação do ativo anterior não pôde ser lida antes da troca (em 3 tentativas: o marcador da cotação não apareceu: ...)`;
 5. o que não estabilizar até `--load-timeout` segundos depois do clique fica `INDISPONÍVEL (motivo)`, e a linha é gravada assim mesmo.
 
-Três trocas seguidas sem confirmação encerram o ciclo, sem clicar nos favoritos que faltam. A varredura para, com código 1 e sem clicar, quando o seletor encontra também um elemento com palavra de botão financeiro ou de dinheiro (BUY, SELL, CALL, PUT, COMPRAR, VENDER, Amount e outras), um campo de formulário ou mais de 30 elementos, quando a página sai de pocketoption.com, quando um clique abre outra aba e quando o favorito clicado some da lista. Só uma varredura roda por vez.
+**Troca não confirmada e favorito em espera.** Uma troca que o campo do ativo não confirma deixa a visita sem nenhum dado (`SEM CAMPOS`): nada é lido como o ativo pedido. A linha ganha um diagnóstico, só com leituras, do que a tela e a lista mostravam: o ativo lido durante a espera, quantos elementos a lista tinha no clique e agora, em que posições o ativo pedido aparece, e o texto, a visibilidade, a posição, o tamanho, a classe, o título, o `aria-disabled` e o HTML interno do elemento clicado, de outro elemento com o mesmo ativo e do elemento do ativo na tela. Depois de 2 trocas não confirmadas seguidas do mesmo favorito, ele fica **em espera**: ganha uma linha sem clique e sem leituras, com o motivo, e os outros seguem normalmente. Uma nova verificação, numa visita normal, com o mesmo `--load-timeout`, acontece depois de 1, 2, 4 e no máximo 8 ciclos; confirmada a troca, o favorito volta a todos os ciclos. O resumo do ciclo diz `Em espera, sem clique: <ativo>`.
+
+Três trocas seguidas sem confirmação encerram o ciclo, sem clicar nos favoritos que faltam; uma passagem em espera não conta nessa sequência. A varredura para, com código 1 e sem clicar, quando o seletor encontra também um elemento com palavra de botão financeiro ou de dinheiro (BUY, SELL, CALL, PUT, COMPRAR, VENDER, Amount e outras), um campo de formulário ou mais de 30 elementos, quando a página sai de pocketoption.com, quando um clique abre outra aba e quando o favorito clicado some da lista. Só uma varredura roda por vez.
 
 | Opção | Significado |
 |---|---|
@@ -397,14 +399,14 @@ Três trocas seguidas sem confirmação encerram o ciclo, sem clicar nos favorit
 | `tempos-scan-<data>-<hora>-<sufixo>.csv` | uma linha por leitura da cotação dessa execução, inclusive as tentativas antes de cada clique e as leituras recusadas, com o tempo de cada etapa (veja [Tempos de cada leitura](#tempos-de-cada-leitura-da-cotação)) |
 | `scan.lock` | a trava que impede duas varreduras ao mesmo tempo; pode ficar na pasta depois do fim |
 
-O CSV da varredura tem as 16 colunas do coletor, descritas acima, e mais estas; as 8 últimas são novas:
+O CSV da varredura tem as 16 colunas do coletor, descritas acima, e mais estas; as 2 últimas são novas:
 
 | Coluna | Conteúdo |
 |---|---|
 | `cycle` | número do ciclo |
 | `favorite_position` | posição do favorito na lista, a partir de 1 |
 | `favorite_text` | texto do favorito, como lido |
-| `switch` | `já selecionado`, `confirmada`, `não confirmada` ou `não clicado` |
+| `switch` | `já selecionado`, `confirmada`, `não confirmada`, `não clicado` ou `em espera` (sem clique) |
 | `previous_asset`, `previous_quote` | ativo e cotação na tela antes do clique; a cotação nova precisa ser diferente dessa |
 | `switch_ms` | milissegundos do clique até a confirmação do ativo |
 | `load_ms` | milissegundos da confirmação até os dados estáveis, ou até o limite |
@@ -416,6 +418,8 @@ O CSV da varredura tem as 16 colunas do coletor, descritas acima, e mais estas; 
 | `analysis_note` | o motivo de `não`, ou o que faz os dados utilizáveis |
 | `data_age_ms` | milissegundos da captura da cotação à gravação da visita |
 | `analysis_decision`, `analysis_decision_note` | o que a [análise local](#análise-local-callput) disse logo depois da visita, `CALL`, `PUT` ou `AGUARDAR`, e o motivo |
+| `switch_diagnostic` | numa troca não confirmada, o que a tela e a lista de favoritos mostravam; vazio nas outras |
+| `favorite_standby` | o favorito posto em espera, a passagem sem clique, ou a volta depois de uma nova verificação; vazio nas outras |
 
 | Código | Situação |
 |---|---|

@@ -258,15 +258,13 @@ As páginas de teste são HTML escrito para os testes e servido pelo próprio Pl
     - sem fonte da cotação, o payout depende só da espera e das duas leituras iguais: se a plataforma atualizar o payout mais de 1,5 s depois do nome, o payout antigo pode ser gravado. Com a cotação, isso exige que o payout mude mais de duas leituras depois do gráfico.
 12. **Varredura: nomes e seletor.** A troca é confirmada comparando só letras e algarismos do nome do favorito com o do ativo. Se a barra de favoritos escrever o nome de outro jeito, nenhuma troca é confirmada, e três seguidas encerram o ciclo. O seletor precisa encontrar só os favoritos; a lista da configuração mostra o que ele encontra.
 13. **Varredura: você e o navegador.** Durante a varredura, um clique seu na janela troca o ativo, e o mouse sobre o gráfico cria a etiqueta do cursor. A troca é conferida, mas não use a janela enquanto ela roda.
+14. **Varredura: favorito que deixa de trocar.** Na varredura longa que você informou depois do item 30 do STATUS, o clique em AED/CNY OTC deixou de trocar o ativo a partir do ciclo 516, e cada passagem esperou 20 s. Agora a troca não confirmada vem com um diagnóstico da tela e da lista, e o favorito fica em espera depois de 2 falhas seguidas, com novas verificações cada vez mais espaçadas (STATUS, item 32). A causa não está confirmada: a hipótese principal é o ativo ter ficado indisponível na plataforma com o favorito ainda na barra.
 
 ## 7. Como validar no seu Windows
 
-Os lançadores estão descritos no [README](README.md#windows-os-lançadores). Use a conta demo. Esta validação confere que os dados artificiais continuam fora da análise e que a operação continua coletando como antes; nada **envia ordens** à plataforma:
+Os lançadores estão descritos no [README](README.md#windows-os-lançadores). Use a conta demo. Esta validação confere a correção do favorito que deixa de trocar (STATUS, item 32); nada envia ordens:
 
 1. Na pasta `claude`, rode `git pull`. O `preparar_windows.cmd` não precisa rodar de novo: as dependências não mudaram, e a `.venv`, o perfil, os seletores, os CSV e os bancos continuam os mesmos.
-2. Rode `analisar_windows.cmd` e anote a linha `Dados: ...`.
-3. Rode `operar_windows.cmd --demonstracao`: deve terminar com `Demonstração concluída: as 8 cenas passaram nas conferências` e código 0. Rode `analisar_windows.cmd` de novo: a linha `Dados: ...` deve ser igual à do passo 2, porque nada da demonstração entra na análise.
-4. Rode `operar_windows.cmd --cycles 1`: cole o link, faça o login, pressione Enter e, nas duas perguntas dos favoritos, Enter de novo. Deixe o navegador restaurado ou maximizado, sem usar a janela. Com os dados de hoje, o esperado é `ESTADO: COLETANDO`, nenhuma entrada simulada, nenhum arquivo `runtime\cotacoes-ciclo-...csv` (ele só aparece quando um ciclo roda) e código 0.
-5. Me envie a saída dos passos 2 a 4.
-
-A gravação das cotações durante os ciclos só roda na tela quando a análise validar uma regra em dados separados e um ciclo começar; até lá, ela foi testada só com a tela falsa da suíte (STATUS, item 29).
+2. Rode `varrer_windows.cmd --cycles 4`, com AED/CNY OTC nos favoritos: cole o link, faça o login, pressione Enter e, nas duas perguntas dos favoritos, Enter de novo. Deixe o navegador restaurado ou maximizado, sem usar a janela. Se AED/CNY OTC ainda não trocar, o esperado é: nos ciclos 1 e 2, `troca NÃO confirmada` com uma linha `diagnóstico da troca: ...`; no ciclo 3, `SEM LEITURA: favorito em espera, sem clique`, sem a espera de 20 s, e `Em espera, sem clique: AED/CNY OTC.` no resumo; no ciclo 4, uma nova verificação, com a espera normal de até 20 s. Os outros favoritos seguem completos. Se ele trocar normalmente, nenhuma dessas linhas aparece.
+3. Depois do fim, clique você mesmo em AED/CNY OTC na barra de favoritos e veja se o ativo abre ou se a plataforma mostra que ele está fechado ou indisponível.
+4. Me envie a saída do terminal do passo 2, do começo ao fim, o que você viu no passo 3 e as colunas `switch`, `switch_diagnostic` e `favorite_standby` das linhas de AED/CNY OTC no `runtime\scan-...csv` dessa execução.
