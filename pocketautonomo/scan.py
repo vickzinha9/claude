@@ -37,13 +37,17 @@ times in a row is set aside: it gets a line without a click and without readings
 verified again, by a normal visit, after 1, 2, 4 and at most STANDBY_MAX_CYCLES cycles, until a
 confirmed switch brings it back to every cycle. The other favorites go on as before.
 
-An abandoned click, whose switch the asset field never confirmed, may still update the name and
-the chart with a delay during a later visit, so that the asset field names the new favorite while
-the chart is still the abandoned one's. Then the asset a quote belongs to is uncertain: the quote
-of the following visits is withheld from the analysis (quote_association), without touching the
-asset or the payout, until a visit confirms the asset and its chart settles. If no such visit
-happens for MAX_UNCERTAIN_CYCLES cycles, the asset name and the chart image cannot say which asset
-the quote belongs to, and the scan pauses, keeping what it recorded. Only one
+A click whose switch the asset field never confirmed may still change the name and the chart
+with a delay, during a later visit, so that the asset field names the new favorite while the
+chart is another asset's. The sources, the asset name and the chart image, cannot tell which
+asset a chart belongs to, and neither the right name, nor the time passed, nor stable quotes
+prove it. So the first switch not confirmed puts the scan in PAUSA until the end of the run
+(Pause): the navigation and the readings go on, for the diagnostic, but the quote and the payout
+of that visit's line and of every later one are withheld, with the reason in quote_association,
+so that nothing enters the analysis or a decision, and the run ends with exit code 1 (130
+after Ctrl+C), with the PAUSA warning again however it ends. Resuming
+needs a source that identifies the asset in the chart itself, which the program does not have
+(DEPENDENCY); a new run loads the page again and starts without the PAUSA. Only one
 navigation runs at a time: the next click waits for the end of the current visit, and
 runtime/scan.lock keeps a second scan from starting.
 
@@ -62,9 +66,9 @@ the quotes read during the cycles of the simulated operation (analysis.CYCLE_PRE
 says CALL, PUT or AGUARDAR, with the reason, in the terminal and in the CSV. Without a rule
 validated on separate data, it says AGUARDAR. The scan sends no order whatever it says.
 
-Exit codes: 0 when at least one line with data was written, 1 when the scan failed or wrote
-none, 2 for invalid arguments or configuration, including a missing Playwright, and 130
-after Ctrl+C.
+Exit codes: 0 when at least one line with data was written and no PAUSA happened, 1 when the
+scan failed, wrote none or entered the PAUSA, 2 for invalid arguments or configuration,
+including a missing Playwright, and 130 after Ctrl+C, also in the PAUSA.
 """
 
 import argparse
@@ -147,13 +151,12 @@ MAX_UNCONFIRMED = 3  # switches in a row without confirmation end the cycle, wit
 # selected, brings it back to every cycle.
 STANDBY_AFTER = 2
 STANDBY_MAX_CYCLES = 8
-# A click that the asset field never confirms (an abandoned click) may still update the asset
-# name and the chart with a delay, during a later visit. While that is outstanding, the asset
-# that a chart belongs to is uncertain, so the quote of the following visits is withheld from the
-# analysis until a visit confirms the asset and its chart. If no such visit happens for
-# MAX_UNCERTAIN_CYCLES cycles, the current sources (the asset name and the chart image) cannot say
-# which asset the quote belongs to, and the scan pauses, keeping what it recorded.
-MAX_UNCERTAIN_CYCLES = 3
+# What resuming after a PAUSA would need, and the program does not have (see Pause).
+DEPENDENCY = (
+    "Retomar exige uma fonte que identifique o ativo no próprio gráfico, por exemplo um rótulo ou"
+    " atributo do símbolo do gráfico conferido por você, que o programa ainda não tem; por isso a PAUSA"
+    " vale até o fim desta execução, e a próxima, com a página carregada de novo, começa sem ela"
+)
 
 # The value of the switch column.
 ALREADY = "já selecionado"
@@ -161,7 +164,6 @@ CONFIRMED = "confirmada"
 NOT_CONFIRMED = "não confirmada"
 NOT_CLICKED = "não clicado"
 STANDBY = "em espera"  # a favorite set aside after unconfirmed switches: not clicked, nothing read
-VERIFIED = "verificada"  # the asset/quote association of a visit: the chart belongs to the asset read
 # The value of the payout_eligible column.
 ELIGIBLE, NOT_ELIGIBLE, UNKNOWN_ELIGIBILITY = "sim", "não", "indisponível"
 # The value of the analysis_ready column: data complete and current, usable for analysis.
@@ -198,7 +200,7 @@ SCAN_COLUMNS = observe.CSV_COLUMNS + (
     "switch_diagnostic",  # for a switch not confirmed: what the screen and the favorites list showed
     "favorite_standby",  # the favorite set aside after unconfirmed switches, its verification or return
     # Added with the protection against attributing a quote to the wrong asset.
-    "quote_association",  # empty when verified; otherwise why the asset/quote association is uncertain
+    "quote_association",  # empty before any PAUSA; from it on, why the quote and the payout were withheld
 )
 
 # Words of the trade buttons, of the Amount and of money operations, in English and in
@@ -399,8 +401,7 @@ class Visit:
     decision_ms: object = None  # how long the analysis took to decide, in milliseconds
     diagnostic: object = None  # switch_diagnostic() of a switch that was not confirmed
     standby: object = None  # the favorite set aside, verified again or back: what and until when
-    association: object = None  # why the quote was withheld as uncertain, or None when verified
-    quote_settled: bool = False  # the quote passed the normal checks, before any uncertainty hold
+    paused: object = None  # the Pause in place: the quote and the payout of the visit were withheld
 
     @property
     def eligibility(self):
@@ -437,6 +438,8 @@ class ScanProgress:
     csv_path: object = None  # its path, chosen when the scan starts
     timings: object = None  # quote_timings.TimingRecorder of every reading of the quote
     assets: dict = field(default_factory=dict)  # asset key -> AssetSummary
+    paused: object = None  # Pause, from the first switch not confirmed to the end of the run
+    withheld: int = 0  # visits during the PAUSA that had a quote or a payout, withheld
 
 
 @dataclass
@@ -450,7 +453,6 @@ class Scan:
     last_clicked: object = None  # (key, how many elements the list had) of the last click
     last_target: object = None  # (Favorite clicked, how many elements the list had) of the last click
     standby: dict = field(default_factory=dict)  # favorite key -> Standby, after unconfirmed switches
-    pending_switch: object = None  # Uncertainty of an abandoned click whose late effects may still land
     analyzer: object = None  # analysis.Analyzer, from the start of the scan
     # Called around each visit, when given: hooks.before_visit(session, favorite) before
     # the visit starts, and hooks.after_visit(session, visit) once it was recorded. The
@@ -484,13 +486,50 @@ class Standby:
 
 
 @dataclass(frozen=True)
-class Uncertainty:
-    """An abandoned click whose late name or chart may still land, making a quote uncertain."""
+class Pause:
+    """The PAUSA of the scan, from a switch that the asset field did not confirm to the end of the run.
 
-    asset: str  # the favorite whose click was not confirmed
-    since: int  # the cycle of the first abandoned click still unresolved
-    last: int  # the cycle of the most recent abandoned click
-    reason: str  # why the following visits' quotes are withheld
+    Such a click may still change the asset name and the chart with a delay, during a later visit,
+    and then the sources cannot tell which asset the chart is of: neither the right name, nor the
+    time passed, nor stable quotes prove it. So nothing read from then on is used: the quote and
+    the payout of every visit are withheld, and no decision comes from them. The navigation goes
+    on, for the diagnostic. Resuming needs another source of data (DEPENDENCY).
+    """
+
+    asset: str  # the favorite whose switch was not confirmed
+    cycle: int  # the cycle of that visit
+
+    @property
+    def note(self):
+        """The text of each line from the PAUSA on, in quote_association and in the terminal."""
+        return (
+            f"PAUSA desde a troca não confirmada para {self.asset} no ciclo {self.cycle}: o gráfico pode ser de"
+            " outro ativo, e a cotação e o payout ficam retidos, fora da análise e das decisões, até o fim desta"
+            " execução"
+        )
+
+    def withheld(self, word):
+        """The reason of a field withheld: retida pela PAUSA desde o ciclo N."""
+        return f"{word} pela PAUSA desde o ciclo {self.cycle}"
+
+    @property
+    def cause(self):
+        """What started the PAUSA, in a few words: what the simulated operation says."""
+        return (
+            f"a troca para {self.asset} no ciclo {self.cycle} não foi confirmada, e o gráfico pode ser de outro"
+            " ativo sem que o nome do ativo mostre isso"
+        )
+
+    @property
+    def reason(self):
+        """Why, with what resuming needs: said when the PAUSA starts and at the end of the run."""
+        return (
+            f"a troca para {self.asset} no ciclo {self.cycle} não foi confirmada, e esse clique pode mudar o nome"
+            " do ativo e o gráfico com atraso, durante outra visita. O nome do ativo e a imagem do gráfico não"
+            " permitem verificar a qual ativo o gráfico pertence, e nome certo, tempo transcorrido ou cotações"
+            " estáveis não comprovam isso: a partir daqui, nenhuma cotação ou payout lido entra na análise ou em"
+            f" decisões. A navegação continua só para o diagnóstico. {DEPENDENCY}"
+        )
 
 
 class ScanLock:
@@ -582,11 +621,13 @@ def main(argv=None, *, open_session=None, read_line=input, now=None, monotonic=N
     except (ObserverStopped, BrowserError, ScanBusy, OSError) as error:
         warn(f"PARADA: {error}")
         report(progress)
+        warn_pause(progress)
         return EXIT_FAILED
     except KeyboardInterrupt:
         interrupted = True
         say(f"Interrompido por Ctrl+C: {written_summary(progress)}.")
         report(progress)
+        warn_pause(progress)
         return EXIT_INTERRUPTED
     finally:
         if progress.csv is not None:
@@ -1015,6 +1056,7 @@ def run_scan(session, scan, args, ctx):
         start = ctx.monotonic()
         favorites = checked_favorites(session, scan)
         visits = []
+        complete = 0  # complete readings as read: the PAUSA withholds them, but the screen showed them
         if favorites.problem is not None:
             say(f"CICLO {cycle}: sem favoritos para visitar: {favorites.problem}.")
         else:
@@ -1031,16 +1073,18 @@ def run_scan(session, scan, args, ctx):
                         recheck = waiting is not None and waiting.set_aside
                         visit = visit_favorite(session, scan, favorite, cycle, favorites.total, ctx, recheck)
                         visit = replace(visit, standby=update_standby(scan, favorite, visit, cycle))
+                    before = progress.paused
+                    complete += visit.observation.completeness == COMPLETE
+                    visit = with_pause(scan, visit)
                     decided = ctx.monotonic()
                     visit = with_decision(visit, scan)
                     visit = replace(visit, decision_ms=ctx.elapsed_ms(decided))
                     record(visit, progress, ctx)
                     visits.append(visit)
+                    if before is None and progress.paused is not None:
+                        warn(f"PAUSA: {progress.paused.reason}.")
                     if scan.hooks is not None:
                         scan.hooks.after_visit(session, visit)
-                    pause = update_association(scan, visit, cycle)
-                    if pause is not None:
-                        raise ObserverStopped(pause)
                     if visit.switch != STANDBY:  # a pass without a click says nothing about the page
                         unconfirmed = unconfirmed + 1 if visit.switch == NOT_CONFIRMED else 0
                     if unconfirmed >= MAX_UNCONFIRMED:
@@ -1052,7 +1096,6 @@ def run_scan(session, scan, args, ctx):
             except WindowClosed:
                 say("A janela do navegador foi fechada; a varredura terminou.")
                 return
-        complete = sum(visit.observation.completeness == COMPLETE for visit in visits)
         streak = 0 if complete else streak + 1
         line = cycle_summary(cycle, visits, ctx.elapsed_ms(start) / 1000)
         if args.cycles is not None and cycle >= args.cycles:
@@ -1116,7 +1159,7 @@ def visit_favorite(session, scan, favorite, cycle, total, ctx, recheck=False):
     the new verification of a favorite set aside; it changes only the reason given.
     """
     selectors = scan.selectors
-    pending = scan.pending_switch  # an abandoned click, read at the start, makes this quote uncertain
+    paused = scan.progress.paused  # a PAUSA in place: what this visit reads is not used (with_pause)
     check_window(session)
     ensure_on_platform(session)
     start = ctx.monotonic()
@@ -1176,7 +1219,12 @@ def visit_favorite(session, scan, favorite, cycle, total, ctx, recheck=False):
             extra["since_click_ms"] = round((poll_start - clicked_at) * 1000, 1)
         if poll.price.available:
             judged = readings["price"]
-            extra["verdict"] = ACCEPTED if judged.available else f"{REFUSED}: {judged.reason}"
+            if not judged.available:
+                extra["verdict"] = f"{REFUSED}: {judged.reason}"
+            elif paused is not None:  # the checks kept it, but nothing read during the PAUSA is used
+                extra["verdict"] = f"{REFUSED}: {paused.withheld('retida')} (as conferências da visita a aceitaram)"
+            else:
+                extra["verdict"] = ACCEPTED
         record_timing(scan, moment, poll.price, where, polls, **extra)
         if settled or ctx.monotonic() - start >= scan.load_timeout:
             break
@@ -1184,18 +1232,10 @@ def visit_favorite(session, scan, favorite, cycle, total, ctx, recheck=False):
         session.wait(POLL_SECONDS)
     if not settled:
         readings = with_time_limit(readings, scan)
-    # The quote passed the normal checks when the visit settled with the quote available: that is
-    # what a clean visit needs to clear an uncertainty. It is judged before any uncertainty hold.
-    quote_settled = settled and (not scan.sources["price"] or readings["price"].available)
-    association = None
-    if pending is not None and scan.sources["price"]:
-        association = pending.reason
-        readings = dict(readings)
-        readings["price"] = refuse(readings["price"], association) if readings["price"].available else readings["price"]
     observation = observe.Observation(poll.captured_at, poll.page, readings, poll.duration_ms)
     return Visit(
         cycle, favorite, total, switch, observation, previous_asset, previous_quote, switch_ms,
-        ctx.elapsed_ms(load_start), polls, reference, ctx.now(), association=association, quote_settled=quote_settled,
+        ctx.elapsed_ms(load_start), polls, reference, ctx.now(),
     )
 
 
@@ -1535,46 +1575,34 @@ def update_standby(scan, favorite, visit, cycle):
     return None
 
 
-def update_association(scan, visit, cycle):
-    """Track the asset/quote uncertainty of an abandoned click; return a pause reason, or None.
+def with_pause(scan, visit):
+    """visit under the PAUSA, which its own switch not confirmed may start; before it, visit as it is.
 
-    A visit whose switch the asset field never confirmed (NOT_CONFIRMED) is an abandoned click: its
-    name and chart may still land late, so the quote of the following visits is uncertain, and
-    scan.pending_switch is set. A coherent visit (the switch confirmed or already there and the
-    quote settled by the normal checks) clears it; it does not prove the chart's identity, which
-    the sources cannot (see STATUS item 33), so it only lifts the hold from the window right after
-    the abandoned click. When abandoned clicks keep coming and no visit is coherent for
-    MAX_UNCERTAIN_CYCLES cycles, no baseline can be established and a pause reason is returned.
-    Without a quote source there is no chart to misattribute.
+    From the first switch that the asset field did not confirm to the end of the run, every visit
+    carries the Pause, with its quote and its payout withheld, whatever its checks said: no
+    verification within the run can tell that the chart is the asset's again. The asset read
+    stays, and every visit still gets its line in the CSV.
     """
-    if not scan.sources["price"]:
-        return None
-    pending = scan.pending_switch
-    if visit.switch == NOT_CONFIRMED:  # an abandoned click: only a real click waits and fails to confirm
-        if pending is None:
-            reason = (
-                f"associação ativo/cotação incerta: o clique em {visit.favorite.name} (ciclo {cycle}) não foi"
-                " confirmado e pode atualizar o nome e o gráfico com atraso; a cotação fica fora da análise até"
-                " uma visita confirmar o ativo e o gráfico"
-            )
-            scan.pending_switch = pending = Uncertainty(visit.favorite.name, cycle, cycle, reason)
-        else:  # the uncertainty keeps its origin (asset and since); only its latest cycle moves
-            scan.pending_switch = pending = replace(pending, last=cycle)
-    elif pending is not None and visit.switch in (CONFIRMED, ALREADY) and visit.quote_settled:
-        scan.pending_switch = pending = None  # a coherent visit: the chart is treated as the asset's
-    # The pause is a safety valve, checked only on a new abandoned click: it fires when abandoned
-    # clicks keep coming and no visit has been coherent for MAX_UNCERTAIN_CYCLES cycles, so no
-    # baseline can be established. A favorite parked in standby (not clicked) never triggers it, so
-    # the standby wait of an unavailable favorite is preserved and the other favorites go on.
-    if visit.switch == NOT_CONFIRMED and pending is not None and cycle - pending.since + 1 >= MAX_UNCERTAIN_CYCLES:
-        return (
-            f"a associação entre o ativo e a cotação ficou incerta por {count(cycle - pending.since + 1, 'ciclo', 'ciclos')},"
-            f" desde o clique não confirmado em {pending.asset} (ciclo {pending.since}). As fontes atuais, o nome do"
-            " ativo e a imagem do gráfico, não permitem confirmar a qual ativo a cotação pertence, e nenhuma visita"
-            " confirmou o ativo e o gráfico desde então. A varredura parou, com tudo o que já gravou; confira a tela"
-            " e os favoritos antes de rodar de novo"
-        )
-    return None
+    progress = scan.progress
+    if progress.paused is None:
+        if visit.switch != NOT_CONFIRMED:
+            return visit
+        progress.paused = Pause(visit.favorite.name, visit.cycle)
+    pause = progress.paused
+    readings = visit.observation.readings
+    if readings["price"].available or readings["payout"].available:
+        progress.withheld += 1
+        readings = withhold(readings, pause)
+    return replace(visit, observation=replace(visit.observation, readings=readings), paused=pause)
+
+
+def withhold(readings, pause):
+    """readings with the quote and the payout made unavailable by pause; the asset is kept."""
+    kept = dict(readings)
+    for name, word in (("price", "retida"), ("payout", "retido")):
+        if kept[name].available:
+            kept[name] = refuse(kept[name], pause.withheld(word))
+    return kept
 
 
 def switch_diagnostic(session, scan, favorite, seen, reading):
@@ -1656,6 +1684,8 @@ def analysis_of(visit):
         return Analysis(False, "o favorito está em espera, sem clique, e nada foi lido")
     if visit.switch == NOT_CONFIRMED:
         return Analysis(False, "a troca de ativo não foi confirmada, e nada foi lido")
+    if visit.paused is not None:
+        return Analysis(False, f"PAUSA desde o ciclo {visit.paused.cycle}: nenhuma cotação ou payout lido entra na análise")
     readings = visit.observation.readings
     missing = [ARTICLES[name] for name in FIELDS if not readings[name].available]
     if missing:
@@ -1803,7 +1833,7 @@ def scan_row(visit):
         decision_note(decision) if decision is not None else "",
         spreadsheet_safe(visit.diagnostic or ""),
         visit.standby or "",
-        visit.association or "",
+        visit.paused.note if visit.paused is not None else "",
     ]
     return row
 
@@ -1883,8 +1913,8 @@ def visit_lines(visit):
         lines += (f"  diagnóstico da troca: {visit.diagnostic}",)
     if visit.standby is not None and visit.switch != STANDBY:
         lines += (f"  favorito: {visit.standby}",)
-    if visit.association is not None:
-        lines += (f"  cotação fora da análise: {visit.association}",)
+    if visit.paused is not None:
+        lines += (f"  {visit.paused.note}",)
     if visit.decision is not None:
         lines += (f"  análise CALL/PUT: {visit.decision.describe()}",)
     return lines
@@ -1910,6 +1940,7 @@ def switch_text(visit):
 
 
 def cycle_summary(cycle, visits, seconds):
+    pause = next((visit.paused for visit in visits if visit.paused is not None), None)
     waiting = [visit.favorite.name for visit in visits if visit.switch == STANDBY]
     visits = [visit for visit in visits if visit.switch != STANDBY]
     complete = sum(visit.observation.completeness == COMPLETE for visit in visits)
@@ -1932,6 +1963,11 @@ def cycle_summary(cycle, visits, seconds):
             line += f" Payout elegível, mas SEM dados para análise: {'; '.join(only_payout)}."
     if waiting:
         line += f" Em espera, sem clique: {', '.join(waiting)}."
+    if pause is not None:
+        line += (
+            f" PAUSA desde a troca não confirmada para {pause.asset} no ciclo {pause.cycle}: nada lido depois"
+            " dela entra na análise ou em decisões."
+        )
     return line
 
 
@@ -1986,14 +2022,36 @@ def report(progress):
                 if summary.standby_note:
                     line += f" (último registro: {summary.standby_note})"
             say(line)
+    pause = progress.paused
+    if pause is not None:
+        say(
+            f"PAUSA desde a troca não confirmada para {pause.asset} no ciclo {pause.cycle}: depois dela,"
+            f" {count(progress.withheld, 'visita com cotação ou payout lidos', 'visitas com cotação ou payout lidos')},"
+            " todos retidos, fora da análise e das decisões; as linhas estão no CSV, com o motivo na coluna"
+            " quote_association."
+        )
     observe.report_timings(progress.timings)
     if progress.csv is not None:
         say(f"CSV: {progress.csv.path}")
 
 
+def warn_pause(progress):
+    """The PAUSA warning at the end of a run that entered it, however it ends; True when it did."""
+    pause = progress.paused
+    if pause is None:
+        return False
+    warn(
+        f"PAUSA: {pause.reason}. Confira a tela e a lista de favoritos antes de rodar de novo: se a troca"
+        f" para {pause.asset} continuar sem confirmação, a PAUSA volta na primeira visita dele."
+    )
+    return True
+
+
 def finish(progress):
     say(f"Concluído: {written_summary(progress)}.")
     report(progress)
+    if warn_pause(progress):
+        return EXIT_FAILED
     if progress.valid == 0:
         warn(
             "PARADA: nenhuma leitura com dados foi gravada. Confira os motivos acima, o seletor"

@@ -37,7 +37,8 @@ goto :pausa
 popd
 echo.
 echo varrer_windows.cmd terminou com codigo %CODIGO%.
-echo 0 = ao menos uma linha com dados gravada; 1 = falha ou nenhuma linha com dados;
+echo 0 = ao menos uma linha com dados gravada, sem PAUSA; 1 = falha, PAUSA depois de
+echo uma troca nao confirmada ou nenhuma linha com dados;
 echo 2 = link recusado ou configuracao incompleta; 130 = Ctrl+C.
 
 :pausa

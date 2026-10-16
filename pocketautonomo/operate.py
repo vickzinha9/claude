@@ -25,6 +25,12 @@ visit (operation.Operator):
 - Stakes of R$ 5, R$ 10, R$ 20 and R$ 40, four attempts at most; only a LOSS confirmed by
   the simulator moves on, and each gale has its own window after that result
   (--gale-window). When the cycle ends, the scan goes on to the next favorite.
+- When the scan enters its PAUSA (scan.Pause, after a switch that the asset field did not
+  confirm), the operation enters it too (Operator.pause_collection), until the end of the
+  run: no decision starts a cycle, nothing read enters the analysis, a pending entry keeps
+  what was recorded, and the run ends with exit code 1 (130 after Ctrl+C). The PAUSA starts
+  at the end of a visit, and a visit only runs with no cycle open, so it never starts during
+  a cycle.
 
 The state of the coordinator is kept in runtime/operacao-simulada.db and the simulated
 orders in runtime/operacao-simulada-ordens.db, both reused by every run: a decision used
@@ -170,12 +176,14 @@ def main(argv=None, *, open_session=None, read_line=input, now=None, monotonic=N
     ) as error:
         warn(f"PARADA: {error}")
         scan.report(progress)
+        scan.warn_pause(progress)
         report(operator, log, database, orders, quotes)
         return EXIT_FAILED
     except KeyboardInterrupt:
         interrupted = True
         say(f"Interrompido por Ctrl+C: {scan.written_summary(progress)}.")
         scan.report(progress)
+        scan.warn_pause(progress)
         report(operator, log, database, orders, quotes)
         return EXIT_INTERRUPTED
     finally:
@@ -398,6 +406,9 @@ class OperationHooks:
             hold(session, self.operator, self.state, self.ctx, favorite.position, self.quotes)
 
     def after_visit(self, session, visit):
+        pause = self.state.progress.paused
+        if pause is not None:  # the scan is in PAUSA: no decision starts a cycle until the end of the run
+            self.operator.pause_collection(pause.cause)
         if visit.decision is not None:
             self.operator.consider(visit.decision, visit.observation.duration_ms, visit.decision_ms)
         if self.operator.busy():

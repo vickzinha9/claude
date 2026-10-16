@@ -111,6 +111,7 @@ WINDOW_EXPIRED = "janela vencida"
 CYCLE_ENDED = "ciclo encerrado"
 RECOVERY = "recuperação"
 STOPPED = "pausa"
+SCAN_PAUSED = "PAUSA da varredura"  # the scan's data stopped being usable: no new cycle until the end of the run
 
 OPERATION_COLUMNS = (
     "at_utc",  # this computer's clock, in UTC, when the event happened
@@ -329,7 +330,8 @@ class Operator:
 
     The coordinator must come straight from its store, paused: recover() resolves what the
     last run left and resumes it. now is the UTC clock shared with the broker and with the
-    quotes' capture times; monotonic measures the durations.
+    quotes' capture times; monotonic measures the durations. pause_collection() puts the
+    operation in PAUSA until the end of the run, when the scan's data stops being usable.
     """
 
     def __init__(
@@ -356,6 +358,7 @@ class Operator:
         self.validated = {}  # asset key -> asset, for the assets whose last decision had a validated rule
         self.recovering = True  # until recover() resolved what the last run left
         self.stop_reason = None
+        self.collection_paused = None  # why the scan is in PAUSA: no new cycle until the end of the run
         self.counts = {"cycles": 0, "entries": 0, "deadline": 0, "refused": 0, "windows": 0}
         self._latest = {}  # asset key -> the latest Seen
         self._shown = None  # the last state shown in the terminal
@@ -373,6 +376,33 @@ class Operator:
     def held_asset(self):
         """The asset of the open cycle, whose quotes the caller must feed to observe()."""
         return self.coordinator.status().asset
+
+    def pause_collection(self, reason):
+        """PAUSA until the end of the run: the scan says that its data can no longer be used.
+
+        From now on, a CALL or PUT decision is refused, and the coordinator is paused as soon as
+        no cycle is open, so nothing new starts. An entry already pending keeps what was recorded
+        and is still settled by the simulator; nothing is cancelled or sent again. The pause is
+        not saved: the next run starts from recover(), as always. Calling again keeps the first
+        reason.
+
+        The scan calls it after a visit, and a visit only runs with no cycle open (the navigation
+        is suspended during a cycle), so in the scan it never finds a cycle open. It does not
+        change the cycle rules: called during a cycle, it would let that cycle's gales go on.
+        """
+        self._check_running()
+        first = self.collection_paused is None
+        if first:
+            self.collection_paused = reason
+        if not self.busy() and not self.coordinator.status().is_paused:
+            self._guard(self.coordinator.pause, "a pausa do coordenador falhou")
+        if first:
+            self._write(
+                SCAN_PAUSED,
+                {},
+                reason=f"{reason}; nenhuma decisão inicia ciclo até o fim desta execução, e as pendências ficam como estão",
+            )
+            self._show_state()
 
     # Decisions and quotes.
 
@@ -397,6 +427,8 @@ class Operator:
                 quote=sample.quote, quote_captured_at_utc=sample.at, quote_age_ms=age_ms(sample.at, now),
                 payout_percent=sample.payout, window_opens_utc=sample.at, window_closes_utc=decision.valid_until,
             )
+        if self.collection_paused is not None:
+            return self._refuse(row, f"varredura em PAUSA: {self.collection_paused}")
         if not (validation is not None and validation.validated and validation.rule is not None):
             return self._refuse(row, "a decisão não vem de uma regra validada em dados separados")
         if sample is None or decision.valid_until is None:
@@ -834,7 +866,7 @@ class Operator:
             return PAUSED
         if status.pending is not None:
             return PENDING_ENTRY
-        if status.is_paused or status.submission_failure is not None:
+        if status.is_paused or status.submission_failure is not None or self.collection_paused is not None:
             return PAUSED
         if status.is_active:
             return ACTIVE_CYCLE
@@ -857,6 +889,8 @@ class Operator:
                 return self.stop_reason
             if self.recovering:
                 return "recuperação do estado gravado, antes de qualquer ciclo novo"
+            if self.collection_paused is not None:
+                return f"varredura em PAUSA: {self.collection_paused}; nenhuma decisão inicia ciclo até o fim desta execução"
             return self._busy_reason(status)
         if state == ACTIVE_CYCLE:
             window = self.window

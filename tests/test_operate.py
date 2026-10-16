@@ -220,6 +220,67 @@ class LiveOperationTest(OperateTestCase):
         self.assertEqual(rows[-1]["outcome"], CANCELLED)
 
 
+class PauseOperationTest(OperateTestCase):
+    """After a switch that was not confirmed, nothing read in the run starts a cycle: the PAUSA."""
+
+    TARGET = ts.CLOSE[2][0]  # AUD/CAD OTC, payout 91%, visited right after the abandoned click
+
+    def test_the_rule_starts_a_cycle_on_a_clean_screen(self):
+        # The control: the same rule and the same asset, without any switch that failed.
+        code = self.run_operation(
+            "--cycles", "1", "--load-timeout", "5", platform=ts.FakePlatform(assets=ts.CLOSE),
+            history=validated_history(self.TARGET),
+        )
+        self.assertEqual((code, self.err), (0, ""), self.out)
+        started = [row for row in self.operation_rows() if row["event"] == "ciclo iniciado"]
+        self.assertEqual([row["asset"] for row in started], [self.TARGET])
+        self.assertNotIn("PAUSA", self.out)
+
+    def test_without_the_pause_the_contaminated_reading_would_start_a_cycle(self):
+        # What the PAUSA blocks: with it switched off, the wrong chart read under the right name passes
+        # every check and opens a cycle with another asset's quote.
+        platform = ts.PersistentLeakPlatform(ts.CLOSE)
+        with mock.patch.object(scan, "with_pause", lambda state, visit: visit):
+            self.run_operation(
+                "--cycles", "1", "--load-timeout", "5", platform=platform, history=validated_history(self.TARGET),
+            )
+        [started] = [row for row in self.operation_rows() if row["event"] == "ciclo iniciado"]
+        self.assertEqual(started["asset"], self.TARGET)
+        self.assertTrue(ts.in_range(started["quote"], ts.CLOSE[1][2]), started)  # GBP's chart, not AUD's
+        self.assertFalse(ts.in_range(started["quote"], ts.CLOSE[2][2]), started)
+
+    def test_a_contaminated_screen_never_starts_a_cycle_even_with_a_validated_rule(self):
+        platform = ts.PersistentLeakPlatform(ts.CLOSE)  # the wrong chart, with close quotes, for good
+        code = self.run_operation(
+            "--cycles", "3", "--interval", "3", "--load-timeout", "5", platform=platform,
+            history=validated_history(self.TARGET),
+        )
+        self.assertEqual(code, 1, self.out)
+        rows = self.operation_rows()
+        self.assertEqual([row["event"] for row in rows], [operation.SCAN_PAUSED])  # no decision, no cycle
+        self.assertTrue(rows[0]["reason"].startswith(f"a troca para {ts.GBP[0]} no ciclo 1 não foi confirmada"), rows[0])
+        target = [row for row in self.rows() if row["asset"] == self.TARGET]
+        self.assertEqual(len(target), 3)  # visited in each cycle, under the right name
+        for row in target:
+            self.assertEqual((row["price"], row["analysis_ready"], row["analysis_decision"]), ("", "não", "AGUARDAR"))
+        self.assertEqual(list(self.runtime.glob(f"{analysis.CYCLE_PREFIX}*.csv")), [])  # no cycle quote either
+        broker = PaperBroker(self.runtime / operate.ORDERS_NAME, 300.0, platform.now)
+        self.addCleanup(broker.close)
+        self.assertEqual(broker.orders(), [])
+        for text in (
+            f"ESTADO: PAUSA — varredura em PAUSA: a troca para {ts.GBP[0]} no ciclo 1 não foi confirmada",
+            "Operação simulada: 0 ciclos iniciados, 0 entradas simuladas",
+            "Estado final: PAUSA.",
+        ):
+            self.assertIn(text, self.out)
+        self.assertIn(f"PAUSA: a troca para {ts.GBP[0]} no ciclo 1 não foi confirmada", self.err)
+        self.assertNotIn("Navegação entre favoritos suspensa", self.out)
+        # The next run starts without the PAUSA, from the recovery, and keeps the database.
+        coordinator = Coordinator(SqliteStore(self.runtime / operate.DATABASE_NAME))
+        self.addCleanup(coordinator.close)
+        self.assertIsNone(coordinator.status().cycle_id)
+
+
 class FallingPlatform(ts.FakePlatform):
     """Every quote falls slowly with the platform's clock: a PUT always wins."""
 

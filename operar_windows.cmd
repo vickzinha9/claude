@@ -39,7 +39,8 @@ goto :pausa
 popd
 echo.
 echo operar_windows.cmd terminou com codigo %CODIGO%.
-echo 0 = concluido (ou demonstracao conferida); 1 = falha ou parada, estado preservado;
+echo 0 = concluido (ou demonstracao conferida); 1 = falha, parada ou PAUSA, estado
+echo preservado;
 echo 2 = argumento invalido ou configuracao incompleta; 130 = Ctrl+C.
 
 :pausa

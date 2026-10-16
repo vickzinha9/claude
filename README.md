@@ -311,7 +311,7 @@ Tempos da leitura da cotação, mediana/máximo em ms, por momento da leitura:
 | `since_click_ms` | varredura, depois de uma troca: milissegundos do clique ao início da leitura |
 | `attempt` | número da tentativa, antes da troca, ou da leitura dos dados, na visita |
 | `result`, `quote`, `reason` | `ok` com a cotação lida, ou `indisponível` com o motivo |
-| `verdict` | varredura: `aceita`, ou `recusada: <motivo>` quando as conferências não aproveitaram a cotação lida |
+| `verdict` | varredura: `aceita`, ou `recusada: <motivo>` quando as conferências não aproveitaram a cotação lida; na PAUSA, depois de uma troca não confirmada, uma leitura que as conferências aceitariam fica `recusada: retida pela PAUSA desde o ciclo N (as conferências da visita a aceitaram)` |
 | `source`, `total_ms` | `texto` ou `ocr`; milissegundos da leitura inteira |
 | `element_ms`, `count_ms`, `visible_ms`, `box_ms` | achar o elemento do gráfico: contagem, visibilidade e posição, cada uma uma ida ao navegador |
 | `screenshot_ms`, `decode_ms`, `detection_ms`, `ocr_ms` | captura da tela, decodificação da imagem, detecção do marcador e OCR |
@@ -383,14 +383,14 @@ No fim de cada ciclo aparecem, separados, os ativos com payout elegível e dados
 
 Três trocas seguidas sem confirmação encerram o ciclo, sem clicar nos favoritos que faltam; uma passagem em espera não conta nessa sequência.
 
-**Cotação retida enquanto o gráfico é incerto.** Um clique não confirmado pode atualizar o nome do ativo e o gráfico com atraso, numa visita seguinte: o campo do ativo já mostra o novo favorito, mas o gráfico ainda é o do abandonado. Como as fontes (o nome e a imagem do gráfico) não provam a qual ativo o gráfico pertence — com preços próximos, até o limite de salto é insuficiente —, uma troca não confirmada marca a associação ativo/cotação como incerta, e a cotação das visitas seguintes fica retida: `price` vazio, `quote_association` com o motivo e `analysis_ready` em `não`, fora da análise. O nome do ativo e o payout continuam gravados. A retenção é limpa pela primeira visita limpa (troca confirmada ou favorito já selecionado, com a cotação estável). Se nenhuma visita limpa acontecer por 3 ciclos, a varredura para com código 1 e um motivo claro, preservando o CSV e `runtime/`. A varredura para, com código 1 e sem clicar, quando o seletor encontra também um elemento com palavra de botão financeiro ou de dinheiro (BUY, SELL, CALL, PUT, COMPRAR, VENDER, Amount e outras), um campo de formulário ou mais de 30 elementos, quando a página sai de pocketoption.com, quando um clique abre outra aba e quando o favorito clicado some da lista. Só uma varredura roda por vez.
+**PAUSA depois de uma troca não confirmada.** Um clique não confirmado pode mudar o nome do ativo e o gráfico com atraso, numa visita seguinte: o campo do ativo mostra o novo favorito, mas o gráfico é de outro ativo. As fontes (o nome e a imagem do gráfico) não permitem verificar a qual ativo o gráfico pertence, e nome certo, tempo transcorrido, cotações estáveis ou uma troca confirmada depois não comprovam isso. Por isso a primeira troca não confirmada põe a varredura em **PAUSA até o fim da execução**: a navegação e as leituras continuam só para o diagnóstico, no mesmo ritmo, com a espera dos favoritos indisponíveis, mas a cotação e o payout de todas as visitas depois dessa troca ficam retidos (`price` e `payout_percent` vazios, `retida pela PAUSA desde o ciclo N` no status), com `analysis_ready` em `não` e a decisão `AGUARDAR`; o motivo vai para `quote_association`, já na linha da própria troca, que não tem leitura. Nada entra na análise, no histórico ou em decisões. O nome do ativo lido continua gravado. O aviso `PAUSA: ...` aparece quando ela começa e no fim, também depois de um Ctrl+C, e a execução termina com código 1 (130 com Ctrl+C), preservando o CSV, os tempos e `runtime/`. Retomar exigiria uma fonte que identificasse o ativo no próprio gráfico, que o programa ainda não tem; a execução seguinte carrega a página de novo e começa sem a PAUSA. Um favorito que continua sem trocar faz a PAUSA voltar na primeira visita dele; tirá-lo dos favoritos na plataforma evita isso. A varredura para, com código 1 e sem clicar, quando o seletor encontra também um elemento com palavra de botão financeiro ou de dinheiro (BUY, SELL, CALL, PUT, COMPRAR, VENDER, Amount e outras), um campo de formulário ou mais de 30 elementos, quando a página sai de pocketoption.com, quando um clique abre outra aba e quando o favorito clicado some da lista. Só uma varredura roda por vez.
 
 | Opção | Significado |
 |---|---|
 | `--url LINK` | link `https://` de pocketoption.com ou de um subdomínio dele; sem ele, o programa pede o link no terminal |
 | `--configure` | depois do login, pede o seletor dos favoritos, lista o que ele encontra e o grava antes da varredura; sem esta opção, o seletor precisa estar gravado |
 | `--cycles N` | quantos ciclos fazer, cada um passando uma vez por todos os favoritos; sem esta opção, continua até Ctrl+C |
-| `--interval S` | segundos entre o fim de um ciclo e o começo do próximo (padrão 10, mínimo 1). Depois de um ciclo sem nenhuma leitura completa, a espera dobra a cada ciclo assim, até 120 s, e volta ao normal com uma leitura completa |
+| `--interval S` | segundos entre o fim de um ciclo e o começo do próximo (padrão 10, mínimo 1). Depois de um ciclo sem nenhuma leitura completa, a espera dobra a cada ciclo assim, até 120 s, e volta ao normal com uma leitura completa; na PAUSA, conta a leitura feita na tela, mesmo retida |
 | `--load-timeout S` | segundos, depois do clique, para confirmar o ativo e ter dados estáveis (padrão 20, de 5 a 120) |
 | `--horizon S` | segundos das operações hipotéticas da [análise local CALL/PUT](#análise-local-callput) (padrão 300, de 30 a 3600) |
 
@@ -422,12 +422,12 @@ O CSV da varredura tem as 16 colunas do coletor, descritas acima, e mais estas; 
 | `analysis_decision`, `analysis_decision_note` | o que a [análise local](#análise-local-callput) disse logo depois da visita, `CALL`, `PUT` ou `AGUARDAR`, e o motivo |
 | `switch_diagnostic` | numa troca não confirmada, o que a tela e a lista de favoritos mostravam; vazio nas outras |
 | `favorite_standby` | o favorito posto em espera, a passagem sem clique, ou a volta depois de uma nova verificação; vazio nas outras |
-| `quote_association` | por que a cotação foi retida como incerta (depois de um clique não confirmado); vazio quando a associação ativo/cotação está verificada |
+| `quote_association` | vazio antes de qualquer troca não confirmada; da linha dela em diante, o motivo da PAUSA, que retém a cotação e o payout |
 
 | Código | Situação |
 |---|---|
-| 0 | terminou com pelo menos uma linha com dados |
-| 1 | falhou, parou por segurança ou não gravou nenhuma linha com dados |
+| 0 | terminou com pelo menos uma linha com dados, sem PAUSA |
+| 1 | falhou, parou por segurança, entrou em PAUSA depois de uma troca não confirmada ou não gravou nenhuma linha com dados |
 | 2 | argumento, link ou configuração inválidos, inclusive sem o seletor do ativo em `observe-selectors.json`, sem o seletor dos favoritos fora do `--configure` e Playwright ou OCR ausentes |
 | 130 | interrompido por Ctrl+C; as linhas já gravadas ficam no CSV |
 
@@ -476,6 +476,7 @@ operar_windows.cmd --cycles 2 --gale-window 5
 3. **Janelas:** cada gale tem `--gale-window` segundos (padrão 5) depois da LOSS confirmada para entrar, com uma cotação nova; vencida a janela, o ciclo é interrompido, sem ordem atrasada. Durante o ciclo, a navegação entre favoritos fica suspensa: o programa só lê o ativo do ciclo, sem clicar.
 4. **Simulador:** cada ordem entra com a cotação lida, vence `--horizon` segundos (padrão 300) depois da captura dela e é liquidada pela primeira cotação lida a partir do vencimento; sem cotação até 30 s depois, é cancelada, sem resultado inventado. Uma ordem que chega depois do prazo da tentativa é recusada. Uma resposta incerta (UNKNOWN) nunca é reenviada: a ordem é procurada no simulador pela reserva.
 5. **Reinício:** a pendência gravada é conferida no simulador, sem reenvio, e um ciclo aberto sem pendência é abandonado, porque a janela da próxima entrada não sobrevive ao reinício.
+6. **PAUSA da varredura:** depois de uma troca não confirmada, a operação também fica em PAUSA até o fim da execução: o evento `PAUSA da varredura` vai para o CSV da operação, toda decisão `CALL` ou `PUT` é recusada e nenhum ciclo começa. Uma pendência fica como foi gravada e ainda é liquidada pelo simulador; nada é cancelado nem reenviado. A PAUSA começa no fim de uma visita, e uma visita só roda sem ciclo aberto, então ela nunca começa durante um ciclo. A execução seguinte começa sem ela.
 
 | Estado no terminal | Quando |
 |---|---|
@@ -483,7 +484,7 @@ operar_windows.cmd --cycles 2 --gale-window 5
 | `AGUARDANDO DECISÃO` | há regra validada; falta uma decisão atual, dentro do prazo e com payout de 90% ou mais |
 | `CICLO ATIVO` | ciclo aberto entre uma LOSS confirmada e a entrada do gale |
 | `PENDÊNCIA` | entrada no simulador esperando o resultado, inclusive com resposta incerta |
-| `PAUSA` | recuperação depois de reabrir, ou parada por falha de gravação |
+| `PAUSA` | recuperação depois de reabrir, parada por falha de gravação, ou a PAUSA da varredura depois de uma troca não confirmada, até o fim da execução |
 
 O estado fica em `runtime/operacao-simulada.db` e `runtime/operacao-simulada-ordens.db`, reaproveitados a cada execução. Cada execução grava os eventos em `runtime/operacao-<data>-<hora>-<sufixo>.csv`, com os tempos de leitura, de decisão e de envio ao simulador em colunas separadas, as entradas recusadas por prazo vencido e a coluna `execution` = `simulada`. **O tempo de envio é do simulador e não comprova a latência da corretora.**
 
@@ -493,8 +494,8 @@ As leituras do ativo do ciclo que passam nas conferências da varredura (ativo a
 
 | Código de `operar_windows.cmd` | Situação |
 |---|---|
-| 0 | a varredura gravou ao menos uma linha com dados, ou a demonstração passou nas conferências |
-| 1 | falhou ou parou por segurança, inclusive com o navegador fechado durante um ciclo; o estado fica preservado |
+| 0 | a varredura gravou ao menos uma linha com dados, sem PAUSA, ou a demonstração passou nas conferências |
+| 1 | falhou, parou por segurança ou entrou em PAUSA, inclusive com o navegador fechado durante um ciclo; o estado fica preservado |
 | 2 | argumento ou configuração inválidos |
 | 130 | Ctrl+C; uma pendência fica gravada e é conferida na próxima abertura |
 

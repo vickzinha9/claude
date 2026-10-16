@@ -507,7 +507,8 @@ class RealScanTest(unittest.TestCase):
                 read_line=lambda prompt="": "",
             )
         text = out.getvalue()
-        self.assertEqual((code, err.getvalue()), (0, ""), text)
+        self.assertEqual(code, 1, text)  # the unconfirmed switch put the scan in PAUSA
+        self.assertTrue(err.getvalue().startswith("PAUSA: a troca para GBP/USD OTC no ciclo 1 não foi confirmada"), err.getvalue())
         [path] = self.runtime.glob("scan-*.csv")
         with open(path, newline="", encoding="utf-8") as file:
             rows = list(csv.DictReader(file))
@@ -528,10 +529,14 @@ class RealScanTest(unittest.TestCase):
         )
         self.assertIn("título 'Ativo fechado', html 'GBP/USD OTC <span class=\"pct\">90%</span>'", diagnostic)
         self.assertIn(f"  diagnóstico da troca: {diagnostic}", text)
-        # The asset after the abandoned click was read as itself, but its quote is held back as
-        # uncertain: GBP's click, never confirmed, could still update the chart with a delay.
-        self.assertEqual((rows[2]["asset"], rows[2]["price"], rows[2]["analysis_ready"]), ("AUD/CAD OTC", "", "não"))
-        self.assertTrue(rows[2]["quote_association"].startswith("associação ativo/cotação incerta: o clique em GBP/USD OTC"))
+        # The asset after the abandoned click was read as itself, but its quote and its payout are
+        # withheld by the PAUSA: GBP's click, never confirmed, could still change the chart with a delay.
+        self.assertEqual(
+            (rows[2]["asset"], rows[2]["price"], rows[2]["payout_percent"], rows[2]["analysis_ready"]),
+            ("AUD/CAD OTC", "", "", "não"),
+        )
+        for row in rows[1:]:
+            self.assertTrue(row["quote_association"].startswith("PAUSA desde a troca não confirmada para GBP/USD OTC no ciclo 1"))
         self.assertEqual(self.counters, {"trade-clicks": "0", "amount-touches": "0", "fav-clicks": "-23"})
 
     def test_scan_clicks_only_favorites_and_never_mixes_two_assets(self):

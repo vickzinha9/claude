@@ -463,6 +463,56 @@ class NextCycleTest(OperationTestCase):
         self.assertEqual(self.orders(), [(500, WIN), (500, "OPEN")])
 
 
+class CollectionPauseTest(OperationTestCase):
+    """The scan's PAUSA: no decision starts a cycle until the end of the run, and what is pending stays."""
+
+    REASON = "a troca para GBP/USD OTC no ciclo 3 não foi confirmada (artificial)"
+
+    def test_in_the_pause_no_decision_starts_a_cycle_until_the_end_of_the_run(self):
+        self.start()
+        self.operator.pause_collection(self.REASON)
+        self.assertEqual(self.operator.state(), PAUSED)
+        self.assertTrue(self.coordinator.status().is_paused)
+        [row] = self.rows(operation.SCAN_PAUSED)
+        self.assertEqual(row["state"], PAUSED)
+        self.assertIn(f"{self.REASON}; nenhuma decisão inicia ciclo até o fim desta execução", row["reason"])
+        self.assertIn(
+            f"ESTADO: PAUSA — varredura em PAUSA: {self.REASON}; nenhuma decisão inicia ciclo até o fim desta execução",
+            self.lines,
+        )
+        for action in (CALL, PUT):  # validated, current, 92%: each one would start a cycle
+            with self.subTest(action=action):
+                result = self.consider(self.decision(action))
+                self.assertFalse(result.started)
+                self.assertEqual(result.reason, f"varredura em PAUSA: {self.REASON}")
+        self.assertEqual(len(self.rows(operation.DECISION_REFUSED)), 2)
+        self.assertEqual((self.broker.orders(), self.coordinator.status().cycle_id), ([], None))
+        self.assertEqual(self.query("SELECT * FROM decisions"), [])  # no decision was consumed
+        self.operator.pause_collection("outro motivo")  # again: the first reason stays, with no new line
+        self.assertEqual((self.operator.collection_paused, len(self.rows(operation.SCAN_PAUSED))), (self.REASON, 1))
+        self.assertEqual(set(self.states()), {COLLECTING, PAUSED})
+        self.restart()  # the pause is not saved: the next run starts from the recovery, as always
+        self.assertIsNone(self.operator.collection_paused)
+        self.assertTrue(self.consider(self.decision(CALL)).started)
+
+    def test_a_pending_entry_is_kept_and_settled_in_the_pause(self):
+        self.start()
+        cycle_id = self.consider(self.decision(CALL)).cycle_id
+        self.operator.pause_collection(self.REASON)  # with the first entry pending
+        status = self.coordinator.status()
+        self.assertEqual((status.cycle_id, status.attempt, status.is_paused), (cycle_id, 1, False))
+        self.assertEqual(self.operator.state(), PENDING_ENTRY)
+        self.assertEqual(self.query("SELECT submission_state FROM reservations"), [(ACCEPTED,)])
+        self.settle(WIN)  # the simulator settles it as recorded
+        self.assertEqual(self.orders(), [(500, WIN)])
+        self.assertFalse(self.operator.busy())
+        self.assertEqual(self.operator.state(), PAUSED)
+        self.assertFalse(self.consider(self.decision(PUT)).started)
+        self.operator.pause_collection(self.REASON)  # the next visit: nothing open, the coordinator pauses
+        self.assertTrue(self.coordinator.status().is_paused)
+        self.assertEqual(self.orders(), [(500, WIN)])
+
+
 class UncertainTest(OperationTestCase):
     def test_a_lost_answer_is_never_resent_and_the_order_is_found_by_its_reservation(self):
         self.start(broker=LostAnswer)
