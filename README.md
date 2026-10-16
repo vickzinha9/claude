@@ -39,7 +39,7 @@ Rode todos os comandos abaixo na raiz do repositório, a pasta `claude`. No Wind
 
 No GitHub, o workflow [`.github/workflows/tests.yml`](.github/workflows/tests.yml) roda essa suíte e os dois exemplos finitos abaixo em Linux e Windows a cada push e pull request. As execuções ficam na [aba Actions](https://github.com/vickzinha9/claude/actions/workflows/tests.yml).
 
-Os testes do coletor em `tests/test_observe.py`, os da leitura visual em `tests/test_quote_reader.py`, os da varredura dos favoritos em `tests/test_scan.py` e os da preparação e dos lançadores em `tests/test_setup_observer.py` usam objetos falsos no lugar do navegador, do OCR, do `pip` e do `venv`, e imagens sintéticas de gráfico. Eles não precisam do Playwright nem do OCR. Os 4 testes de `PreparerOnWindowsTest`, o de `OpenImageOnWindowsTest`, o de `ScanLauncherOnWindowsTest` e o de `AnalysisLauncherOnWindowsTest` só rodam no Windows. Os da análise local CALL/PUT, em `tests/test_analysis.py`, usam séries sintéticas e só a biblioteca padrão. Dos 5 de `tests/test_observe_playwright.py`, 4 abrem um Chromium de verdade, sem janela, em páginas locais de teste, que não são a Pocket Option; dois deles leem a cotação de um gráfico desenhado em canvas, com o OCR de verdade, e um desses varre uma barra de favoritos de teste, com cliques de verdade. O quinto confere a leitura de aquecimento do OCR de verdade. Sem o Playwright ou o OCR eles aparecem como `skipped`, a menos que a variável `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1` exista: aí falham, como o job de navegador do CI exige.
+Os testes do coletor em `tests/test_observe.py`, os da leitura visual em `tests/test_quote_reader.py`, os da varredura dos favoritos em `tests/test_scan.py` e os da preparação e dos lançadores em `tests/test_setup_observer.py` usam objetos falsos no lugar do navegador, do OCR, do `pip` e do `venv`, e imagens sintéticas de gráfico. Eles não precisam do Playwright nem do OCR. Os 4 testes de `PreparerOnWindowsTest`, o de `OpenImageOnWindowsTest`, o de `ScanLauncherOnWindowsTest` e o de `AnalysisLauncherOnWindowsTest` só rodam no Windows. Os da análise local CALL/PUT, em `tests/test_analysis.py`, usam séries sintéticas e só a biblioteca padrão. Dos 7 de `tests/test_observe_playwright.py`, 6 abrem um Chromium de verdade, sem janela, em páginas locais de teste, que não são a Pocket Option; quatro deles leem a cotação de um gráfico desenhado em canvas, com o OCR de verdade, um varre uma barra de favoritos de teste, com cliques de verdade, e dois rodam o diagnóstico da captura. O sétimo confere a leitura de aquecimento do OCR de verdade. Sem o Playwright ou o OCR eles aparecem como `skipped`, a menos que a variável `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1` exista: aí falham, como o job de navegador do CI exige.
 
 ## Simulação local
 
@@ -178,7 +178,7 @@ O CI roda numa máquina virtual do GitHub, com o `python` instalado pelo `setup-
 
 ### Windows: os lançadores
 
-Na raiz do projeto, a pasta `claude`, ficam quatro arquivos. Abra os dois primeiros nesta ordem, com dois cliques no Explorador de Arquivos ou pelo terminal (`.\preparar_windows.cmd` no PowerShell); o terceiro, `varrer_windows.cmd`, faz a [varredura dos favoritos](#varredura-dos-favoritos), e o quarto, `analisar_windows.cmd`, mostra a [análise local CALL/PUT](#análise-local-callput) dos dados da varredura. Os quatro entram sozinhos na pasta onde estão e esperam uma tecla no fim, para a janela não fechar antes de você ler.
+Na raiz do projeto, a pasta `claude`, ficam cinco arquivos. Abra os dois primeiros nesta ordem, com dois cliques no Explorador de Arquivos ou pelo terminal (`.\preparar_windows.cmd` no PowerShell); o terceiro, `varrer_windows.cmd`, faz a [varredura dos favoritos](#varredura-dos-favoritos), o quarto, `analisar_windows.cmd`, mostra a [análise local CALL/PUT](#análise-local-callput) dos dados da varredura, e o quinto, `diagnosticar_windows.cmd`, faz o [diagnóstico da captura](#diagnóstico-da-captura). Os cinco entram sozinhos na pasta onde estão e esperam uma tecla no fim, para a janela não fechar antes de você ler.
 
 1. **`preparar_windows.cmd`** procura um Python 3.11 ou mais novo, de 64 bits, nesta ordem: `py -3.12`, `py -3` e `python`. Um candidato só é aceito se o teste dele terminar com código exatamente 0. Um código negativo, como o `-1610612730` que o `py` devolve quando falta o Python pedido, também é falha: o lançador mostra `py -3.12: nao serve (codigo -1610612730).` e tenta o próximo. Com o Python escolhido, ele roda `python -m pocketautonomo.setup_observer`, que:
    - cria `.venv` ou reutiliza a que já existe, se o Python dela servir;
@@ -191,6 +191,7 @@ Na raiz do projeto, a pasta `claude`, ficam quatro arquivos. Abra os dois primei
 2. **`observar_windows.cmd`** usa o Python de `.venv` para rodar `python -m pocketautonomo.observe --configure --count 3`. Argumentos extras vão para o programa, como em `observar_windows.cmd --interval 10`.
 3. **`varrer_windows.cmd`** usa o mesmo Python para rodar `python -m pocketautonomo.scan --configure`, também com os argumentos extras, como em `varrer_windows.cmd --cycles 2`. Ele precisa das fontes gravadas pelo `observar_windows.cmd`.
 4. **`analisar_windows.cmd`** usa o mesmo Python para rodar `python -m pocketautonomo.analysis`, com os argumentos extras, como em `analisar_windows.cmd --horizon 60`. Ele só lê os CSV da varredura em `runtime/`; não abre o navegador e não grava nada.
+5. **`diagnosticar_windows.cmd`** usa o mesmo Python para rodar `python -m pocketautonomo.capture_check`, com os argumentos extras. Ele precisa da leitura visual gravada pelo `observar_windows.cmd`, só lê a cotação do ativo que está na tela e grava um CSV novo em `runtime/`.
 
 Se você apertar Ctrl+C, o `cmd` pergunta se quer finalizar o arquivo em lotes ("Deseja finalizar o arquivo em lotes (S/N)?", ou "Terminate batch job (Y/N)?" no Windows em inglês). Responda **N** para a janela continuar aberta com o resumo.
 
@@ -316,6 +317,29 @@ Tempos da leitura da cotação, mediana/máximo em ms, por momento da leitura:
 | `screenshot_ms`, `decode_ms`, `detection_ms`, `ocr_ms` | captura da tela, decodificação da imagem, detecção do marcador e OCR |
 | `image_px`, `png_bytes`, `strip_css` | tamanho da imagem capturada, em pixels do dispositivo, e do PNG; largura da faixa direita capturada, em px CSS |
 | `note` | coluna nova, no fim: a observação da leitura, como as duas leituras do OCR que só divergiram no separador decimal |
+
+Se a etapa tela de uma captura levar 1 s ou mais, o coletor e a varredura mostram uma vez por execução `AVISO: a captura do gráfico está lenta: a etapa tela levou ... ms; a página respondeu à contagem do elemento em ... ms`, com o pedido de deixar o navegador visível e a indicação do diagnóstico abaixo. Depois de abrir uma imagem de conferência, a configuração lembra de fechar o visualizador ou tirá-lo de cima do navegador.
+
+### Diagnóstico da captura
+
+`diagnosticar_windows.cmd` (`python -m pocketautonomo.capture_check`) mede, no seu computador e na Pocket Option, por que a etapa tela da captura demora. **Ele só lê:** não clica, não digita e não troca de ativo; lê a cotação do ativo que está na tela, com a leitura visual gravada em `runtime/observe-selectors.json`. Depois do login e do Enter, ele faz três fases, cada uma começada com Enter:
+
+| Fase | O que você faz | O que ele lê |
+|---|---|---|
+| A, navegador visível | diminui o terminal para um canto, sem cobrir o gráfico, e fecha o visualizador de imagens | 6 leituras com `page.screenshot` e 6 com a captura direta, alternadas, com 0,5 s antes de cada uma; depois, 3 com `page.screenshot` depois de 5 s de espera |
+| B, navegador coberto | maximiza o terminal por cima do navegador, sem minimizá-lo | 6 de cada método, alternadas, com 0,5 s antes de cada uma |
+| C, navegador visível de novo | volta o terminal para o canto | o mesmo da fase B |
+
+Cada comparação muda uma variável só, com as outras fixas: o método da captura (fase A), a espera antes dela (fase A) e a janela coberta (A, B e C). A **captura direta** é o próprio comando de captura do Chromium (`Page.captureScreenshot`), com o mesmo recorte que o Playwright calcula, mas sem a preparação que o `page.screenshot` faz antes dele: um script em cada quadro da página, a espera das fontes e a restauração. Numa página local, as duas deram imagens iguais pixel por pixel, nas escalas de 100%, 125% e 150%. Ela existe só no diagnóstico, por uma sessão do DevTools que só aceita `Page.getLayoutMetrics` e `Page.captureScreenshot`; o coletor e a varredura continuam com o `page.screenshot`.
+
+No fim, o terminal mostra a mediana da etapa tela de cada caso, a resposta da página à contagem do elemento, as leituras do OCR (inclusive as que só divergiram no separador decimal) e uma conclusão que só aponta diferenças claras: 3 vezes ou mais e 300 ms ou mais. Cada leitura vai para `runtime/diagnostico-captura-<data>-<hora>-<sufixo>.csv`, com as colunas do arquivo de tempos e mais `phase`, `method` e `wait_s`. Ele mede só aquele momento, naquele computador.
+
+| Código | Situação |
+|---|---|
+| 0 | as três fases foram medidas |
+| 1 | falhou ou parou, inclusive com a página fora de pocketoption.com |
+| 2 | argumento ou configuração inválidos, inclusive sem a leitura visual gravada |
+| 130 | interrompido por Ctrl+C; as leituras feitas ficam no CSV |
 
 ## Varredura dos favoritos
 

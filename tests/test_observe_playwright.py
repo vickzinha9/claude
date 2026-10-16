@@ -545,5 +545,96 @@ class RealScanTest(unittest.TestCase):
         self.assertIn("Tempos da leitura da cotação, mediana/máximo em ms, por momento da leitura:", text)
 
 
+@unittest.skipUnless(HAVE_OCR or REQUIRED, "Playwright e OCR local (rapidocr) não estão instalados neste Python")
+class RealDiagnosticTest(unittest.TestCase):
+    """The A/B diagnostic of the capture with real Chromium and the real OCR, on local pages."""
+
+    def setUp(self):
+        options = {"ignore_cleanup_errors": True} if sys.version_info >= (3, 10) else {}
+        directory = tempfile.TemporaryDirectory(**options)
+        self.addCleanup(directory.cleanup)
+        self.runtime = Path(directory.name) / "runtime"
+        for name, value in (
+            ("RUNTIME_DIR", self.runtime),
+            ("ALLOWED_DOMAIN", "observe.test"),
+            ("HOST_PATTERN", re.compile(r"observe\.test")),
+        ):
+            patcher = mock.patch.object(observe, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.counters = None
+
+    def open_session(self, profile_dir, body=SCAN_PAGE):
+        from pocketautonomo import capture_check
+
+        session = capture_check.open_diagnostic_session(profile_dir, headless=True)
+        original_close = session.close
+        self.addCleanup(original_close)
+        session._context.route(
+            "https://observe.test/**",
+            lambda route: route.fulfill(status=200, content_type="text/html; charset=utf-8", body=body),
+        )
+
+        def close():
+            if not session.is_closed() and body is SCAN_PAGE:
+                self.counters = {
+                    key: session.read(f"#{key}", 2_000).text for key in ("trade-clicks", "amount-touches", "fav-clicks")
+                }
+            original_close()
+
+        session.close = close
+        return session
+
+    def test_the_direct_capture_gives_the_same_pixels_as_page_screenshot(self):
+        session = self.open_session(self.runtime / "browser-profile", body=CHART_PAGE)
+        session.open(CHART_URL)  # the chart stays still until startCycling, which nothing calls here
+        for strip in (154.0, None):
+            with self.subTest(strip=strip):
+                usual = session.capture("#plot", 5_000, strip=strip)
+                direct = session.capture_direct("#plot", 5_000, strip=strip)
+                self.assertEqual((direct.image.width, direct.image.height), (usual.image.width, usual.image.height))
+                self.assertEqual(direct.image.data, usual.image.data)
+                self.assertEqual((direct.css_width, direct.strip_css), (usual.css_width, usual.strip_css))
+                self.assertGreater(direct.screenshot_ms, 0)
+
+    def test_the_three_phases_only_read_the_quote(self):
+        from pocketautonomo import capture_check
+
+        self.runtime.mkdir(parents=True)
+        sources = {"asset": "#asset", "price": "", "payout": "#payout", "price_ocr": {"chart": "#plot", "marker": SCAN_MARKER}}
+        (self.runtime / observe.SELECTORS_FILE_NAME).write_text(json.dumps(sources), encoding="utf-8")
+        answers = iter(["", "", "", ""])  # Enter after the login, then phases A, B and C
+        out, err = io.StringIO(), io.StringIO()
+        shorter = {"SHORT_WAIT": 0.1, "LONG_WAIT": 0.3, "PAIRS": 2, "LONG_READINGS": 1}
+        with contextlib.ExitStack() as stack:
+            for name, value in shorter.items():
+                stack.enter_context(mock.patch.object(capture_check, name, value))
+            stack.enter_context(contextlib.redirect_stdout(out))
+            stack.enter_context(contextlib.redirect_stderr(err))
+            code = capture_check.main(
+                ["--url", SCAN_URL], open_session=self.open_session, read_line=lambda prompt="": next(answers)
+            )
+        text = out.getvalue()
+        self.assertEqual((code, err.getvalue()), (0, ""), text)
+        self.assertEqual(list(answers), [])
+        [path] = self.runtime.glob("diagnostico-captura-*.csv")
+        with open(path, newline="", encoding="utf-8") as file:
+            header, *rows = list(csv.reader(file))
+        self.assertEqual(tuple(header), capture_check.DIAGNOSTIC_COLUMNS)
+        rows = [dict(zip(header, row)) for row in rows]
+        self.assertEqual([row["phase"] for row in rows], ["A"] * 5 + ["B"] * 4 + ["C"] * 4)
+        self.assertEqual({row["method"] for row in rows}, {capture_check.SCREENSHOT, capture_check.DIRECT})
+        name, _, base = SCAN_ASSETS[0]  # the asset already selected: the diagnostic never switches
+        for row in rows:
+            self.assertEqual((row["result"], row["asset"]), ("ok", name), row)
+            self.assertLess(abs(float(row["quote"]) - base), 0.0005, row)
+            self.assertGreater(float(row["screenshot_ms"]), 0)
+        self.assertIn("RESULTADO DO DIAGNÓSTICO", text)
+        self.assertIn("Conclusão, só sobre este computador neste momento:", text)
+        # Nothing was clicked: no favorite, no trade button, and the Amount was never touched.
+        self.assertEqual(self.counters, {"trade-clicks": "0", "amount-touches": "0", "fav-clicks": "-"})
+        self.assertNotIn("SEGREDO", text + path.read_text(encoding="utf-8"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -119,6 +119,12 @@ jobs:
           POCKETAUTONOMO_REQUIRE_BROWSER_TESTS: "1" # fail instead of skipping without Playwright or OCR
         run: .venv\Scripts\python -m unittest -v tests.test_observe_playwright
 
+      # Measurement only: the capture with a visible window, covered and minimized, on a
+      # local page. It always exits 0; the timings say nothing about the Pocket Option.
+      - name: "Measurement: capture with a visible, covered and minimized window (local page)"
+        shell: cmd
+        run: .venv\Scripts\python tests\capture_ab_windows.py
+
       - name: "observar_windows.cmd --help: no browser opens"
         shell: cmd
         run: call observar_windows.cmd --help < NUL

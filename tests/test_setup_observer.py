@@ -210,7 +210,10 @@ class LaunchersTest(unittest.TestCase):
         return [line for line in lines if line and not line.lower().startswith("rem")]
 
     def test_launchers_enter_their_folder_and_never_touch_runtime(self):
-        for name in ("preparar_windows.cmd", "observar_windows.cmd", "varrer_windows.cmd", "analisar_windows.cmd"):
+        for name in (
+            "preparar_windows.cmd", "observar_windows.cmd", "varrer_windows.cmd", "analisar_windows.cmd",
+            "diagnosticar_windows.cmd",
+        ):
             with self.subTest(name=name):
                 commands = self.commands(name)
                 self.assertEqual(commands[0], "@echo off")
@@ -240,6 +243,9 @@ class LaunchersTest(unittest.TestCase):
         analyze = self.commands("analisar_windows.cmd")
         self.assertIn('".venv\\Scripts\\python.exe" -m pocketautonomo.analysis %*', analyze)
         self.assertIn('set "CODIGO=%ERRORLEVEL%"', analyze)
+        diagnose = self.commands("diagnosticar_windows.cmd")
+        self.assertIn('".venv\\Scripts\\python.exe" -m pocketautonomo.capture_check %*', diagnose)
+        self.assertIn('set "CODIGO=%ERRORLEVEL%"', diagnose)
 
 
 

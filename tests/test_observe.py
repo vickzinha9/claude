@@ -1161,9 +1161,21 @@ class ConfigureQuoteTest(ObserveTestCase):
 
     def test_previews_show_where_the_time_goes(self):
         image = chart_images.chart(marker_y=150)
-        timed = observe.Capture(1, True, image, image.width, element_ms=3.0, screenshot_ms=2900.0, decode_ms=12.0)
+        timed = observe.Capture(
+            1, True, image, image.width, element_ms=3.0, screenshot_ms=2900.0, decode_ms=12.0, count_ms=1.0
+        )
         run, _ = self.configure_visual([timed], ["1", ""])
-        self.assertEqual((run.code, run.err), (0, ""))
+        self.assertEqual(run.code, 0)
+        # A slow screenshot gets one warning per run, with the page's answer to the count.
+        self.assertEqual(
+            run.err,
+            "AVISO: a captura do gráfico está lenta: a etapa tela levou 2900 ms; a página respondeu à"
+            " contagem do elemento em 1 ms. Deixe a janela do navegador visível, sem outra janela por"
+            " cima, como o terminal ou o visualizador de imagens, e não a minimize. O"
+            " diagnosticar_windows.cmd mede a causa neste computador. Este aviso aparece uma vez por"
+            " execução.\n",
+        )
+        self.assertIn("Se a imagem abriu num visualizador, feche-o ou tire-o de cima do navegador", run.out)
         # The fake timer adds 2 ms per reading of the clock; the steps of the capture come
         # from the session, as PlaywrightSession measures them.
         self.assertIn(
@@ -1452,7 +1464,9 @@ class OcrWarmUpTest(unittest.TestCase):
 
 class ReadOnlySourceTest(unittest.TestCase):
     def test_the_collector_has_no_call_that_acts_on_the_page(self):
-        for name in ("observe.py", "quote_reader.py", "quote_ocr.py"):
+        # capture_check.py has no page.screenshot: its direct capture goes through the
+        # read-only DevTools commands checked in tests/test_capture_check.py.
+        for name in ("observe.py", "quote_reader.py", "quote_ocr.py", "capture_check.py"):
             with self.subTest(module=name):
                 tree = ast.parse((ROOT / "pocketautonomo" / name).read_text(encoding="utf-8"))
                 attributes = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}

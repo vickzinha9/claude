@@ -414,6 +414,7 @@ class Context:
     engine: object = None  # LazyEngine
     show_image: object = show_image_file
     runtime_dir: object = None
+    slow_capture_warned: bool = False  # the slow capture's warning was shown in this run
 
     def __post_init__(self):
         self.now = utc_now if self.now is None else self.now
@@ -934,6 +935,27 @@ def capture_steps(capture):
     }
 
 
+SLOW_SCREENSHOT_MS = 1000  # the step "tela" this long or longer gets the warning, once per run
+
+
+def warn_slow_capture(ctx, capture):
+    """Warn once per run when the screenshot of the chart took SLOW_SCREENSHOT_MS or more.
+
+    The count of the element is the page's answer to a light question: when it is fast and
+    the screenshot slow, the time goes to producing or copying the image, not to the page.
+    """
+    if ctx.slow_capture_warned or capture.screenshot_ms is None or capture.screenshot_ms < SLOW_SCREENSHOT_MS:
+        return
+    ctx.slow_capture_warned = True
+    answered = "" if capture.count_ms is None else f"; a página respondeu à contagem do elemento em {capture.count_ms:.0f} ms"
+    warn(
+        f"AVISO: a captura do gráfico está lenta: a etapa tela levou {capture.screenshot_ms:.0f} ms{answered}."
+        " Deixe a janela do navegador visível, sem outra janela por cima, como o terminal ou o"
+        " visualizador de imagens, e não a minimize. O diagnosticar_windows.cmd mede a causa neste"
+        " computador. Este aviso aparece uma vez por execução."
+    )
+
+
 def read_quote_visually(session, source, ctx):
     """The VisualReading of the quote, with capture, detection and OCR timed apart.
 
@@ -945,6 +967,8 @@ def read_quote_visually(session, source, ctx):
     capture, problem = capture_chart(session, source.chart, quote_reader.strip_width(source.marker))
     capture_ms = ctx.elapsed_ms(start)
     steps = capture_steps(capture) if capture is not None else {}
+    if capture is not None:
+        warn_slow_capture(ctx, capture)
     if capture is None:
         return VisualReading(unavailable(problem), None, None, QuoteTimings(capture_ms, **steps))
     start = ctx.monotonic()
@@ -1609,6 +1633,10 @@ def save_preview(ctx, prefix, image, labelled_boxes, read_line, title):
             continue
         say(f"  {title}: {path}")
         ctx.show_image(path)
+        say(
+            "  Se a imagem abriu num visualizador, feche-o ou tire-o de cima do navegador depois de"
+            " conferi-la: as leituras e a sua comparação com a tela precisam do navegador visível."
+        )
         return path
 
 
