@@ -14,10 +14,14 @@ visit (operation.Operator):
 - A cycle starts with a validated, current CALL or PUT decision and keeps its asset and
   direction to the end. Until it ends, the navigation between favorites is suspended: the
   program stays on the cycle's asset, which is the one on the screen after its visit, and
-  only reads it every POLL_SECONDS, without any click. These readings go to the timings
-  file, and those that settle an order or enter a gale to the operation's CSV; never to
-  the scan's CSV: the analysis only learns from the scan's visits, and a simulated result
-  never feeds it.
+  only reads it every POLL_SECONDS, without any click. Every reading goes to the timings
+  file. Those that the scan's checks accept are real market quotes: they go to the
+  operation, to the analysis' history of this run and to a new
+  runtime/cotacoes-ciclo-<data>-<hora>-<sufixo>.csv, which the analysis loads at the next
+  start, all with the origin ciclo (CycleQuotes), whatever the result, the direction or the
+  payout. The results of the simulator, in the operation's CSV and in its database, never
+  feed the analysis, and recording the quotes never starts a cycle or validates a rule
+  again: the next visit of the scan decides with them.
 - Stakes of R$ 5, R$ 10, R$ 20 and R$ 40, four attempts at most; only a LOSS confirmed by
   the simulator moves on, and each gale has its own window after that result
   (--gale-window). When the cycle ends, the scan goes on to the next favorite.
@@ -38,10 +42,11 @@ configuration, and 130 after Ctrl+C.
 """
 
 import argparse
+import csv
 import math
 import sys
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from pocketautonomo import analysis, observe, operation, scan
@@ -69,6 +74,21 @@ CSV_PREFIX = "operacao-"
 DEMO_PREFIX = "demonstracao-"
 POLL_SECONDS = scan.POLL_SECONDS  # between two readings of the cycle's asset
 HOLD_MOMENT = "durante o ciclo simulado"  # the moment of these readings in the timings file
+PAYOUT_CONFIRMED = "payout confirmado por duas leituras seguidas"
+WRITE_RETRY_SECONDS = 30.0  # after a failed write, the wait before a new file of the cycle's quotes
+CYCLE_QUOTE_NOTE = "cotação de mercado lida na tela durante o ciclo, conferida e atual"
+# The file of the real quotes read during cycles (analysis.CYCLE_PREFIX). It starts with the
+# columns that the analysis reads, as the scan's CSV has them, and says its origin in each line.
+CYCLE_QUOTE_COLUMNS = analysis.COLUMNS + (
+    analysis.ORIGIN_COLUMN,  # always ciclo: a quote read on the screen, never a result of the simulator
+    "recorded_at_utc",  # this computer's clock, in UTC, when the reading was accepted for the history
+    "data_age_ms",  # from the capture of the quote to the line
+    "cycle_id",  # the cycle of the simulated operation that held the asset
+    "attempt",  # its attempt when the quote was read
+    "operation_state",  # CICLO ATIVO or PENDÊNCIA when the quote was read
+    "reading_ms",  # the reading of the asset, the quote, the payout and the asset again
+    "payout_note",  # confirmed by two readings in a row, or why the payout is empty
+)
 
 INTRO = (
     "OPERAÇÃO SIMULADA do PocketAutonomo: análise -> coordenador -> executor SIMULADO. Nenhuma"
@@ -98,7 +118,7 @@ def main(argv=None, *, open_session=None, read_line=input, now=None, monotonic=N
     database = runtime_dir / DATABASE_NAME
     orders = runtime_dir / ORDERS_NAME
     progress = scan.ScanProgress()
-    lock = session = coordinator = broker = log = operator = None
+    lock = session = coordinator = broker = log = operator = quotes = None
     interrupted = False
     try:
         say(INTRO)
@@ -111,6 +131,7 @@ def main(argv=None, *, open_session=None, read_line=input, now=None, monotonic=N
         coordinator = Coordinator(SqliteStore(database))
         broker = PaperBroker(orders, args.horizon, ctx.now)
         log = operation.OperationLog(new_csv_path(runtime_dir, CSV_PREFIX))
+        quotes = CycleQuotes(runtime_dir, warn)
         operator = operation.Operator(
             coordinator, broker, log, now=ctx.now, monotonic=ctx.monotonic, horizon=args.horizon,
             gale_window=args.gale_window,
@@ -130,7 +151,7 @@ def main(argv=None, *, open_session=None, read_line=input, now=None, monotonic=N
             )
         say(scan.HANDS_OFF)
         state = scan.Scan(selectors, favorites_selector, args.load_timeout, progress)
-        state.hooks = OperationHooks(operator, state, ctx)
+        state.hooks = OperationHooks(operator, state, ctx, quotes)
         scan.run_scan(session, state, args, ctx)
         code = scan.finish(progress)
         if operator.busy():  # the window was closed during a cycle
@@ -139,7 +160,7 @@ def main(argv=None, *, open_session=None, read_line=input, now=None, monotonic=N
                 " é conferido na próxima abertura, sem reenvio."
             )
             code = EXIT_FAILED
-        report(operator, log, database, orders)
+        report(operator, log, database, orders, quotes)
         return code
     except ConfigError as error:
         warn(f"CONFIGURAÇÃO: {error}")
@@ -149,16 +170,16 @@ def main(argv=None, *, open_session=None, read_line=input, now=None, monotonic=N
     ) as error:
         warn(f"PARADA: {error}")
         scan.report(progress)
-        report(operator, log, database, orders)
+        report(operator, log, database, orders, quotes)
         return EXIT_FAILED
     except KeyboardInterrupt:
         interrupted = True
         say(f"Interrompido por Ctrl+C: {scan.written_summary(progress)}.")
         scan.report(progress)
-        report(operator, log, database, orders)
+        report(operator, log, database, orders, quotes)
         return EXIT_INTERRUPTED
     finally:
-        for closing in (progress.csv, progress.timings, log):
+        for closing in (progress.csv, progress.timings, log, quotes):
             if closing is not None:
                 closing.close()
         observe.close_session(session, interrupted)
@@ -256,27 +277,140 @@ def print_rules(args, database, orders):
     say(f"Os tempos de envio são do simulador: {operation.SIMULATOR_TIME_NOTE}. Ctrl+C encerra.")
 
 
+class CycleQuotes:
+    """The real quotes of the cycle's asset read during cycles, kept for the analysis.
+
+    record() takes a reading that hold_reading accepted, current by scan.current_data (at
+    most scan.MAX_DATA_AGE_SECONDS old). It adds it to the running analysis' history, with
+    the origin analysis.ORIGIN_CYCLE, and writes it to a new file
+    runtime/cotacoes-ciclo-<data>-<hora>-<sufixo>.csv, created with the first one and
+    flushed after each line, which the analysis loads at the next start. The moment is kept
+    to the millisecond, as in the file, so a quote of an asset at a moment already in the
+    history is neither added nor written again. Nothing is computed here: the next visit of
+    the scan decides with the new quotes.
+
+    A line is recorded whatever the result of the attempt, the direction or the payout, and
+    its payout only when two readings in a row agree. If the file cannot be written, warn is
+    called once and the quote stays only in the history of this run; from WRITE_RETRY_SECONDS
+    later on, the next quote tries a new file.
+    """
+
+    def __init__(self, runtime_dir, warn):
+        self.runtime_dir = runtime_dir
+        self.path = None  # the file being written
+        self.paths = []  # every file created in this run
+        self.recorded = 0  # quotes added to the history
+        self.written = 0  # lines written to a file
+        self.failed = False  # a write failed in this run
+        self._warn = warn
+        self._file = None
+        self._writer = None
+        self._retry_at = None  # after a failure, no new file before this moment
+
+    def record(self, seen, recorded_at, context, analyzer):
+        """Keep seen, read in context (cycle_id, attempt, operation_state); True when kept."""
+        current = scan.current_data(seen.captured_at, recorded_at, CYCLE_QUOTE_NOTE)
+        if not current.ready:
+            return False
+        moment = seen.captured_at.astimezone(timezone.utc)
+        captured = observe.utc_text(moment)
+        sample = analysis.Sample(
+            datetime.fromisoformat(captured), seen.price, seen.quote, seen.payout, analysis.ORIGIN_CYCLE
+        )
+        if analyzer is not None and not analyzer.history.add(seen.asset, sample):
+            return False  # the same quote of the same moment: already in the history
+        self.recorded += 1
+        row = (
+            seen.asset,
+            seen.quote,
+            captured,
+            "" if seen.payout is None else f"{seen.payout:g}",
+            analysis.READY,
+            analysis.ORIGIN_CYCLE,
+            observe.utc_text(recorded_at.astimezone(timezone.utc)),
+            f"{current.age_ms:.1f}",
+            context.get("cycle_id", ""),
+            context.get("attempt", ""),
+            context.get("operation_state", ""),
+            "" if seen.reading_ms is None else f"{seen.reading_ms:.1f}",
+            seen.payout_note or "",
+        )
+        self._write(row, recorded_at)
+        return True
+
+    def _write(self, row, now):
+        if self._file is None and self._retry_at is not None and now < self._retry_at:
+            return  # a file failed moments ago: this quote stays only in the history
+        try:
+            if self._file is None:
+                path = new_csv_path(self.runtime_dir, analysis.CYCLE_PREFIX)
+                self._file = open(path, "x", newline="", encoding="utf-8")
+                self.path = path
+                self.paths.append(path)
+                self._writer = csv.writer(self._file)
+                self._writer.writerow(CYCLE_QUOTE_COLUMNS)
+                say(f"Cotações lidas durante os ciclos, para a análise: {path}")
+            self._writer.writerow(row)
+            self._file.flush()
+            self.written += 1
+        except OSError as error:
+            self._discard()
+            self._retry_at = now + timedelta(seconds=WRITE_RETRY_SECONDS)
+            if not self.failed:
+                self._warn(
+                    f"AVISO: não foi possível gravar as cotações lidas durante o ciclo em"
+                    f" {self.path or self.runtime_dir} ({error}); a operação continua, essas cotações"
+                    f" ficam só na análise desta execução, e um arquivo novo é tentado a cada"
+                    f" {WRITE_RETRY_SECONDS:g} s."
+                )
+            self.failed = True
+
+    def _discard(self):
+        """Close the file that failed, if any; the next quote opens a new one."""
+        file, self._file, self._writer = self._file, None, None
+        if file is not None:
+            try:
+                file.close()
+            except OSError:
+                pass
+
+    def close(self):
+        self._discard()
+
+
+def cycle_context(operator):
+    """The cycle, the attempt and the state of the operation, before a reading is given to it."""
+    status = operator.coordinator.status()
+    return {"cycle_id": status.cycle_id, "attempt": status.attempt, "operation_state": operator.state()}
+
+
 class OperationHooks:
     """The scan's hooks: the analysis' decision after each visit, and the hold during a cycle."""
 
-    def __init__(self, operator, state, ctx):
+    def __init__(self, operator, state, ctx, quotes=None):
         self.operator = operator
         self.state = state
         self.ctx = ctx
+        self.quotes = quotes
 
     def before_visit(self, session, favorite):
         if self.operator.busy():  # an entry restored from the last run, still pending
-            hold(session, self.operator, self.state, self.ctx, favorite.position)
+            hold(session, self.operator, self.state, self.ctx, favorite.position, self.quotes)
 
     def after_visit(self, session, visit):
         if visit.decision is not None:
             self.operator.consider(visit.decision, visit.observation.duration_ms, visit.decision_ms)
         if self.operator.busy():
-            hold(session, self.operator, self.state, self.ctx, visit.favorite.position)
+            hold(session, self.operator, self.state, self.ctx, visit.favorite.position, self.quotes)
 
 
-def hold(session, operator, state, ctx, position):
-    """Stay on the open cycle's asset, reading it without any click, until the cycle ends."""
+def hold(session, operator, state, ctx, position, quotes=None):
+    """Stay on the open cycle's asset, reading it without any click, until the cycle ends.
+
+    Every reading that counts goes to the operation and, through quotes (CycleQuotes), to
+    the analysis' history: it is recorded after the operation took it, so its deadlines see
+    the reading first, and also when the operation stops on it.
+    """
     asset = operator.held_asset()
     say(
         f"Navegação entre favoritos suspensa: o ciclo de operação fica em {asset}, lido a cada"
@@ -292,12 +426,18 @@ def hold(session, operator, state, ctx, position):
         if poll.outside:
             scan.ensure_on_platform(session)
         polls += 1
-        seen, problem = hold_reading(poll, previous, asset)
+        seen, problem = hold_reading(poll, previous, asset, state.sources["payout"])
         verdict = scan.ACCEPTED if seen is not None else f"{scan.REFUSED}: {problem}"
         scan.record_timing(state, HOLD_MOMENT, poll.price, where, polls, asset=asset, verdict=verdict)
         if seen is not None:
             shown = None
-            operator.observe(seen.asset, seen.captured_at, seen.price, seen.quote, seen.payout, seen.reading_ms)
+            context = cycle_context(operator)
+            accepted_at = ctx.now()  # before the operation's own work, which is not the quote's age
+            try:
+                operator.observe(seen.asset, seen.captured_at, seen.price, seen.quote, seen.payout, seen.reading_ms)
+            finally:
+                if quotes is not None:
+                    quotes.record(seen, accepted_at, context, state.analyzer)
         else:
             if problem != shown:
                 say(f"  leitura durante o ciclo não usada: {problem}")
@@ -309,27 +449,30 @@ def hold(session, operator, state, ctx, position):
     say("Ciclo de operação encerrado: a navegação entre favoritos continua.")
 
 
-def hold_reading(poll, previous, asset):
+def hold_reading(poll, previous, asset, payout_sourced=True):
     """(Seen, None) for a reading of the cycle's asset that counts, or (None, why it does not).
 
-    The asset must be the cycle's before and after the reading, and the quote must agree,
-    within scan.QUOTE_JUMP, with the reading right before, as in the scan.
+    The checks are the scan's. The asset must be the cycle's before and after the reading,
+    and the quote must agree, within scan.QUOTE_JUMP, with the reading right before
+    (scan.judge_price), on the same asset; its capture time is the quote's own. The payout
+    counts only when it equals the one read right before (scan.judge_payout); without that,
+    the reading still counts, without a payout, and payout_note tells why.
     """
     value, problem = held_quote(poll, asset)
     if problem is not None:
         return None, problem
-    earlier, _ = held_quote(previous, asset) if previous is not None else (None, None)
-    if earlier is None:
-        return None, "falta uma segunda leitura da cotação, para conferir que ela não saltou"
-    if scan.relative_gap(value, earlier) > scan.QUOTE_JUMP:
-        return None, (
-            f"a cotação saltou de {previous.price.value} para {poll.price.value} entre duas leituras"
-            " seguidas"
-        )
-    price = poll.price
-    payout = scan.payout_number(poll.payout.value) if poll.payout.available else None
-    captured = price.captured_at or poll.captured_at
-    return operation.Seen(asset, captured, value, price.value, payout, poll.duration_ms), None
+    prior = previous if previous is not None and held_quote(previous, asset)[1] is None else None
+    price, _ = scan.judge_price(poll.price, prior, None, False, True)
+    if not price.available:
+        return None, price.reason
+    if price.captured_at is None:
+        return None, "sem o horário de captura da cotação"
+    payout_reading, _ = scan.judge_payout(poll.payout, prior, payout_sourced)
+    if payout_reading.available:
+        payout, note = scan.payout_number(payout_reading.value), PAYOUT_CONFIRMED
+    else:
+        payout, note = None, f"payout {observe.UNAVAILABLE}: {payout_reading.reason}"
+    return operation.Seen(asset, price.captured_at, value, price.value, payout, poll.duration_ms, note), None
 
 
 def held_quote(poll, asset):
@@ -348,7 +491,7 @@ def held_quote(poll, asset):
     return value, None
 
 
-def report(operator, log, database, orders):
+def report(operator, log, database, orders, quotes=None):
     """What the operation did, and what it left for the next start."""
     if operator is None:
         return
@@ -380,6 +523,20 @@ def report(operator, log, database, orders):
         say(f"Estado final: {operator.state()}.")
     if log is not None and log.rows:
         say(f"CSV da operação: {log.path}")
+    if quotes is not None and quotes.recorded:
+        if quotes.written == quotes.recorded:
+            where = f"gravadas em {', '.join(str(path) for path in quotes.paths)}"
+        elif quotes.written:
+            where = (
+                f"{quotes.written} gravadas em {', '.join(str(path) for path in quotes.paths)} e"
+                f" {quotes.recorded - quotes.written} só na análise desta execução"
+            )
+        else:
+            where = "só na análise desta execução"
+        say(
+            f"Cotações de mercado lidas durante os ciclos: {quotes.recorded}, com a origem"
+            f" {analysis.ORIGIN_CYCLE}, {where}; elas entram na análise, e os resultados do simulador, não."
+        )
     say(f"Estado gravado, preservado: {database} e {orders}")
 
 

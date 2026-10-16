@@ -44,7 +44,8 @@ server's. Every reading of the quote also goes, with the time of each step, to a
 file next to the CSV (quote_timings).
 
 After each visit, the local analysis (pocketautonomo.analysis) receives the visit's quote
-when its data is usable, together with the usable quotes of the earlier scan files, and
+when its data is usable, together with the usable quotes of the earlier scan files and of
+the quotes read during the cycles of the simulated operation (analysis.CYCLE_PREFIX), and
 says CALL, PUT or AGUARDAR, with the reason, in the terminal and in the CSV. Without a rule
 validated on separate data, it says AGUARDAR. The scan sends no order whatever it says.
 
@@ -913,10 +914,11 @@ def run_scan(session, scan, args, ctx):
     progress.timings = quote_timings.TimingRecorder(quote_timings.timing_path(progress.csv_path), warn)
     history = analysis.load_history(ctx.runtime_dir, exclude=(progress.csv_path,))
     scan.analyzer = analysis.Analyzer(args.horizon, history)
+    origins = f" ({analysis.origins_text(history)})" if history.origins.get(analysis.ORIGIN_CYCLE) else ""
     say(
         f"Análise local CALL/PUT, com operações hipotéticas de {seconds_text(args.horizon)} s, depois"
         f" de cada visita com dados para análise: {history.usable} cotações utilizáveis de"
-        f" {count(history.files, 'arquivo anterior', 'arquivos anteriores')}. Sem regra validada em"
+        f" {count(history.files, 'arquivo anterior', 'arquivos anteriores')}{origins}. Sem regra validada em"
         f" dados separados, a decisão é {analysis.WAIT}. {analysis.DISCLAIMER}"
     )
     streak = 0  # cycles in a row without any complete reading
@@ -1392,10 +1394,19 @@ def analysis_of(visit):
         verb = "falta" if len(missing) == 1 else "faltam"
         joined = missing[0] if len(missing) == 1 else ", ".join(missing[:-1]) + " e " + missing[-1]
         return Analysis(False, f"{verb} {joined}")
-    price = readings["price"]
-    if price.captured_at is None or visit.recorded_at is None:
+    return current_data(readings["price"].captured_at, visit.recorded_at, "ativo, cotação e payout lidos juntos, conferidos e atuais")
+
+
+def current_data(captured_at, recorded_at, note):
+    """Analysis of a quote captured at captured_at and recorded at recorded_at: is it current?
+
+    It is when it was captured at most MAX_DATA_AGE_SECONDS before it was recorded; note is
+    the reason given when it is. The simulated operation checks its readings during a cycle
+    with it too.
+    """
+    if captured_at is None or recorded_at is None:
         return Analysis(False, "sem o horário de captura da cotação, a idade dos dados é desconhecida")
-    age_ms = round((visit.recorded_at - price.captured_at).total_seconds() * 1000, 1)
+    age_ms = round((recorded_at - captured_at).total_seconds() * 1000, 1)
     if age_ms > MAX_DATA_AGE_SECONDS * 1000:
         return Analysis(
             False,
@@ -1403,7 +1414,7 @@ def analysis_of(visit):
             f" limite de {seconds_text(MAX_DATA_AGE_SECONDS)} s: não é atual",
             age_ms,
         )
-    return Analysis(True, "ativo, cotação e payout lidos juntos, conferidos e atuais", age_ms)
+    return Analysis(True, note, age_ms)
 
 
 def with_decision(visit, scan):
@@ -1423,7 +1434,8 @@ def with_decision(visit, scan):
         reason = f"sem dados para análise nesta visita: {state.note}"
         return replace(visit, decision=analysis.Decision(visit.favorite.name, analysis.WAIT, reason))
     name = readings["asset"].value
-    sample = analysis.Sample(price.captured_at, number, price.value, payout_number(readings["payout"].value))
+    payout = payout_number(readings["payout"].value)
+    sample = analysis.Sample(price.captured_at, number, price.value, payout, analysis.ORIGIN_SCAN)
     scan.analyzer.add(name, sample)
     return replace(visit, decision=scan.analyzer.decide(name, visit.recorded_at))
 

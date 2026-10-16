@@ -1,14 +1,21 @@
-"""Local CALL/PUT analysis of the quotes recorded by the scan: python -m pocketautonomo.analysis.
+"""Local CALL/PUT analysis of the quotes read on the screen: python -m pocketautonomo.analysis.
 
-NO ORDERS, AND NO PAID AI. This module only reads the scan's CSV files and computes, on
-this computer, with fixed rules and the standard library. It never touches the browser.
+NO ORDERS, AND NO PAID AI. This module only reads the scan's CSV files and the files of the
+quotes read during the cycles of the simulated operation, and computes, on this computer,
+with fixed rules and the standard library. It never touches the browser.
 
 For each asset:
 
-1. Data. Only the scan's lines with analysis_ready = sim count: the asset, the quote and
-   the payout read together and checked, with the quote's capture time from this
+1. Data. Only quotes read on the platform's screen count, each with its origin: the scan's
+   lines with analysis_ready = sim (varredura: the asset, the quote and the payout read
+   together and checked) and the readings of the cycle's asset taken during a cycle of the
+   simulated operation (ciclo: files cotacoes-ciclo-*.csv, written by
+   pocketautonomo.operate, with the asset and the quote checked the same way and the
+   payout only when it was confirmed). Every quote has its capture time from this
    computer's clock (price_captured_at_utc). Lines of files written before that column
-   existed, or without it, are skipped and counted, never guessed.
+   existed, or without it, lines of another origin and the same quote at the same moment
+   twice are skipped and counted, never guessed. Results of the simulator, decisions and
+   demonstrations are never read.
 2. Hypothetical operations of a horizon H (--horizon, 300 s by default). An operation
    decided at the capture time t of a quote is a WIN for CALL when the first quote at or
    after t + H, at most LABEL_TOLERANCE_FRACTION of H later, is above the quote at t, a
@@ -65,9 +72,20 @@ WIN, LOSS, DRAW = "WIN", "LOSS", "DRAW"
 TREND, REVERSAL = "tendência", "reversão"
 
 SCAN_PREFIX = "scan-"
+# The quotes of the cycle's asset read on the screen during cycles of the simulated
+# operation: real market quotes, with the scan's columns below plus ORIGIN_COLUMN.
+CYCLE_PREFIX = "cotacoes-ciclo-"
 # The scan's columns that the analysis reads; tests check them against scan.SCAN_COLUMNS.
 COLUMNS = ("asset", "price", "price_captured_at_utc", "payout_percent", "analysis_ready")
 READY = "sim"
+# Where a quote came from. A line of a cycle file is read only with ORIGIN_CYCLE in it.
+ORIGIN_COLUMN = "origin"
+ORIGIN_SCAN = "varredura"  # a visit of the favorites scan
+ORIGIN_CYCLE = "ciclo"  # a reading of the cycle's asset during a cycle of the simulated operation
+ORIGIN_LABELS = {
+    ORIGIN_SCAN: "de visitas da varredura",
+    ORIGIN_CYCLE: "de leituras da tela durante ciclos da operação simulada",
+}
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -100,6 +118,7 @@ class Sample:
     price: float
     quote: str  # the quote as shown
     payout: object = None  # percent, or None
+    origin: object = None  # ORIGIN_SCAN, ORIGIN_CYCLE, or None for a quote from no file
 
 
 @dataclass
@@ -444,8 +463,13 @@ def payout_number(text):
         return None
 
 
-def sample_of(row):
-    """(asset, Sample) of a scan CSV line usable for analysis, or (None, why it is skipped)."""
+def sample_of(row, origin=ORIGIN_SCAN):
+    """(asset, Sample) of a CSV line usable for analysis, or (None, why it is skipped).
+
+    A line of a cycle file (origin ORIGIN_CYCLE) must also say that origin itself.
+    """
+    if origin != ORIGIN_SCAN and row.get(ORIGIN_COLUMN) != origin:
+        return None, "linhas de outra origem, que não é cotação lida na tela"
     if row.get("analysis_ready") != READY:
         return None, "linhas sem dados para análise"
     name = " ".join((row.get("asset") or "").split())
@@ -458,28 +482,38 @@ def sample_of(row):
         return None, "linhas sem o horário de captura da cotação"
     if at.tzinfo is None:
         return None, "linhas com horário sem fuso"
-    return name, Sample(at.astimezone(timezone.utc), price, row["price"], payout_number(row.get("payout_percent") or ""))
+    payout = payout_number(row.get("payout_percent") or "")
+    return name, Sample(at.astimezone(timezone.utc), price, row["price"], payout, origin)
 
 
 @dataclass
 class History:
-    """The usable quotes by asset key, and what was skipped, with counts."""
+    """The usable quotes by asset key, and what was skipped, with counts.
+
+    origins counts the usable quotes by origin, and cycle_files the cycle files read, also
+    counted in files.
+    """
 
     series: dict = field(default_factory=dict)
     files: int = 0
     usable: int = 0
     skipped: dict = field(default_factory=dict)  # reason -> count
+    origins: dict = field(default_factory=dict)  # origin -> usable quotes
+    cycle_files: int = 0
 
     def skip(self, reason, count=1):
         if count:
             self.skipped[reason] = self.skipped.get(reason, 0) + count
 
     def add(self, name, sample):
+        """Add sample of asset name; False for a second quote of the asset at the same moment."""
         series = self.series.setdefault(asset_key(name), Series(name))
         if series.add(sample):
             self.usable += 1
-        else:
-            self.skip("cotações repetidas no mesmo instante")
+            self.origins[sample.origin] = self.origins.get(sample.origin, 0) + 1
+            return True
+        self.skip("cotações repetidas no mesmo instante")
+        return False
 
     def get(self, name):
         return self.series.get(asset_key(name))
@@ -489,15 +523,23 @@ def scan_files(runtime_dir):
     return sorted(path for path in Path(runtime_dir).glob(f"{SCAN_PREFIX}*.csv") if path.is_file())
 
 
+def cycle_files(runtime_dir):
+    return sorted(path for path in Path(runtime_dir).glob(f"{CYCLE_PREFIX}*.csv") if path.is_file())
+
+
 def load_history(runtime_dir, exclude=()):
-    """The History of every scan CSV in runtime_dir, except the paths in exclude.
+    """The History of every scan CSV and cycle file in runtime_dir, except the paths in exclude.
 
     A file that cannot be read is skipped and counted; so are the lines of a file without
-    the analysis_ready column, which does not tell whether its data was complete and current.
+    the analysis_ready column, which does not tell whether its data was complete and current,
+    and the lines of a cycle file without the origin of a reading of the screen. A quote at
+    the moment of one already loaded for the same asset counts once.
     """
     history = History()
     excluded = {Path(path).resolve() for path in exclude}
-    for path in scan_files(runtime_dir):
+    sources = [(path, ORIGIN_SCAN) for path in scan_files(runtime_dir)]
+    sources += [(path, ORIGIN_CYCLE) for path in cycle_files(runtime_dir)]
+    for path, origin in sources:
         if path.resolve() in excluded:
             continue
         try:
@@ -509,11 +551,12 @@ def load_history(runtime_dir, exclude=()):
             history.skip("arquivos que não puderam ser lidos")
             continue
         history.files += 1
+        history.cycle_files += origin == ORIGIN_CYCLE
         if any(name not in columns for name in COLUMNS):
             history.skip("linhas de arquivos anteriores à coluna analysis_ready", len(rows))
             continue
         for row in rows:
-            name, sample = sample_of(row)
+            name, sample = sample_of(row, origin)
             if name is None:
                 history.skip(sample)
             else:
@@ -577,17 +620,35 @@ def build_parser():
     parser.add_argument(
         "--runtime",
         default="runtime",
-        help="pasta dos CSV da varredura (padrão runtime, relativa à pasta atual)",
+        help="pasta dos CSV da varredura e das cotações lidas durante os ciclos (padrão runtime,"
+        " relativa à pasta atual)",
     )
     return parser
+
+
+def origins_text(history):
+    """How many usable quotes came from each origin, as in "30 de visitas da varredura"."""
+    return " e ".join(
+        f"{history.origins[origin]} {label}" for origin, label in ORIGIN_LABELS.items() if history.origins.get(origin)
+    )
+
+
+def data_line(history):
+    """The line about the files and the quotes of the history, with their origins."""
+    files = f"{history.files - history.cycle_files} arquivos da varredura"
+    if history.cycle_files:
+        files += f" e {history.cycle_files} de leituras durante ciclos"
+    line = f"Dados: {files}, {history.usable} cotações utilizáveis em {len(history.series)} ativos."
+    if history.origins.get(ORIGIN_CYCLE):
+        line += f" Origem: {origins_text(history)}; resultados do simulador nunca entram."
+    return line
 
 
 def report_lines(history, horizon, now):
     """The terminal lines of an analysis of the whole history, at now."""
     lines = [
         f"ANÁLISE LOCAL CALL/PUT, com operações hipotéticas de {seconds_text(horizon)} s. {DISCLAIMER}",
-        f"Dados: {history.files} arquivos da varredura, {history.usable} cotações utilizáveis em"
-        f" {len(history.series)} ativos.",
+        data_line(history),
     ]
     for reason, count in sorted(history.skipped.items()):
         lines.append(f"  Ignoradas: {count} {reason}.")
@@ -609,7 +670,7 @@ def report_lines(history, horizon, now):
 
 
 def main(argv=None, *, now=None):
-    """Run the analysis of the scan's CSV files and print it; the exit code is 0 or 1."""
+    """Run the analysis of the quotes in the runtime folder and print it; the exit code is 0 or 1."""
     args = build_parser().parse_args(argv)
     moment = now() if now is not None else datetime.now(timezone.utc)
     try:

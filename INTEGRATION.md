@@ -10,7 +10,7 @@ Pesquisa e testes feitos em 14/10/2026, no branch `feature/progression-core`. No
 - **Método escolhido:** um Chromium **visível**, controlado pelo Playwright, com o perfil em `runtime/browser-profile`. Você faz o login nessa janela, e o coletor só lê o que a página mostra. A leitura usa fontes que você escolhe no terminal, com prévia de cada uma (`--configure`, que o `observar_windows.cmd` usa), gravadas em `runtime/observe-selectors.json`: seletores de texto e, para a cotação, também a leitura visual do marcador no gráfico, com OCR local (seção 4).
 - **Varredura dos favoritos:** `python -m pocketautonomo.scan` (`varrer_windows.cmd`) usa o mesmo navegador, o mesmo perfil e as mesmas fontes, e acrescenta uma única ação: o clique num ativo favorito, por um seletor que você confere, para selecioná-lo. Ela nunca clica em BUY, SELL, CALL ou PUT, não mexe no Amount e não envia ordens.
 - O programa não traz nenhum seletor nem marcador pronto. Sem os seus, todo campo fica indisponível, com o motivo. Um seletor que encontra texto ou um OCR que lê um número não validam o campo: só a sua comparação com a tela valida.
-- **Análise local CALL/PUT:** usa só os CSV da varredura, sem acessar a plataforma nem a rede, e responde `AGUARDAR` até uma regra fixa ser validada em dados separados (README, seção da análise; STATUS, item 24).
+- **Análise local CALL/PUT:** usa só cotações lidas na tela, dos CSV da varredura e das leituras durante os ciclos da operação simulada, cada uma com a origem, sem acessar a plataforma nem a rede, e responde `AGUARDAR` até uma regra fixa ser validada em dados separados (README, seção da análise; STATUS, item 24).
 - **Operação simulada:** `python -m pocketautonomo.operate` (`operar_windows.cmd`) é a varredura com a decisão validada ligada ao coordenador e a um simulador neste computador. Nenhuma ordem vai para a plataforma: durante um ciclo, ela só lê o ativo do ciclo, sem clicar (README, seção da operação simulada; STATUS, item 28).
 
 ## 1. Fontes oficiais consultadas
@@ -261,11 +261,12 @@ As páginas de teste são HTML escrito para os testes e servido pelo próprio Pl
 
 ## 7. Como validar no seu Windows
 
-Os lançadores estão descritos no [README](README.md#windows-os-lançadores). Use a conta demo. Esta validação confere a operação simulada, que **não envia ordens** à plataforma:
+Os lançadores estão descritos no [README](README.md#windows-os-lançadores). Use a conta demo. Esta validação confere que os dados artificiais continuam fora da análise e que a operação continua coletando como antes; nada **envia ordens** à plataforma:
 
-1. Na pasta `claude`, rode `git pull`. O `preparar_windows.cmd` não precisa rodar de novo: as dependências não mudaram, e a `.venv`, o perfil, os seletores e os CSV continuam os mesmos.
-2. Rode `operar_windows.cmd --demonstracao`. Ele não abre o navegador e deve terminar com `Demonstração concluída: as 8 cenas passaram nas conferências` e código 0.
-3. Rode `operar_windows.cmd --cycles 2`. Cole o link, faça o login e pressione Enter; nas duas perguntas dos favoritos, Enter mantém e aceita o seletor gravado. Deixe o navegador restaurado ou maximizado, sem minimizá-lo, e não use a janela. Acompanhe as linhas `ESTADO:`: com os dados de hoje, o esperado é `ESTADO: COLETANDO`, nenhuma entrada simulada e código 0 no fim. Ctrl+C encerra a qualquer momento.
-4. Me envie a saída do terminal dos passos 2 e 3, do começo ao fim, e o `runtime\operacao-...csv`, se ele tiver sido criado.
+1. Na pasta `claude`, rode `git pull`. O `preparar_windows.cmd` não precisa rodar de novo: as dependências não mudaram, e a `.venv`, o perfil, os seletores, os CSV e os bancos continuam os mesmos.
+2. Rode `analisar_windows.cmd` e anote a linha `Dados: ...`.
+3. Rode `operar_windows.cmd --demonstracao`: deve terminar com `Demonstração concluída: as 8 cenas passaram nas conferências` e código 0. Rode `analisar_windows.cmd` de novo: a linha `Dados: ...` deve ser igual à do passo 2, porque nada da demonstração entra na análise.
+4. Rode `operar_windows.cmd --cycles 1`: cole o link, faça o login, pressione Enter e, nas duas perguntas dos favoritos, Enter de novo. Deixe o navegador restaurado ou maximizado, sem usar a janela. Com os dados de hoje, o esperado é `ESTADO: COLETANDO`, nenhuma entrada simulada, nenhum arquivo `runtime\cotacoes-ciclo-...csv` (ele só aparece quando um ciclo roda) e código 0.
+5. Me envie a saída dos passos 2 a 4.
 
-A operação na tela só abre um ciclo quando a análise validar uma regra em dados separados; até lá, ela continua coletando dados, como a varredura.
+A gravação das cotações durante os ciclos só roda na tela quando a análise validar uma regra em dados separados e um ciclo começar; até lá, ela foi testada só com a tela falsa da suíte (STATUS, item 29).

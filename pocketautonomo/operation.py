@@ -3,7 +3,9 @@
 SIMULATED EXECUTION ONLY. Every entry goes to paper_broker.PaperBroker, through
 OrderExecutor and the Coordinator with its SQLite store: nothing is sent to the Pocket
 Option and no money moves. The results are simulated with the quotes observed on this
-computer and never feed the analysis, which reads only the scan's CSV files.
+computer and never feed the analysis, which reads only quotes read on the screen: the
+scan's CSV files and, written by operate.py, the quotes read during the cycles, with their
+origin.
 
 Operator applies the rules of the operation:
 
@@ -186,6 +188,7 @@ class Seen:
     quote: str
     payout: object = None
     reading_ms: object = None
+    payout_note: object = None  # why the payout is missing, or how it was confirmed
 
 
 @dataclass(frozen=True)

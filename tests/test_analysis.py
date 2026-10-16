@@ -221,6 +221,120 @@ class HistoryTest(unittest.TestCase):
         excluded = a.load_history(self.runtime, exclude=[self.runtime / "scan-20261015-100000-aaaaaaaa.csv"])
         self.assertEqual(excluded.usable, 0)
 
+    def write_cycle_csv(self, name, rows, columns=a.COLUMNS + (a.ORIGIN_COLUMN,)):
+        """A file of quotes read during cycles; rows are dicts of some of columns."""
+        with open(self.runtime / name, "w", newline="", encoding="utf-8") as file:
+            writer = csv.writer(file)
+            writer.writerow(columns)
+            for row in rows:
+                writer.writerow([row.get(column, "") for column in columns])
+
+    def test_quotes_read_during_cycles_are_loaded_with_their_origin(self):
+        write_scan_csv(self.runtime / "scan-20261015-100000-aaaaaaaa.csv", [scan_row(0, 1.08530), scan_row(600, 1.08590)])
+        cycle = {a.ORIGIN_COLUMN: a.ORIGIN_CYCLE}
+        self.write_cycle_csv(
+            "cotacoes-ciclo-20261015-100001-cccccccc.csv",
+            [
+                {**scan_row(300.5, 1.08550, payout=""), **cycle},  # without a payout: still a quote
+                {**scan_row(301, 1.08551, payout="80"), **cycle},  # below 90%: still a quote
+                {**scan_row(0, 1.08530), **cycle},  # the scan's own quote again: counted once
+                {**scan_row(302, 1.08552), a.ORIGIN_COLUMN: "simulador"},  # never a result of the simulator
+                {**scan_row(303, 1.08553), a.ORIGIN_COLUMN: ""},
+                {**scan_row(304, 1.08554, ready="não"), **cycle},
+            ],
+        )
+        self.write_cycle_csv("cotacoes-ciclo-20261015-100002-dddddddd.csv", [scan_row(305, 1.08555)], a.COLUMNS)
+        # Files of the operation, of the demonstration and of the timings are never read.
+        for name in ("operacao-20261015-100000-eeeeeeee.csv", "demonstracao-operacao-20261015-100000-ffffffff.csv",
+                     "tempos-scan-20261015-100000-aaaaaaaa.csv"):
+            self.write_cycle_csv(name, [{**scan_row(306, 1.2), **cycle}])
+        history = a.load_history(self.runtime)
+        self.assertEqual((history.files, history.cycle_files, history.usable), (3, 2, 4))
+        self.assertEqual(history.origins, {a.ORIGIN_SCAN: 2, a.ORIGIN_CYCLE: 2})
+        self.assertEqual(
+            history.skipped,
+            {
+                "cotações repetidas no mesmo instante": 1,
+                "linhas de outra origem, que não é cotação lida na tela": 3,
+                "linhas sem dados para análise": 1,
+            },
+        )
+        series = history.get("EUR/USD OTC")
+        self.assertEqual([sample.origin for sample in series.samples], [a.ORIGIN_SCAN, a.ORIGIN_CYCLE, a.ORIGIN_CYCLE, a.ORIGIN_SCAN])
+        self.assertEqual([sample.payout for sample in series.samples], [92.0, None, 80.0, 92.0])
+        self.assertNotIn(1.2, [sample.price for sample in series.samples])
+        # The quote read 300,5 s after the first one labels it, as a quote of the scan would.
+        self.assertEqual(a.outcome(series, series.samples[0], HORIZON, a.CALL), a.WIN)
+        text = "\n".join(a.report_lines(history, HORIZON, START + timedelta(hours=1)))
+        self.assertIn(
+            "Dados: 1 arquivos da varredura e 2 de leituras durante ciclos, 4 cotações utilizáveis em 1 ativos."
+            " Origem: 2 de visitas da varredura e 2 de leituras da tela durante ciclos da operação simulada;"
+            " resultados do simulador nunca entram.",
+            text,
+        )
+
+    def test_the_context_of_a_cycle_never_reaches_the_samples(self):
+        columns = a.COLUMNS + (a.ORIGIN_COLUMN, "cycle_id", "attempt", "operation_state", "result")
+        loaded = []
+        for attempt, state, result in (("1", "PENDÊNCIA", "WIN"), ("4", "CICLO ATIVO", "LOSS")):
+            runtime = self.runtime / f"tentativa-{attempt}"
+            runtime.mkdir()
+            rows = [
+                {**scan_row(seconds, 1.0853 + seconds / 1e6), a.ORIGIN_COLUMN: a.ORIGIN_CYCLE, "cycle_id": "7",
+                 "attempt": attempt, "operation_state": state, "result": result}
+                for seconds in (0, 0.5, 1.0)
+            ]
+            with open(runtime / "cotacoes-ciclo-20261015-100000-aaaaaaaa.csv", "w", newline="", encoding="utf-8") as file:
+                writer = csv.writer(file)
+                writer.writerow(columns)
+                writer.writerows([[row.get(column, "") for column in columns] for row in rows])
+            loaded.append(a.load_history(runtime).get("EUR/USD OTC").samples)
+        self.assertEqual(loaded[0], loaded[1])  # the simulated attempt and its result change nothing
+        self.assertEqual(set(vars(loaded[0][0])), {"at", "price", "quote", "payout", "origin"})
+
+    def test_dense_readings_during_a_cycle_add_no_independent_operations(self):
+        def price_at(moment):  # the price of legs() at any moment
+            phase = ((moment - START).total_seconds() % (40 * HORIZON)) / (40 * HORIZON)
+            return round(1.2 + 0.01 * (2 * phase if phase < 0.5 else 2 - 2 * phase), 5)
+
+        full = legs(6000)  # a scan that never stops
+        cycles = [(full.samples[first].at, full.samples[first].at + timedelta(seconds=1200)) for first in (1500, 3000, 4500)]
+        # The scan stops during each cycle of 20 minutes: before this change, nothing replaced it.
+        gap, dense = a.Series("X"), a.Series("X")
+        for sample in full.samples:
+            if not any(start < sample.at < end for start, end in cycles):
+                gap.add(sample)
+                dense.add(sample)
+        for start, _ in cycles:  # now the readings of the cycle, 0.5 s apart, real quotes
+            for index in range(2400):
+                at = start + timedelta(seconds=0.25 + 0.5 * index)
+                dense.add(a.Sample(at, price_at(at), f"{price_at(at):.5f}", None, a.ORIGIN_CYCLE))
+        self.assertEqual(len(dense.samples), len(gap.samples) + 3 * 2400)
+        moments = a.decision_moments(dense, HORIZON)
+        gaps = [(later.at - earlier.at).total_seconds() for earlier, later in zip(moments, moments[1:])]
+        self.assertGreaterEqual(min(gaps), HORIZON)  # never closer than one horizon
+        for start, end in cycles:  # 2400 readings, but at most 5 operations in each cycle
+            self.assertLessEqual(len([sample for sample in moments if start <= sample.at <= end]), 1200 / HORIZON + 1)
+        self.assertLessEqual(len(moments), len(a.decision_moments(full, HORIZON)) + len(cycles))
+        tolerance = a.tolerance(HORIZON)
+
+        def labels(series):
+            moments = a.decision_moments(series, HORIZON)
+            found = [series.first_at_or_after(sample.at + timedelta(seconds=HORIZON), tolerance) for sample in moments]
+            return [label for label in found if label is not None]
+
+        self.assertGreater(len(labels(dense)), len(labels(gap)))  # results that the gap had lost
+        self.assertTrue(any(label.origin == a.ORIGIN_CYCLE for label in labels(dense)))
+        development, evaluation, _ = a.split(dense, HORIZON)
+        end = timedelta(seconds=HORIZON + tolerance)
+        self.assertLessEqual(max(sample.at for sample in development) + end, min(sample.at for sample in evaluation))
+        for series in (full, gap, dense):  # the same limits decide, with or without the readings of the cycles
+            validation = a.validate(series, HORIZON)
+            self.assertTrue(validation.validated)
+            self.assertGreaterEqual(validation.evaluation.trades, a.MIN_EVAL_TRADES)
+            trades = validation.development.trades + validation.evaluation.trades
+            self.assertLessEqual(trades, len(a.decision_moments(series, HORIZON)))
+
     def test_the_report_waits_and_says_why(self):
         rows = [scan_row(i * 60, 1.08 + 0.0001 * math.sin(i)) for i in range(30)]
         write_scan_csv(self.runtime / "scan-20261015-100000-aaaaaaaa.csv", rows)
