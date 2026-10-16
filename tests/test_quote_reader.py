@@ -209,6 +209,66 @@ class ReadTextTest(unittest.TestCase):
                 self.assertIsNone(reading.value)
                 self.assertIn(reason, reading.reason)
 
+    def test_readings_that_differ_only_in_the_decimal_separator_agree(self):
+        # The cases of the collector's test on Windows, observations 3 and 4, in both orders.
+        for text_a, text_b in (("162,192", "162.192"), ("162.198", "162,198"), ("1,26543", "1.26543")):
+            with self.subTest(texts=(text_a, text_b)):
+                reading = self.read(FakeEngine(answers=[(text_a, 0.95), (text_b, 0.93)]))
+                expected = text_a.replace(",", ".")
+                self.assertEqual((reading.value, reading.reason), (expected, None))
+                self.assertEqual(
+                    reading.note,
+                    f"as duas leituras do OCR só divergiram no separador decimal: {text_a!r} e {text_b!r}",
+                )
+        # Equal texts keep their own separator, with no note, as before.
+        reading = self.read(FakeEngine("162,192", 0.99))
+        self.assertEqual((reading.value, reading.note), ("162,192", None))
+        reading = self.read(FakeEngine("65,432.10", 0.99))
+        self.assertEqual((reading.value, reading.note), ("65,432.10", None))
+
+    def test_other_divergences_stay_refused(self):
+        refused = {
+            # observation 2 of the collector's test: one reading lost the point
+            ("162.189", "162189"): "divergiram: '162.189' e '162189'",
+            ("162189", "162.189"): "divergiram: '162189' e '162.189'",
+            ("162.192", "162.193"): "divergiram",  # another digit
+            ("162.192", "162,1920"): "divergiram",  # another precision
+            ("162,19", "162.192"): "divergiram",
+            ("1.62192", "162.192"): "divergiram",  # the separator in another place
+            ("1,234.56", "1.234,56"): "divergiram",  # more than one separator: ambiguous
+            ("65,432.10", "65.432.10"): "divergiram",
+            ("162.192", ".162192"): "divergiram",
+        }
+        for (text_a, text_b), reason in refused.items():
+            with self.subTest(texts=(text_a, text_b)):
+                reading = self.read(FakeEngine(answers=[(text_a, 0.99), (text_b, 0.99)]))
+                self.assertIsNone(reading.value)
+                self.assertIn(reason, reading.reason)
+        # The minimum confidence still holds for both readings of an agreement.
+        for scores in ((0.95, 0.85), (0.85, 0.95)):
+            with self.subTest(scores=scores):
+                engine = FakeEngine(answers=[("162,192", scores[0]), ("162.192", scores[1])])
+                reading = self.read(engine)
+                self.assertIsNone(reading.value)
+                self.assertEqual(
+                    reading.reason, "o OCR leu '162,192' e '162.192' com confiança 0.85, abaixo de 0.90"
+                )
+
+    def test_agreed_quote_never_inserts_rounds_or_compares_sizes(self):
+        self.assertEqual(qr.agreed_quote("162.192", "162.192"), ("162.192", None))
+        self.assertEqual(qr.agreed_quote("162,192", "162.192")[0], "162.192")
+        self.assertEqual(qr.agreed_quote("0,91210", "0.91210")[0], "0.91210")  # trailing zero kept
+        for text_a, text_b in (
+            ("162.192", "162192"),  # no separator to insert
+            ("162.1920", "162.192"),  # same size, other text
+            ("162.192", "162.19200"),
+            ("162.192", "162.191"),
+            ("1.2.3", "1,2,3"),
+            ("", "162.192"),
+        ):
+            with self.subTest(texts=(text_a, text_b)):
+                self.assertEqual(qr.agreed_quote(text_a, text_b), (None, None))
+
     def test_two_lines_one_quote_and_a_countdown(self):
         canvas = chart_images.Canvas()
         canvas.label(WIDTH - 69, 140, MARKER, height=26, lines=2)

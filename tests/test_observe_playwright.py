@@ -31,6 +31,12 @@ HAVE_PLAYWRIGHT = importlib.util.find_spec("playwright") is not None
 HAVE_OCR = HAVE_PLAYWRIGHT and importlib.util.find_spec("rapidocr") is not None
 REQUIRED = os.environ.get("POCKETAUTONOMO_REQUIRE_BROWSER_TESTS") == "1"
 TEST_URL = "https://observe.test/tela/?ssid=SEGREDO#SEGREDO"
+# The status of a visual reading of the chart #plot: the note appears only when the two OCR
+# readings differed in the decimal separator alone.
+OCR_OK = (
+    r"^ok: ocr #plot( \(as duas leituras do OCR só divergiram no separador decimal:"
+    r" '[0-9]+[.,][0-9]+' e '[0-9]+[.,][0-9]+'\))?$"
+)
 SHOWN_URL = "https://observe.test/tela/"
 PRICE_SELECTOR = 'div[data-field="price"]'  # pasted with its quotes, as DevTools copies it
 PAYOUT_SELECTOR = r"#pay\:out"  # the CSS escape of the id pay:out, with its backslash
@@ -333,7 +339,7 @@ class RealVisualQuoteTest(unittest.TestCase):
         self.assertEqual(len(rows), 4)
         for row in rows:
             self.assertIn(row[4], SEQUENCE)  # only quotes the chart really showed, over the background
-            self.assertEqual(row[5], "ok: ocr #plot")
+            self.assertRegex(row[5], OCR_OK)
             self.assertEqual(row[8:10], ["completa", "ocr"])
             self.assertLess(datetime.fromisoformat(row[0]), datetime.fromisoformat(row[10]) + timedelta(seconds=1))
             self.assertGreater(float(row[11]), 0)
@@ -511,13 +517,14 @@ class RealScanTest(unittest.TestCase):
             self.assertLess(abs(float(row["price"]) - base), 0.0005, row)
             self.assertEqual(row["payout_percent"], str(payout), row)
             self.assertEqual(row["payout_eligible"], "sim" if payout >= 90 else "não")
-            self.assertEqual((row["price_source"], row["price_status"]), ("ocr", "ok: ocr #plot"))
+            self.assertEqual(row["price_source"], "ocr")
+            self.assertRegex(row["price_status"], OCR_OK)
             # Complete and current: usable for analysis, apart from the payout's eligibility.
             self.assertEqual((row["analysis_ready"], row["data_age_ms"] != ""), ("sim", True), row)
             if row["switch"] == "confirmada":
                 self.assertLess(abs(float(row["previous_quote"]) - bases[row["previous_asset"]]), 0.0005, row)
                 self.assertGreaterEqual(int(row["polls"]), 2)
-                self.assertEqual(row["previous_quote_status"], "ok: ocr #plot")
+                self.assertRegex(row["previous_quote_status"], OCR_OK)
                 self.assertGreaterEqual(int(row["previous_quote_attempts"]), 1)
         self.assertNotIn("SEGREDO", text + path.read_text(encoding="utf-8"))
         # Every reading of the quote is in the timings file: the attempts before each click,

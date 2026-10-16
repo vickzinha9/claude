@@ -45,6 +45,8 @@ TIMING_COLUMNS = (
     "image_px",  # the captured image, in device pixels: width x height
     "png_bytes",
     "strip_css",  # width of the right strip captured, in CSS pixels; empty for the whole chart
+    # Added after the first measurements; the columns above keep their order.
+    "note",  # how the two OCR texts agreed when they were not equal, such as in the separator
 )
 # The steps shown in the summary, with their names in the terminal.
 SUMMARY_STEPS = (

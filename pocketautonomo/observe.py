@@ -214,7 +214,8 @@ class FieldReading:
     source is texto or ocr; captured_at is this computer's clock, in UTC, right before the
     capture; processing_ms is how long the capture and the reading took. All three are
     None when there was nothing to read. timings, for the visual reading only, splits that
-    time into capture, detection and OCR.
+    time into capture, detection and OCR. note, for the visual reading only, tells how the
+    two readings of the OCR agreed when their texts were not equal; it is also in status.
     """
 
     value: object
@@ -223,6 +224,7 @@ class FieldReading:
     captured_at: object = None
     processing_ms: object = None
     timings: object = None  # QuoteTimings
+    note: object = None
 
     @property
     def available(self):
@@ -458,6 +460,7 @@ def timing_row(reading, **extra):
         "image_px": timings.image_px,
         "png_bytes": timings.png_bytes,
         "strip_css": timings.strip_css,
+        "note": reading.note,
     }
     row.update(extra)
     return row
@@ -960,7 +963,10 @@ def read_quote_visually(session, source, ctx):
     value, problem = parse_price(found.value)
     if problem is not None:
         return VisualReading(unavailable(problem), capture, box, timings)
-    reading = FieldReading(value, f"{OK}: {OCR_SOURCE} {source.chart}")
+    status = f"{OK}: {OCR_SOURCE} {source.chart}"
+    if found.note:
+        status += f" ({found.note})"
+    reading = FieldReading(value, status, note=found.note)
     return VisualReading(reading, capture, box, timings)
 
 
@@ -1081,10 +1087,16 @@ def observation_line(number, observation):
 
 
 def shown_value(field, reading):
-    """How the terminal shows a reading: its value, or INDISPONÍVEL with the reason."""
+    """How the terminal shows a reading: its value, or INDISPONÍVEL with the reason.
+
+    A visual reading whose two OCR texts differed only in the decimal separator shows
+    that note after the value.
+    """
     if not reading.available:
         return f"INDISPONÍVEL ({reading.reason})"
-    return f"{reading.value}%" if field == "payout" else reading.value
+    if field == "payout":
+        return f"{reading.value}%"
+    return f"{reading.value} ({reading.note})" if reading.note else reading.value
 
 
 def print_plan(url, args, profile_dir, selectors_path):
@@ -1422,7 +1434,7 @@ def configure_visual_source(session, previous, read_line, ctx):
         say("  Candidatos, de cima para baixo; compare com a tela e com a imagem:")
         for number, (box, reading) in enumerate(zip(boxes, readings), 1):
             if reading.value:
-                text = reading.value
+                text = reading.value + (f" ({reading.note})" if reading.note else "")
             else:
                 text = f"nenhuma cotação legível ({reading.reason}); não pode ser escolhido"
             gap = (capture.image.width - box.x1) / capture.scale

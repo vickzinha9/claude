@@ -41,6 +41,14 @@ when exactly one line reads as a quote (digits with a decimal separator), both r
 that line agree and both have confidence MIN_SCORE or more. Otherwise the reading is
 unavailable, with the reason: nothing is replaced by zero, no digit is corrected and no
 earlier value is reused.
+
+Two readings agree when their texts are equal, or when each has exactly one decimal
+separator and they differ only in it, a comma in one and a point in the other, with the
+same digits before and after it (agreed_quote): the OCR sometimes takes the point of the
+marker for a comma in one of its two readings. That quote is written with a point, and the
+note of the reading keeps both texts. A missing separator, another digit, another number
+of decimals, or two different texts with more than one separator never agree: no
+separator is inserted, no value is rounded and no two values are compared by their size.
 """
 
 import math
@@ -51,6 +59,9 @@ from dataclasses import dataclass
 from itertools import groupby
 
 QUOTE_PATTERN = re.compile(r"[0-9]+(?:[.,][0-9]+)+")  # at least one decimal separator
+# Exactly one separator, with digits on both sides: the only format in which two readings
+# that differ in the separator alone can be told to be the same quote.
+SINGLE_SEPARATOR = re.compile(r"([0-9]+)[.,]([0-9]+)")
 MIN_SCORE = 0.9
 # Largest difference per channel to count as the marker's color. A semi-transparent label
 # changes color with what is behind it: 32 between the two fills seen in the validation.
@@ -214,6 +225,7 @@ class QuoteReading:
     value: object
     reason: object = None
     box: object = None  # the marker that was read, when one was found
+    note: object = None  # how the two readings agreed, when they were not equal texts
 
 
 def color_hex(color):
@@ -640,6 +652,27 @@ def black_and_white(gray):
     return GrayImage(gray.width, gray.height, bytes(0 if value < 128 else 255 for value in gray.data))
 
 
+def agreed_quote(text_a, text_b):
+    """(quote, note) that the two readings of one line agree on, or (None, None).
+
+    Equal texts agree as they are, with no note. Two texts that each have exactly one
+    separator, with digits on both sides, also agree when only that separator differs, a
+    comma in one and a point in the other: the same digits before it and the same digits
+    after it, so the same precision. Their quote is written with a point, and the note
+    keeps both texts. Nothing else agrees: a text without a separator, another digit,
+    another number of decimals, or two different texts with more than one separator, in
+    which the decimal separator is ambiguous. No separator is ever inserted, no digit is
+    changed and no value is rounded or compared by its size.
+    """
+    if text_a == text_b:
+        return text_a, None
+    a, b = SINGLE_SEPARATOR.fullmatch(text_a), SINGLE_SEPARATOR.fullmatch(text_b)
+    if a is None or b is None or a.groups() != b.groups():
+        return None, None
+    note = f"as duas leituras do OCR só divergiram no separador decimal: {text_a!r} e {text_b!r}"
+    return f"{a.group(1)}.{a.group(2)}", note
+
+
 def read_marker_text(image, box, engine):
     """QuoteReading of the text inside box, read by engine.recognize(GrayImage)."""
     gray = _luminance_free_crop(image, box)
@@ -653,16 +686,19 @@ def read_marker_text(image, box, engine):
         seen.append(text_a or text_b)
         if not (QUOTE_PATTERN.fullmatch(text_a) or QUOTE_PATTERN.fullmatch(text_b)):
             continue
-        if text_a != text_b:
+        quote, note = agreed_quote(text_a, text_b)
+        if quote is None:
             problems.append(f"as duas leituras do OCR divergiram: {text_a!r} e {text_b!r}")
         elif min(score_a, score_b) < MIN_SCORE:
+            read = repr(text_a) if note is None else f"{text_a!r} e {text_b!r}"
             problems.append(
-                f"o OCR leu {text_a!r} com confiança {min(score_a, score_b):.2f}, abaixo de {MIN_SCORE:.2f}"
+                f"o OCR leu {read} com confiança {min(score_a, score_b):.2f}, abaixo de {MIN_SCORE:.2f}"
             )
         else:
-            quotes.append(text_a)
+            quotes.append((quote, note))
     if len(quotes) == 1 and not problems:
-        return QuoteReading(quotes[0], None, box)
+        quote, note = quotes[0]
+        return QuoteReading(quote, None, box, note)
     if len(quotes) + len(problems) > 1:
         return QuoteReading(None, "o marcador tem mais de uma linha com número; leitura ambígua", box)
     if problems:

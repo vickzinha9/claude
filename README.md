@@ -230,7 +230,7 @@ Na leitura visual:
 - mais de uma caixa tem: a leitura é ambígua;
 - a caixa está cortada pela borda da captura, ou o gráfico não cabe inteiro na janela;
 - o texto do marcador não é um número com casas decimais;
-- as duas leituras do OCR, em tons de cinza e em preto e branco, divergem, ou uma delas tem confiança abaixo de 0,90;
+- as duas leituras do OCR, em tons de cinza e em preto e branco, divergem, ou uma delas tem confiança abaixo de 0,90. A única diferença aceita é a do separador decimal: `162,192` numa leitura e `162.192` na outra, cada uma com um único separador e os mesmos algarismos antes e depois dele. Essa cotação é gravada com ponto, `162.192`, e o status traz os dois textos lidos. Um separador ausente (`162.189` e `162189`), outro algarismo, outra quantidade de casas decimais ou textos diferentes com mais de um separador continuam recusados: nenhum separador é inserido e nenhum valor é arredondado;
 - o marcador tem mais de uma linha com número.
 
 Uma linha sem número, como uma contagem `00:42`, é ignorada. O OCR roda no seu computador: o modelo vem dentro do pacote `rapidocr`, o programa não baixa modelos e desliga a telemetria do `onnxruntime`. O motor do OCR é carregado uma vez por execução e reaproveitado em todas as leituras; logo depois de carregar, ele faz uma leitura de aquecimento na amostra `1.26543`, desenhada na hora, porque a primeira leitura do `onnxruntime` é várias vezes mais lenta que as seguintes. O terminal mostra `OCR local pronto: carregado em ... ms; leitura de aquecimento em ... ms, ...: leu '1.26543'`. A imagem do gráfico fica na memória; só as imagens de conferência da configuração são gravadas em `runtime/`, cada uma num arquivo novo. Nenhuma imagem é sobrescrita: no Windows, uma imagem aberta num visualizador não pode ser regravada, e foi isso que encerrou a sua validação com `[Errno 22] Invalid argument`. Se uma imagem não puder ser gravada, o programa mostra o motivo e oferece tentar de novo (Enter), continuar sem a imagem (`c`) ou desistir da leitura visual (`-`); a configuração não termina. Deixe a janela do navegador visível, sem minimizar, e o mouse fora do gráfico.
@@ -273,7 +273,7 @@ As 13 primeiras colunas do CSV são as dos arquivos anteriores, na mesma ordem; 
 | `captured_at_utc` | relógio local no início da observação |
 | `page` | página lida, sem parâmetros nem fragmento |
 | `asset`, `asset_status` | ativo; `ok: <seletor>` ou `indisponível: <motivo>` |
-| `price`, `price_status` | cotação do ativo, como exibida; `ok: <seletor>`, `ok: ocr <seletor do gráfico>` ou `indisponível: <motivo>` |
+| `price`, `price_status` | cotação do ativo, como exibida; `ok: <seletor>`, `ok: ocr <seletor do gráfico>` ou `indisponível: <motivo>`. Na leitura visual, quando as duas leituras do OCR só divergiram no separador decimal, a cotação vem com ponto e o status termina com `(as duas leituras do OCR só divergiram no separador decimal: '162,192' e '162.192')` |
 | `payout_percent`, `payout_status` | número do payout; mesmo formato de status |
 | `completeness` | `completa` com ativo, cotação e payout disponíveis; `parcial` quando falta algum |
 | `price_source` | `texto`, `ocr` ou vazio, sem fonte |
@@ -315,6 +315,7 @@ Tempos da leitura da cotação, mediana/máximo em ms, por momento da leitura:
 | `element_ms`, `count_ms`, `visible_ms`, `box_ms` | achar o elemento do gráfico: contagem, visibilidade e posição, cada uma uma ida ao navegador |
 | `screenshot_ms`, `decode_ms`, `detection_ms`, `ocr_ms` | captura da tela, decodificação da imagem, detecção do marcador e OCR |
 | `image_px`, `png_bytes`, `strip_css` | tamanho da imagem capturada, em pixels do dispositivo, e do PNG; largura da faixa direita capturada, em px CSS |
+| `note` | coluna nova, no fim: a observação da leitura, como as duas leituras do OCR que só divergiram no separador decimal |
 
 ## Varredura dos favoritos
 

@@ -896,6 +896,28 @@ class VisualQuoteTest(ObserveTestCase):
         # Once before the first observation, then only for a marker found: 1 + 1.
         self.assertEqual(self.engine.gets, 2)
 
+    def test_a_divergence_only_in_the_separator_is_kept_with_both_texts(self):
+        self.write_selectors(asset="#ativo", price="", payout="#payout", price_ocr=VISUAL)
+        session = FakeSession(
+            {"#ativo": shown("USD/JPY OTC"), "#payout": shown("92%")},
+            captures={"#grafico": chart_images.chart(marker_y=150)},
+        )
+        engine = chart_images.FakeEngine(answers=[("162,192", 0.97), ("162.192", 0.96), ("162.189", 0.97), ("162189", 0.96)])
+        run = self.run_main("--count", "2", session=session, engine=engine)
+        self.assertEqual((run.code, run.err), (0, ""))
+        first, second = self.csv_rows()
+        note = "as duas leituras do OCR só divergiram no separador decimal: '162,192' e '162.192'"
+        self.assertEqual(first[4:9], ["162.192", f"ok: ocr #grafico ({note})", "92", "ok: #payout", "completa"])
+        # A missing separator is never inserted: that observation stays partial.
+        self.assertEqual(second[4], "")
+        self.assertEqual(second[5], "indisponível: as duas leituras do OCR divergiram: '162.189' e '162189'")
+        self.assertIn(f"cotação do ativo 162.192 ({note}) (leitura visual", run.out)
+        [timings] = self.runtime.glob("tempos-observations-*.csv")
+        with open(timings, newline="", encoding="utf-8") as file:
+            header, *lines = list(csv.reader(file))
+        lines = [dict(zip(header, line)) for line in lines]
+        self.assertEqual([(line["quote"], line["note"]) for line in lines], [("162.192", note), ("", "")])
+
     def test_capture_problems_are_reasons(self):
         cases = (
             (observe.Capture(0), "o seletor do gráfico (#grafico) não encontrou nenhum elemento"),
