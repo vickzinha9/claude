@@ -264,13 +264,17 @@ class HistoryTest(unittest.TestCase):
             self.assertEqual({path.name: path.read_bytes() for path in runtime.iterdir()}, before)
 
     def test_a_file_that_cannot_be_written_never_stops_the_reading(self):
-        warned = []
-        log = ca.CandleLog(Path("/proc/sem-permissao"), warned.append)
-        log.write("EUR/USD OTC", PERIOD, bars_of(trend(3)), START)
-        log.write("EUR/USD OTC", PERIOD, bars_of(trend(3)), START + timedelta(seconds=1))
-        self.assertEqual(len(warned), 1)
-        self.assertIn("não foi possível gravar as velas lidas", warned[0])
-        self.assertTrue(log.failed)
+        with tempfile.TemporaryDirectory() as directory:
+            blocker = Path(directory) / "um-arquivo"
+            blocker.write_text("não é pasta", encoding="utf-8")
+            warned = []
+            log = ca.CandleLog(blocker / "runtime", warned.append)  # a folder inside a file: fails on every system
+            log.write("EUR/USD OTC", PERIOD, bars_of(trend(3)), START)
+            log.write("EUR/USD OTC", PERIOD, bars_of(trend(3)), START + timedelta(seconds=1))
+            self.assertEqual(len(warned), 1)
+            self.assertIn("não foi possível gravar as velas lidas", warned[0])
+            self.assertTrue(log.failed)
+            self.assertEqual(log.paths, [])
 
 
 def observation_of(prices, captured_at, stamp_problem=None, asset="EUR/USD OTC", marker="1.08530"):
