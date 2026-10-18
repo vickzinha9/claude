@@ -20,12 +20,13 @@ import os
 import re
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from pocketautonomo import observe, scan
+from pocketautonomo import continuous, observe, operate, scan
 
 HAVE_PLAYWRIGHT = importlib.util.find_spec("playwright") is not None
 HAVE_OCR = HAVE_PLAYWRIGHT and importlib.util.find_spec("rapidocr") is not None
@@ -603,6 +604,138 @@ class RealScanTest(unittest.TestCase):
         self.assertEqual(sum(line["verdict"] == "aceita" for line in after) >= 5, True)
         self.assertTrue(all(line["strip_css"] for line in lines))
         self.assertIn("Tempos da leitura da cotação, mediana/máximo em ms, por momento da leitura:", text)
+
+
+@unittest.skipUnless(HAVE_OCR or REQUIRED, "Playwright e OCR local (rapidocr) não estão instalados neste Python")
+class RealContinuousTest(unittest.TestCase):
+    """The continuous mode of the simulated operation with real Chromium, real clicks and the real OCR,
+    on the local favorites page: every run opens a new browser on the same profile."""
+
+    def setUp(self):
+        options = {"ignore_cleanup_errors": True} if sys.version_info >= (3, 10) else {}
+        directory = tempfile.TemporaryDirectory(**options)
+        self.addCleanup(directory.cleanup)
+        self.runtime = Path(directory.name) / "runtime"
+        for name, value in (
+            ("RUNTIME_DIR", self.runtime),
+            ("ALLOWED_DOMAIN", "observe.test"),
+            ("HOST_PATTERN", re.compile(r"observe\.test")),
+        ):
+            patcher = mock.patch.object(observe, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.runtime.mkdir(parents=True)
+        sources = {"asset": "#asset", "price": "", "payout": "#payout", "price_ocr": {"chart": "#plot", "marker": SCAN_MARKER}}
+        (self.runtime / observe.SELECTORS_FILE_NAME).write_text(json.dumps(sources), encoding="utf-8")
+        (self.runtime / scan.SCAN_SELECTORS_FILE_NAME).write_text(json.dumps({"favorites": ".fav"}), encoding="utf-8")
+        self.page = SCAN_PAGE
+        self.counters = []  # the page's counters of each browser, right before it closed
+        self.opened = 0
+        self.fail = None  # fail(browser number, seconds): an exception for that wait of the session, or None
+
+    def open_session(self, profile_dir):
+        session = scan.open_scan_session(profile_dir, headless=True)
+        self.opened += 1
+        number = self.opened
+        original_close, original_wait = session.close, session.wait
+        self.addCleanup(original_close)
+        page = self.page
+        session._context.route(
+            "https://observe.test/**",
+            lambda route: route.fulfill(status=200, content_type="text/html; charset=utf-8", body=page),
+        )
+
+        def close():
+            if not session.is_closed():
+                self.counters.append(
+                    {key: session.read(f"#{key}", 2_000).text for key in ("trade-clicks", "amount-touches", "fav-clicks")}
+                )
+            original_close()
+
+        def wait(seconds):
+            error = self.fail(number, seconds) if self.fail is not None else None
+            if error is not None:
+                raise error
+            original_wait(seconds)
+
+        session.close, session.wait = close, wait
+        return session
+
+    def run_continuous(self, answers):
+        self.sleeps, self.flags = [], []
+        replies = iter(answers)
+
+        def sleep(seconds):
+            self.sleeps.append(seconds)
+            time.sleep(1)  # the browser of the last run has closed; a moment for its profile
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(continuous, "SCREEN_POLL_SECONDS", 0.5), mock.patch.object(
+            continuous, "SCREEN_READY_SECONDS", 1.5
+        ), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = operate.main(
+                ["--url", SCAN_URL, "--continuo", "--interval", "2", "--load-timeout", "5"],
+                open_session=self.open_session,
+                read_line=lambda prompt="": next(replies),
+                sleep=sleep,
+                keep_awake=continuous.KeepAwake(lambda flags: self.flags.append(flags) or 1),
+            )
+        self.assertEqual(list(replies), [])
+        return code, out.getvalue(), err.getvalue()
+
+    def rows(self):
+        rows = []
+        for path in self.runtime.glob("scan-*.csv"):
+            with open(path, newline="", encoding="utf-8") as file:
+                rows.append(list(csv.DictReader(file)))
+        return rows
+
+    def test_a_failed_browser_is_replaced_by_a_new_one_that_waits_for_the_page_and_goes_on(self):
+        def fail(number, seconds):
+            if seconds == 2:  # the wait between two cycles
+                if number == 1:
+                    return observe.BrowserError("a espera entre as leituras falhou (falha simulada pelo teste)")
+                return KeyboardInterrupt()
+            return None
+
+        self.fail = fail
+        code, out, err = self.run_continuous([""])  # only the Enter after the login of the first run
+        self.assertEqual(code, 130, out + err)
+        self.assertEqual(self.opened, 2)
+        self.assertEqual(self.sleeps, [continuous.RESTART_SECONDS])
+        self.assertIn("FALHA DO NAVEGADOR: a espera entre as leituras falhou (falha simulada pelo teste)", err)
+        self.assertIn("AGUARDANDO A SESSÃO", out)
+        self.assertIn("Sessão pronta: a tela de operações e os favoritos continuaram visíveis.", out)
+        # Each browser clicked only favorites: GBP/USD OTC and AUD/CAD OTC, with EUR/USD OTC already selected.
+        self.assertEqual(self.counters, [{"trade-clicks": "0", "amount-touches": "0", "fav-clicks": "-23"}] * 2)
+        names = [asset[0] for asset in SCAN_ASSETS]
+        runs = self.rows()
+        self.assertEqual(len(runs), 2)
+        for rows in runs:
+            self.assertEqual([row["asset"] for row in rows], names)
+            self.assertEqual([row["completeness"] for row in rows], ["completa"] * 3)
+            for row, (name, payout, base) in zip(rows, SCAN_ASSETS):
+                self.assertLess(abs(float(row["price"]) - base), 0.0005, row)
+        state = json.loads((self.runtime / continuous.STATE_FILE_NAME).read_text(encoding="utf-8"))
+        self.assertIsNone(state["pausa"])
+        self.assertEqual(self.flags, [continuous.AWAKE, continuous.ES_CONTINUOUS])
+        [log] = self.runtime.glob("continuo-2*.log")
+        self.assertIn("CONTÍNUO: execução 2,", log.read_text(encoding="utf-8"))
+
+    def test_a_dead_favorite_keeps_a_pausa_that_a_new_browser_does_not_release(self):
+        self.page = scan_page(dead=(1,))  # GBP/USD OTC: its click never switches the asset
+        code, out, err = self.run_continuous([""])
+        self.assertEqual(code, 1, out + err)
+        self.assertEqual(self.opened, 1)  # no new run by itself
+        self.assertEqual(self.sleeps, [])
+        self.assertEqual(self.counters, [{"trade-clicks": "0", "amount-touches": "0", "fav-clicks": "-2"}])
+        state = json.loads((self.runtime / continuous.STATE_FILE_NAME).read_text(encoding="utf-8"))
+        self.assertEqual(state["pausa"]["ativo"], "GBP/USD OTC")
+        code, out, err = self.run_continuous(["", ""])  # a new start: the login, and Enter at the PAUSA
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("PAUSA DO MODO CONTÍNUO: a operação contínua não recomeça sozinha.", err)
+        self.assertEqual(self.counters[1], {"trade-clicks": "0", "amount-touches": "0", "fav-clicks": "-"})  # nothing clicked
+        self.assertEqual(json.loads((self.runtime / continuous.STATE_FILE_NAME).read_text(encoding="utf-8"))["pausa"], state["pausa"])
 
 
 @unittest.skipUnless(HAVE_OCR or REQUIRED, "Playwright e OCR local (rapidocr) não estão instalados neste Python")

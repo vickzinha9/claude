@@ -37,6 +37,11 @@ orders in runtime/operacao-simulada-ordens.db, both reused by every run: a decis
 once stays used after a restart, and a pending entry is checked at the next start, never
 sent again. Each run writes its events to a new runtime/operacao-<data>-<hora>-<sufixo>.csv.
 
+--continuo runs one Execution after the other (continuous.py): after a failure of the browser,
+a lost session or cycles without a complete reading, a new run opens the browser again and
+waits by itself for the trading screen; after a PAUSA or a safety stop, it never starts again
+by itself. Each run is the same as one of main().
+
 --demonstracao runs, without the browser and with a simulated clock, scenes with
 artificial decisions and quotes, in new runtime/demonstracao-... files: AGUARDAR, an
 expired decision, four LOSS without a fifth entry, a repeated decision, a payout drop
@@ -104,27 +109,34 @@ INTRO = (
 )
 
 
-def main(argv=None, *, open_session=None, read_line=input, now=None, monotonic=None, engine=None):
+def main(
+    argv=None, *, open_session=None, read_line=input, now=None, monotonic=None, engine=None, sleep=None,
+    keep_awake=None,
+):
     """Run the simulated operation and return its exit code.
 
     The keyword arguments exist for tests, as in scan.main: they replace open_scan_session,
-    input, the UTC clock, time.perf_counter and the OCR's LazyEngine.
+    input, the UTC clock, time.perf_counter and the OCR's LazyEngine; sleep and keep_awake
+    replace, in the continuous mode only, time.sleep between two runs and the prevention of
+    Windows' sleep (continuous.KeepAwake).
     """
-    args = build_parser().parse_args(argv)
+    args = parse_arguments(argv)
     if args.demonstracao:
         return demonstration(args, now=now)
     open_session = scan.open_scan_session if open_session is None else open_session
     ctx = observe.Context(now=now, engine=engine)
     if monotonic is not None:
         ctx.monotonic = monotonic
+    if args.continuo:
+        from pocketautonomo import continuous  # it builds on this module
+
+        return continuous.run(args, ctx, open_session, read_line, sleep=sleep, keep_awake=keep_awake)
     runtime_dir = ctx.runtime_dir
     profile_dir = runtime_dir / observe.PROFILE_DIR_NAME
     selectors_path = runtime_dir / observe.SELECTORS_FILE_NAME
     scan_path = runtime_dir / scan.SCAN_SELECTORS_FILE_NAME
-    database = runtime_dir / DATABASE_NAME
-    orders = runtime_dir / ORDERS_NAME
-    progress = scan.ScanProgress()
-    lock = session = coordinator = broker = log = operator = quotes = None
+    run = Execution(args, ctx)
+    lock = session = None
     interrupted = False
     try:
         say(INTRO)
@@ -134,16 +146,8 @@ def main(argv=None, *, open_session=None, read_line=input, now=None, monotonic=N
             ctx.engine.get()  # a missing OCR stops here, before the browser opens
             observe.announce_ocr(ctx)
         lock = scan.ScanLock(runtime_dir / scan.LOCK_FILE_NAME)
-        coordinator = Coordinator(SqliteStore(database))
-        broker = PaperBroker(orders, args.horizon, ctx.now)
-        log = operation.OperationLog(new_csv_path(runtime_dir, CSV_PREFIX))
-        quotes = CycleQuotes(runtime_dir, warn)
-        operator = operation.Operator(
-            coordinator, broker, log, now=ctx.now, monotonic=ctx.monotonic, horizon=args.horizon,
-            gale_window=args.gale_window,
-        )
-        print_rules(args, database, orders)
-        operator.recover()
+        scan.warn_kept_pause(runtime_dir)
+        run.open()
         url = args.url if args.url is not None else observe.ask_url(read_line)
         scan.print_plan(url, args, profile_dir, selectors_path, scan_path)
         session = open_session(profile_dir)
@@ -156,47 +160,103 @@ def main(argv=None, *, open_session=None, read_line=input, now=None, monotonic=N
                 session, scan_path, favorites_selector, invalid, selectors, read_line, ctx
             )
         say(scan.HANDS_OFF)
-        state = scan.Scan(selectors, favorites_selector, args.load_timeout, progress)
-        state.hooks = OperationHooks(operator, state, ctx, quotes)
-        scan.run_scan(session, state, args, ctx)
-        code = scan.finish(progress)
-        if operator.busy():  # the window was closed during a cycle
+        run.visit(session, selectors, favorites_selector)
+        return run.finish()
+    except ConfigError as error:
+        warn(f"CONFIGURAÇÃO: {error}")
+        return EXIT_CONFIG
+    except STOPS as error:
+        warn(f"PARADA: {error}")
+        run.stopped()
+        return EXIT_FAILED
+    except KeyboardInterrupt:
+        interrupted = True
+        say(f"Interrompido por Ctrl+C: {scan.written_summary(run.progress)}.")
+        run.stopped()
+        return EXIT_INTERRUPTED
+    finally:
+        run.close_files()
+        observe.close_session(session, interrupted)
+        run.close_state()
+        if lock is not None:
+            lock.release()
+
+
+# What stops a run with exit code 1: the scan's safety stops, the browser, the files and the
+# operation's own stops. Ctrl+C is 130, and a configuration problem is 2.
+STOPS = (ObserverStopped, BrowserError, scan.ScanBusy, OSError, StorageError, CoordinatorError, OperationStopped)
+
+
+class Execution:
+    """One run of the simulated operation on the screen: its saved state, its files and its visits.
+
+    main() runs one. The continuous mode (continuous.py) runs one after the other through this
+    same class, so that each of them has every protection of a run: the saved state of the
+    coordinator and of the simulator reopened and recovered (Operator.recover) before any visit,
+    a decision that starts one cycle at most, a pending entry checked and never sent again, and
+    the PAUSA of the scan.
+    """
+
+    def __init__(self, args, ctx):
+        self.args = args
+        self.ctx = ctx
+        self.database = ctx.runtime_dir / DATABASE_NAME
+        self.orders = ctx.runtime_dir / ORDERS_NAME
+        self.progress = scan.ScanProgress()
+        self.coordinator = self.broker = self.log = self.operator = self.quotes = None
+        self.state = None  # the scan.Scan of the visits, once they start
+
+    def open(self, rules=True):
+        """Open the saved state and resolve what the last run left, before the browser opens."""
+        args, ctx = self.args, self.ctx
+        self.coordinator = Coordinator(SqliteStore(self.database))
+        self.broker = PaperBroker(self.orders, args.horizon, ctx.now)
+        self.log = operation.OperationLog(new_csv_path(ctx.runtime_dir, CSV_PREFIX))
+        self.quotes = CycleQuotes(ctx.runtime_dir, warn)
+        self.operator = operation.Operator(
+            self.coordinator, self.broker, self.log, now=ctx.now, monotonic=ctx.monotonic, horizon=args.horizon,
+            gale_window=args.gale_window,
+        )
+        if rules:
+            print_rules(args, self.database, self.orders)
+        self.operator.recover()
+
+    def visit(self, session, selectors, favorites_selector, prepare=None):
+        """The scan of the favorites, with the operation after each visit; prepare(state) may add to it."""
+        state = self.state = scan.Scan(selectors, favorites_selector, self.args.load_timeout, self.progress)
+        state.hooks = OperationHooks(self.operator, state, self.ctx, self.quotes)
+        if prepare is not None:
+            prepare(state)
+        scan.run_scan(session, state, self.args, self.ctx)
+
+    def finish(self):
+        """The exit code of visits that ended, with what the scan and the operation did."""
+        code = scan.finish(self.progress)
+        if self.operator.busy():  # the window was closed during a cycle
             warn(
                 "PARADA: a varredura terminou com um ciclo de operação aberto; o estado ficou gravado e"
                 " é conferido na próxima abertura, sem reenvio."
             )
             code = EXIT_FAILED
-        report(operator, log, database, orders, quotes)
+        report(self.operator, self.log, self.database, self.orders, self.quotes)
         return code
-    except ConfigError as error:
-        warn(f"CONFIGURAÇÃO: {error}")
-        return EXIT_CONFIG
-    except (
-        ObserverStopped, BrowserError, scan.ScanBusy, OSError, StorageError, CoordinatorError, OperationStopped,
-    ) as error:
-        warn(f"PARADA: {error}")
-        scan.report(progress)
-        scan.warn_pause(progress)
-        report(operator, log, database, orders, quotes)
-        return EXIT_FAILED
-    except KeyboardInterrupt:
-        interrupted = True
-        say(f"Interrompido por Ctrl+C: {scan.written_summary(progress)}.")
-        scan.report(progress)
-        scan.warn_pause(progress)
-        report(operator, log, database, orders, quotes)
-        return EXIT_INTERRUPTED
-    finally:
-        for closing in (progress.csv, progress.timings, log, quotes):
+
+    def stopped(self):
+        """What a run that stopped or was interrupted shows: the scan so far and the operation."""
+        scan.report(self.progress)
+        scan.warn_pause(self.progress)
+        report(self.operator, self.log, self.database, self.orders, self.quotes)
+
+    def close_files(self):
+        for closing in (self.progress.csv, self.progress.timings, self.log, self.quotes):
             if closing is not None:
                 closing.close()
-        observe.close_session(session, interrupted)
-        if coordinator is not None:
-            coordinator.close()  # also releases the database lock
-        if broker is not None:
-            broker.close()
-        if lock is not None:
-            lock.release()
+
+    def close_state(self):
+        if self.coordinator is not None:
+            self.coordinator.close()  # also releases the database lock
+        if self.broker is not None:
+            self.broker.close()
 
 
 def build_parser():
@@ -260,7 +320,26 @@ def build_parser():
         help="sem navegador: cenas com decisões e cotações ARTIFICIAIS e relógio simulado, em"
         " arquivos novos runtime/demonstracao-...; os resultados não entram na análise",
     )
+    parser.add_argument(
+        "--continuo",
+        action="store_true",
+        help="modo contínuo, até Ctrl+C ou até você fechar a janela do navegador: depois de uma falha do"
+        " navegador, da sessão desconectada ou de ciclos sem leitura completa, abre uma execução nova e espera"
+        " sozinho a tela de operações, com espera crescente e um limite de falhas seguidas; nunca recomeça"
+        " sozinho depois de uma PAUSA ou de uma parada por segurança. Grava runtime/continuo-*.log e"
+        " runtime/continuo-estado.json e, no Windows, impede a suspensão enquanto roda; não aceita --cycles",
+    )
     return parser
+
+
+def parse_arguments(argv):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.continuo and args.cycles is not None:
+        parser.error("--continuo roda até Ctrl+C e não aceita --cycles")
+    if args.continuo and args.demonstracao:
+        parser.error("--continuo não pode ser usado com --demonstracao")
+    return args
 
 
 def print_rules(args, database, orders):

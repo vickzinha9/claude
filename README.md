@@ -39,7 +39,7 @@ Rode todos os comandos abaixo na raiz do repositório, a pasta `claude`. No Wind
 
 No GitHub, o workflow [`.github/workflows/tests.yml`](.github/workflows/tests.yml) roda essa suíte e os dois exemplos finitos abaixo em Linux e Windows a cada push e pull request. As execuções ficam na [aba Actions](https://github.com/vickzinha9/claude/actions/workflows/tests.yml).
 
-Os testes do coletor em `tests/test_observe.py`, os da leitura visual em `tests/test_quote_reader.py`, os da varredura dos favoritos em `tests/test_scan.py` e os da preparação e dos lançadores em `tests/test_setup_observer.py` usam objetos falsos no lugar do navegador, do OCR, do `pip` e do `venv`, e imagens sintéticas de gráfico. Eles não precisam do Playwright nem do OCR. Os 4 testes de `PreparerOnWindowsTest`, o de `OpenImageOnWindowsTest`, o de `ScanLauncherOnWindowsTest`, o de `AnalysisLauncherOnWindowsTest` e o de `OperationLauncherOnWindowsTest` só rodam no Windows. Os da análise local CALL/PUT, em `tests/test_analysis.py`, usam séries sintéticas e só a biblioteca padrão. Os da operação simulada, em `tests/test_operation.py`, `tests/test_operate.py`, `tests/test_paper_broker.py` e `tests/test_coordinator_decisions.py`, usam o coordenador e o simulador de verdade, com relógio falso, decisões artificiais e a tela falsa da varredura. Dos 8 de `tests/test_observe_playwright.py`, 7 abrem um Chromium de verdade, sem janela, em páginas locais de teste, que não são a Pocket Option; quatro deles leem a cotação de um gráfico desenhado em canvas, com o OCR de verdade, dois varrem uma barra de favoritos de teste, com cliques de verdade, um deles com um favorito que não troca o ativo, e dois rodam o diagnóstico da captura. O oitavo confere a leitura de aquecimento do OCR de verdade. Sem o Playwright ou o OCR eles aparecem como `skipped`, a menos que a variável `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1` exista: aí falham, como o job de navegador do CI exige.
+Os testes do coletor em `tests/test_observe.py`, os da leitura visual em `tests/test_quote_reader.py`, os da varredura dos favoritos em `tests/test_scan.py` e os da preparação e dos lançadores em `tests/test_setup_observer.py` usam objetos falsos no lugar do navegador, do OCR, do `pip` e do `venv`, e imagens sintéticas de gráfico. Eles não precisam do Playwright nem do OCR. Os 4 testes de `PreparerOnWindowsTest`, o de `OpenImageOnWindowsTest`, o de `ScanLauncherOnWindowsTest`, o de `AnalysisLauncherOnWindowsTest`, o de `OperationLauncherOnWindowsTest`, o de `ContinuousLauncherOnWindowsTest` e o `test_the_real_call_on_windows`, da prevenção da suspensão, só rodam no Windows. Os do [modo contínuo](#modo-contínuo-da-operação-simulada), em `tests/test_continuous.py`, usam a tela falsa da varredura, com relógio falso e um navegador falso novo a cada execução. Os da análise local CALL/PUT, em `tests/test_analysis.py`, usam séries sintéticas e só a biblioteca padrão. Os da operação simulada, em `tests/test_operation.py`, `tests/test_operate.py`, `tests/test_paper_broker.py` e `tests/test_coordinator_decisions.py`, usam o coordenador e o simulador de verdade, com relógio falso, decisões artificiais e a tela falsa da varredura. Dos 10 de `tests/test_observe_playwright.py`, 9 abrem um Chromium de verdade, sem janela, em páginas locais de teste, que não são a Pocket Option; quatro deles leem a cotação de um gráfico desenhado em canvas, com o OCR de verdade, dois varrem uma barra de favoritos de teste, com cliques de verdade, um deles com um favorito que não troca o ativo, dois rodam o modo contínuo, com um navegador novo a cada execução, e dois rodam o diagnóstico da captura. O décimo confere a leitura de aquecimento do OCR de verdade. Sem o Playwright ou o OCR eles aparecem como `skipped`, a menos que a variável `POCKETAUTONOMO_REQUIRE_BROWSER_TESTS=1` exista: aí falham, como o job de navegador do CI exige.
 
 ## Simulação local
 
@@ -178,7 +178,7 @@ O CI roda numa máquina virtual do GitHub, com o `python` instalado pelo `setup-
 
 ### Windows: os lançadores
 
-Na raiz do projeto, a pasta `claude`, ficam cinco arquivos. Abra os dois primeiros nesta ordem, com dois cliques no Explorador de Arquivos ou pelo terminal (`.\preparar_windows.cmd` no PowerShell); o terceiro, `varrer_windows.cmd`, faz a [varredura dos favoritos](#varredura-dos-favoritos), o quarto, `analisar_windows.cmd`, mostra a [análise local CALL/PUT](#análise-local-callput) dos dados da varredura, e o quinto, `diagnosticar_windows.cmd`, faz o [diagnóstico da captura](#diagnóstico-da-captura). Os cinco entram sozinhos na pasta onde estão e esperam uma tecla no fim, para a janela não fechar antes de você ler.
+Na raiz do projeto, a pasta `claude`, ficam cinco arquivos. Abra os dois primeiros nesta ordem, com dois cliques no Explorador de Arquivos ou pelo terminal (`.\preparar_windows.cmd` no PowerShell); o terceiro, `varrer_windows.cmd`, faz a [varredura dos favoritos](#varredura-dos-favoritos), o quarto, `analisar_windows.cmd`, mostra a [análise local CALL/PUT](#análise-local-callput) dos dados da varredura, e o quinto, `diagnosticar_windows.cmd`, faz o [diagnóstico da captura](#diagnóstico-da-captura). Os cinco entram sozinhos na pasta onde estão e esperam uma tecla no fim, para a janela não fechar antes de você ler. O `operar_windows.cmd` e o `continuo_windows.cmd`, que funcionam do mesmo jeito, estão nas seções da [operação simulada](#operação-simulada-análise--coordenador--executor-simulado) e do [modo contínuo](#modo-contínuo-da-operação-simulada).
 
 1. **`preparar_windows.cmd`** procura um Python 3.11 ou mais novo, de 64 bits, nesta ordem: `py -3.12`, `py -3` e `python`. Um candidato só é aceito se o teste dele terminar com código exatamente 0. Um código negativo, como o `-1610612730` que o `py` devolve quando falta o Python pedido, também é falha: o lançador mostra `py -3.12: nao serve (codigo -1610612730).` e tenta o próximo. Com o Python escolhido, ele roda `python -m pocketautonomo.setup_observer`, que:
    - cria `.venv` ou reutiliza a que já existe, se o Python dela servir;
@@ -503,6 +503,53 @@ As leituras do ativo do ciclo que passam nas conferências da varredura (ativo a
 | 2 | argumento ou configuração inválidos |
 | 130 | Ctrl+C; uma pendência fica gravada e é conferida na próxima abertura |
 
+## Modo contínuo da operação simulada
+
+`continuo_windows.cmd` roda `python -m pocketautonomo.operate --continuo` com o Python de `.venv`: a [operação simulada](#operação-simulada-análise--coordenador--executor-simulado), uma execução depois da outra, até Ctrl+C ou até você fechar a janela do navegador. **Nenhuma ordem vai para a Pocket Option e nenhum dinheiro é movimentado.** Cada execução tem as regras e proteções do `operar_windows.cmd`: o estado gravado é reaberto e conferido antes de qualquer visita, uma pendência é conferida no simulador sem reenvio, uma decisão inicia um ciclo no máximo, e os ciclos seguem R$ 5, R$ 10, R$ 20 e R$ 40, no mesmo ativo e direção, só avançando com LOSS confirmada, encerrando no WIN e nunca com quinta entrada.
+
+```bat
+continuo_windows.cmd
+continuo_windows.cmd --configure
+continuo_windows.cmd --interval 60
+```
+
+Na primeira execução, cole o link, faça o login e pressione Enter, como no `operar_windows.cmd`; com `--configure`, confira também os favoritos. Depois disso, não use a janela do navegador.
+
+| O que aconteceu | O que o modo contínuo faz |
+|---|---|
+| falha do navegador (o Chromium não abriu, ou uma espera dele falhou) | abre uma execução nova, com um navegador novo e a mesma pasta `runtime\` |
+| 2 ciclos seguidos sem favoritos para visitar (sessão desconectada, página quebrada) | abre uma execução nova |
+| 10 ciclos seguidos sem nenhuma leitura completa | abre uma execução nova |
+| na espera da tela, a página fora de pocketoption.com por 10 min (não carregou) | abre uma execução nova |
+| 5 execuções seguidas sem nenhuma leitura completa, ou mais de 6 execuções novas em 1 hora | para, com código 1 |
+| troca de ativo não confirmada (PAUSA) | para logo depois da visita, sem outro clique, e grava a PAUSA |
+| a execução terminou entre um clique e a confirmação da troca, de qualquer jeito (Ctrl+C, falha do navegador, janela fechada, queda de energia) | grava uma PAUSA e para |
+| parada por segurança da varredura, falha de gravação, resposta fora das regras, configuração inválida | para |
+| Ctrl+C ou a janela do navegador fechada por você | para |
+
+**Espera entre execuções:** 15 s depois de uma execução com leitura completa; depois de execuções sem nenhuma, 30, 60, 120 e 300 s. O navegador fica fechado durante a espera.
+
+**Espera pela sessão:** cada execução nova abre o navegador e espera sozinha: só lê a página, a cada 5 s, sem clicar, e só em pocketoption.com, até a lista de favoritos e o ativo aparecerem por 30 s seguidos. Se a sessão caiu, faça o login na janela; enquanto a página estiver em pocketoption.com, a espera não tem limite. O terminal mostra `AGUARDANDO A SESSÃO`, o motivo, e `Sessão pronta` quando a varredura recomeça.
+
+**PAUSA gravada:** depois de uma troca não confirmada, o gráfico pode ser de outro ativo, e nem a página carregada de novo nem um navegador novo comprovam a qual ativo ele pertence. Por isso a PAUSA fica em `runtime\continuo-estado.json`, e o modo contínuo não recomeça sozinho. Na próxima abertura, depois do login, ele mostra a PAUSA, o último clique e a lista de favoritos de agora, e só começa se você digitar `LIBERAR`; Enter sai sem clicar e sem mudar nada. Antes de liberar, confira na janela que o gráfico é o do ativo mostrado: o programa não consegue verificar isso. Se o favorito continuar sem trocar, a PAUSA volta na primeira visita dele; tirá-lo dos favoritos evita isso. O `varrer_windows.cmd` e o `operar_windows.cmd` só avisam que há uma PAUSA gravada e começam sem ela, como sempre.
+
+**Último clique:** fica em `runtime\continuo-estado.json` até uma leitura da lista de favoritos mostrar que ele não tirou o favorito da lista. A execução seguinte, também depois de reabrir, confere isso antes de clicar: se o favorito sumiu e a lista diminuiu, a varredura para, sem clicar. Se foi você quem mudou a lista, abra com `--configure` e confirme a lista, o que apaga o registro.
+
+**Clique que falha:** um clique que termina com erro do navegador pode ter chegado à página. Ele conta como clique: a troca precisa ser confirmada pelo campo do ativo e, sem confirmação, a visita é `não confirmada`, com PAUSA. Isso vale também para o `varrer_windows.cmd` e o `operar_windows.cmd`.
+
+**Log:** tudo o que aparece no terminal vai também para `runtime\continuo-<data>-<hora>-<sufixo>.log`, cada linha com o relógio deste computador, em UTC: `|` na saída, `!` nos avisos e `?` nas perguntas. As respostas não são gravadas, porque o link pode ter dados da sua sessão. Um erro inesperado também vai para o log. A cada 20 MB, o log continua num arquivo novo, e nenhum é apagado; uma falha ao gravá-lo só gera um aviso.
+
+**Suspensão do Windows:** enquanto o modo contínuo roda, o Windows não suspende nem desliga a tela por falta de uso (`SetThreadExecutionState`); ao terminar, valem de novo as configurações de energia, e nenhuma configuração do sistema é alterada. Isso não impede que você bloqueie a tela, nem a tampa do notebook, o botão de energia ou um reinício por atualização.
+
+`--continuo` aceita as outras opções do `operar_windows.cmd` (`--configure`, `--interval`, `--load-timeout`, `--horizon`, `--gale-window`, `--url`), mas não `--cycles` nem `--demonstracao`. Só um modo contínuo, varredura ou operação roda por vez na mesma pasta.
+
+| Código de `continuo_windows.cmd` | Situação |
+|---|---|
+| 0 | você fechou a janela do navegador, sem PAUSA, sem ciclo aberto e com ao menos uma linha com dados na última execução |
+| 1 | PAUSA, parada por segurança ou por falha de gravação, falhas ou execuções novas demais, ou a janela fechada com um ciclo aberto ou sem dados; o estado fica preservado |
+| 2 | argumento ou configuração inválidos |
+| 130 | Ctrl+C |
+
 ## Situação
 
-O [STATUS.md](STATUS.md) descreve o que já funciona, as decisões em vigor e o que falta: a validação da varredura na plataforma real, dados suficientes para a análise CALL/PUT e o executor real (item 28).
+O [STATUS.md](STATUS.md) descreve o que já funciona, as decisões em vigor e o que falta: a validação da varredura e do modo contínuo na plataforma real (itens 23 e 36), dados suficientes para a análise CALL/PUT e o executor real (item 28).

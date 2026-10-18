@@ -1298,6 +1298,58 @@ class SafetyTest(ScanTestCase):
         self.assertIn("o último favorito clicado sumiu da lista de favoritos", self.err)
         self.assertEqual(self.session.clicked(), [1])
 
+    def test_a_click_that_failed_with_an_error_counts_as_a_click(self):
+        platform = FakePlatform()
+        click = FakeScanSession.click_favorite
+
+        def click_then_fail(session, selector, index, check):
+            click(session, selector, index, check)
+            if index == 1:
+                del platform.items[1]  # the click reached the page and took the favorite out of the bar
+                raise scan.ClickUncertain("TimeoutError: Timeout 5000ms exceeded.")
+            return None
+
+        with mock.patch.object(FakeScanSession, "click_favorite", click_then_fail):
+            code = self.run_scan("--cycles", "1", platform=platform)
+        self.assertEqual(code, 1)
+        self.assertIn("o último favorito clicado sumiu da lista de favoritos", self.err)
+        self.assertEqual([row["switch"] for row in self.rows()], [scan.ALREADY, scan.CONFIRMED])  # it did switch
+        self.assertEqual(self.session.clicked(), [1])  # AUD/CAD OTC was never clicked
+
+    def test_a_failed_click_whose_switch_is_never_confirmed_starts_the_pause(self):
+        def fail(session, selector, index, check):
+            session.calls.append(("refused", index, "falha simulada"))
+            raise scan.ClickUncertain("TimeoutError: Timeout 5000ms exceeded.")
+
+        with mock.patch.object(FakeScanSession, "click_favorite", fail):
+            code = self.run_scan("--cycles", "1", "--load-timeout", "5", platform=FakePlatform())
+        self.assertEqual(code, 1, self.out)
+        rows = self.rows()
+        self.assertEqual(rows[1]["switch"], scan.NOT_CONFIRMED)
+        self.assertIn(
+            "depois de um clique que falhou com um erro do navegador (TimeoutError: Timeout 5000ms exceeded.) e pode"
+            " ter chegado à página",
+            rows[1]["asset_status"],
+        )
+        self.assertTrue(rows[1]["quote_association"].startswith("PAUSA desde a troca não confirmada para GBP/USD OTC"))
+        self.assertIn("PAUSA: a troca para GBP/USD OTC no ciclo 1 não foi confirmada", self.err)
+
+    def test_a_favorite_that_cannot_be_read_before_the_click_is_not_clicked(self):
+        click = FakeScanSession.click_favorite
+
+        def unreadable(session, selector, index, check):
+            if index == 1:
+                raise observe.ReadError("Error: elemento sumiu antes da leitura")
+            return click(session, selector, index, check)
+
+        with mock.patch.object(FakeScanSession, "click_favorite", unreadable):
+            code = self.run_scan("--cycles", "1", platform=FakePlatform())
+        self.assertEqual(code, 0, self.err)
+        rows = self.rows()
+        self.assertEqual([row["switch"] for row in rows], [scan.ALREADY, scan.NOT_CLICKED, scan.CONFIRMED])
+        self.assertIn("a leitura do favorito antes do clique falhou (Error: elemento sumiu antes da leitura)", rows[1]["asset_status"])
+        self.assertEqual(self.session.clicked(), [2])  # no PAUSA: the scan went on to AUD/CAD OTC
+
     def test_a_page_outside_pocketoption_is_neither_read_nor_clicked(self):
         platform = FakePlatform()
         left = []

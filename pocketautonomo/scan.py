@@ -47,9 +47,19 @@ of that visit's line and of every later one are withheld, with the reason in quo
 so that nothing enters the analysis or a decision, and the run ends with exit code 1 (130
 after Ctrl+C), with the PAUSA warning again however it ends. Resuming
 needs a source that identifies the asset in the chart itself, which the program does not have
-(DEPENDENCY); a new run loads the page again and starts without the PAUSA. Only one
+(DEPENDENCY); a new run that you start loads the page again and starts without the PAUSA.
+The continuous mode of the simulated operation (continuous.py) keeps it instead: it ends the
+run right after that visit (Scan.pause_ends_run) and never starts another one by itself; a run
+started without it only warns that the continuous mode keeps one (warn_kept_pause). A click
+that failed with an error of the browser may still have reached the page: it counts as a
+click, and its switch has to be confirmed as any other. Only one
 navigation runs at a time: the next click waits for the end of the current visit, and
 runtime/scan.lock keeps a second scan from starting.
+
+The continuous mode also gives the scan a journal of the last click (Scan.journal), kept
+outside the run, so that a run that ends between a click and the next reading of the list
+still has that click checked, and a watch called at the end of each cycle (Scan.after_cycle).
+Without them, nothing changes.
 
 Each visit is written as soon as it ends to a new CSV file in runtime/, one line per
 favorite per cycle, with observe's columns and the scan's own. payout_eligible is sim when
@@ -157,6 +167,15 @@ DEPENDENCY = (
     " atributo do símbolo do gráfico conferido por você, que o programa ainda não tem; por isso a PAUSA"
     " vale até o fim desta execução, e a próxima, com a página carregada de novo, começa sem ela"
 )
+# The same, in the continuous mode (Pause.ends_run): there, the PAUSA is kept for the next runs.
+CONTINUOUS_DEPENDENCY = (
+    "Retomar exige uma fonte que identifique o ativo no próprio gráfico, por exemplo um rótulo ou"
+    " atributo do símbolo do gráfico conferido por você, que o programa ainda não tem; por isso, no modo"
+    " contínuo, a PAUSA fica gravada, e nenhuma execução nova começa sozinha, nem com a página carregada de"
+    " novo"
+)
+# The continuous mode keeps its PAUSA here (continuous.STATE_FILE_NAME); a run without it only warns.
+CONTINUOUS_STATE_FILE_NAME = "continuo-estado.json"
 
 # The value of the switch column.
 ALREADY = "já selecionado"
@@ -267,6 +286,10 @@ class ScanBusy(Exception):
 
 class WindowClosed(Exception):
     """The browser window was closed: the scan ends with what it recorded."""
+
+
+class ClickUncertain(Exception):
+    """The click on a favorite failed with an error of the browser: it may still have reached the page."""
 
 
 @dataclass(frozen=True)
@@ -459,6 +482,20 @@ class Scan:
     # next visit waits for them, which is how the simulated operation (operate.py) holds
     # the navigation during a cycle.
     hooks: object = None
+    # The continuous mode (continuous.py) only; without it, all three stay as they are.
+    # journal keeps the last click outside the run: journal.clicking(target, total) right before
+    # the click, journal.not_clicked() when the check of the element refused it, journal.confirmed()
+    # once the asset field confirmed the switch, and journal.checked() once a later list showed
+    # that the click removed no favorite.
+    journal: object = None
+    # after_cycle(cycle, favorites, complete), at the end of each cycle, with the favorites listed in
+    # it and how many complete readings it had: None goes on, and an exception ends the run, raised
+    # once the cycle's summary is shown, without the wait for the next cycle.
+    after_cycle: object = None
+    # The PAUSA ends the run right after the visit that started it (the continuous mode's hooks
+    # end it); only the text of the PAUSA changes here.
+    pause_ends_run: bool = False
+    click_error: object = None  # the error of the click of this visit, when the click itself failed (click)
 
     @property
     def sources(self):
@@ -498,6 +535,7 @@ class Pause:
 
     asset: str  # the favorite whose switch was not confirmed
     cycle: int  # the cycle of that visit
+    ends_run: bool = False  # the continuous mode: the run ends right after that visit (Scan.pause_ends_run)
 
     @property
     def note(self):
@@ -523,13 +561,39 @@ class Pause:
     @property
     def reason(self):
         """Why, with what resuming needs: said when the PAUSA starts and at the end of the run."""
+        if self.ends_run:
+            after = f"A execução termina aqui, sem outro clique. {CONTINUOUS_DEPENDENCY}"
+        else:
+            after = f"A navegação continua só para o diagnóstico. {DEPENDENCY}"
         return (
             f"a troca para {self.asset} no ciclo {self.cycle} não foi confirmada, e esse clique pode mudar o nome"
             " do ativo e o gráfico com atraso, durante outra visita. O nome do ativo e a imagem do gráfico não"
             " permitem verificar a qual ativo o gráfico pertence, e nome certo, tempo transcorrido ou cotações"
             " estáveis não comprovam isso: a partir daqui, nenhuma cotação ou payout lido entra na análise ou em"
-            f" decisões. A navegação continua só para o diagnóstico. {DEPENDENCY}"
+            f" decisões. {after}"
         )
+
+
+def warn_kept_pause(runtime_dir):
+    """A run started without the continuous mode starts without its PAUSA, as always: say that one is kept.
+
+    Only reads runtime/continuo-estado.json, and only warns: an unreadable file is left to the
+    continuous mode, which refuses to start with it.
+    """
+    try:
+        data = json.loads((runtime_dir / CONTINUOUS_STATE_FILE_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    pause = data.get("pausa") if isinstance(data, dict) else None
+    if not isinstance(pause, dict):
+        return False
+    warn(
+        f"AVISO: o modo contínuo guarda uma PAUSA em {runtime_dir / CONTINUOUS_STATE_FILE_NAME} (troca para"
+        f" {pause.get('ativo') or '?'}, desde {pause.get('desde_utc') or '?'}, relógio local, UTC). Esta execução,"
+        " aberta por você sem o modo contínuo, começa sem ela, como sempre: o gráfico de um clique anterior não"
+        " foi verificado. A PAUSA continua gravada, e o modo contínuo só recomeça depois de você liberá-la."
+    )
+    return True
 
 
 class ScanLock:
@@ -598,6 +662,7 @@ def main(argv=None, *, open_session=None, read_line=input, now=None, monotonic=N
             ctx.engine.get()  # a missing OCR stops here, before the browser opens
             observe.announce_ocr(ctx)
         lock = ScanLock(runtime_dir / LOCK_FILE_NAME)
+        warn_kept_pause(runtime_dir)
         url = args.url
         if url is None:
             url = observe.ask_url(read_line)
@@ -1100,9 +1165,12 @@ def run_scan(session, scan, args, ctx):
                 return
         streak = 0 if complete else streak + 1
         line = cycle_summary(cycle, visits, ctx.elapsed_ms(start) / 1000)
-        if args.cycles is not None and cycle >= args.cycles:
+        ending = scan.after_cycle(cycle, favorites, complete) if scan.after_cycle is not None else None
+        if ending is not None or (args.cycles is not None and cycle >= args.cycles):
             say(line)
             say(analysis_summary(scan))
+            if ending is not None:
+                raise ending  # the continuous mode ends the run here, before the wait for the next cycle
             return
         pause = pause_seconds(args.interval, streak)
         if streak:
@@ -1143,6 +1211,8 @@ def checked_favorites(session, scan):
                 " varredura parou, para não mudar mais nada na sua lista; confira a tela"
             )
     if favorites.problem is None:
+        if scan.last_clicked is not None and scan.journal is not None:
+            scan.journal.checked()  # the list shows that the last click removed no favorite
         scan.last_clicked = None
     return favorites
 
@@ -1193,8 +1263,13 @@ def visit_favorite(session, scan, favorite, cycle, total, ctx, recheck=False):
             shown = reading.value if reading.available else f"INDISPONÍVEL ({reading.reason})"
             seen[shown] = seen.get(shown, 0) + 1
             check = ", na nova verificação do favorito em espera" if recheck else ""
+            failed = (
+                f", depois de um clique que falhou com um erro do navegador ({scan.click_error}) e pode ter chegado à página"
+                if scan.click_error
+                else ""
+            )
             reason = (
-                f"a troca para {favorite.name} não foi confirmada em {seconds_text(scan.load_timeout)} s{check}:"
+                f"a troca para {favorite.name} não foi confirmada em {seconds_text(scan.load_timeout)} s{check}{failed}:"
                 f" o ativo na tela continuou {shown}"
             )
             diagnostic = switch_diagnostic(session, scan, favorite, seen, reading)
@@ -1203,6 +1278,8 @@ def visit_favorite(session, scan, favorite, cycle, total, ctx, recheck=False):
             )
             return replace(visit, diagnostic=diagnostic)
         switch = CONFIRMED
+        if scan.journal is not None:
+            scan.journal.confirmed()
         session.wait(SETTLE_SECONDS)
     switched = switch == CONFIRMED
     moment = TIMING_AFTER_SWITCH if switched else TIMING_NO_SWITCH
@@ -1298,8 +1375,16 @@ def check_window(session):
 
 
 def click(session, scan, favorite):
-    """None after clicking favorite, or the reason it was not clicked."""
+    """None after clicking favorite, or the reason it was not clicked.
+
+    A click that failed with an error of the browser (ClickUncertain) may still have reached
+    the page, so it counts as a click: the asset field has to confirm its switch, and without
+    that confirmation the visit is a switch not confirmed, which starts the PAUSA; the next
+    list is checked for it too. scan.click_error keeps that error for the reason of the visit.
+    A failed reading of the element before the click leaves it not clicked.
+    """
     ensure_on_platform(session)
+    scan.click_error = None
     favorites = checked_favorites(session, scan)
     if favorites.problem is not None:
         return f"a lista de favoritos não pôde ser usada agora ({favorites.problem})"
@@ -1307,14 +1392,21 @@ def click(session, scan, favorite):
     if not matches:
         return f"{favorite.name} não está mais na lista de favoritos"
     target = matches[0]
+    if scan.journal is not None:
+        scan.journal.clicking(target, favorites.total)  # kept before the click: a run that ends right after it knows
     try:
         problem = session.click_favorite(scan.favorites_selector, target.index, click_check(target))
+    except ClickUncertain as error:
+        scan.click_error = str(error)
+        problem = None
     except ReadError as error:
-        return f"o clique falhou ({error})"
+        problem = f"a leitura do favorito antes do clique falhou ({error})"
     if problem is None:
         scan.progress.clicks += 1
         scan.last_clicked = (target.key, favorites.total)
         scan.last_target = (target, favorites.total)
+    elif scan.journal is not None:
+        scan.journal.not_clicked()  # the element was refused, or could not be read, before any click
     return problem
 
 
@@ -1589,7 +1681,7 @@ def with_pause(scan, visit):
     if progress.paused is None:
         if visit.switch != NOT_CONFIRMED:
             return visit
-        progress.paused = Pause(visit.favorite.name, visit.cycle)
+        progress.paused = Pause(visit.favorite.name, visit.cycle, scan.pause_ends_run)
     pause = progress.paused
     readings = visit.observation.readings
     if readings["price"].available or readings["payout"].available:
@@ -2105,8 +2197,10 @@ class ScanSession(observe.PlaywrightSession):
     def click_favorite(self, selector, index, check):
         """Click the element at index of selector if check accepts it; None, or check's reason.
 
-        check receives the FavoriteItem read right before the click. A click that opens
-        another tab or window stops the scan, so that only one navigation runs.
+        check receives the FavoriteItem read right before the click. A failed reading of the
+        element, before the click, raises ReadError: nothing was clicked. A failure of the click
+        itself raises ClickUncertain, because the click may still have reached the page. A click
+        that opens another tab or window stops the scan, so that only one navigation runs.
         """
         try:
             element = self._page.locator(selector).nth(index)
@@ -2120,14 +2214,17 @@ class ScanSession(observe.PlaywrightSession):
                 box["height"] if box else 0.0,
                 self._form_fields(element),
             )
-            problem = check(item)
-            if problem is not None:
-                return problem
-            pages = len(self._context.pages)
-            element.click(timeout=CLICK_TIMEOUT_MS)
-            opened = len(self._context.pages) - pages
         except self._error_type as error:
             raise ReadError(describe(error)) from error
+        problem = check(item)
+        if problem is not None:
+            return problem
+        pages = len(self._context.pages)
+        try:
+            element.click(timeout=CLICK_TIMEOUT_MS)
+        except self._error_type as error:
+            raise ClickUncertain(describe(error)) from error
+        opened = len(self._context.pages) - pages
         if opened > 0:
             raise ObserverStopped(
                 "o clique no favorito abriu outra aba ou janela; a varredura parou, para manter"
