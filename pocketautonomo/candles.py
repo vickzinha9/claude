@@ -98,7 +98,10 @@ MARKER_TOLERANCE = 2.5
 AXIS_CONTRAST = 48  # smallest difference per channel between the axis text and the background
 TEXT_HEIGHT = (5.0, 24.0)  # CSS pixels: the height of a line of the axis
 LABEL_REACH = 24.0  # CSS pixels: the labels of the axis are looked for from this far left of the marker
-EDGE_ALPHA = 0.1  # a pixel with this much of a candle color over the background, or more, is a candle's, not text
+# A pixel with this much of a candle color over the background, or more, is a candle's and not text, when it
+# lies that close to the blend: its distance to the blend is at most OFF_AXIS times its share. Near the
+# background every color is a few levels from every blend, and the faint edges of gray digits are no candle.
+EDGE_ALPHA = 0.15
 LINE_GAP = 8.0  # CSS pixels: glyphs this close side by side, at the same height, are one line of text
 MAX_TEXT_RUN = 16.0  # CSS pixels: a longer run of text pixels in a row is a line drawn across the axis
 MIN_TEXT_RATIO = 1.5  # a line of text narrower than this many times its height is not a price
@@ -469,7 +472,7 @@ def read_axis(image, scale, x0, skip, engine, candle_colors=()):
     def measure(color):
         for base in candle_colors:
             share, off = blend_share(color, base, background)
-            if share >= EDGE_ALPHA and off <= OFF_AXIS:
+            if share >= EDGE_ALPHA and off <= OFF_AXIS * min(1.0, share):
                 return -1  # a candle's pixel, never text
         return max(abs(color[0] - background[0]), abs(color[1] - background[1]), abs(color[2] - background[2]))
 
@@ -500,6 +503,8 @@ def read_axis(image, scale, x0, skip, engine, candle_colors=()):
             if y - start > tallest:
                 for row in range(start, y):
                     mask[row * width + x] = _REMOVED
+    # A line of the chart drawn across these columns comes in from their left edge or reaches the right one,
+    # or crosses most of them; a run of text, even of digits touching each other, does neither.
     longest = MAX_TEXT_RUN * scale
     runs = []
     for y in range(height):
@@ -511,8 +516,8 @@ def read_axis(image, scale, x0, skip, engine, candle_colors=()):
             start = x
             while x < width and mask[base + x] == _TEXT:
                 x += 1
-            if x - start > longest:
-                mask[base + start:base + x] = bytes([_REMOVED]) * (x - start)  # a line drawn across the axis
+            if x - start > longest and (start == 0 or x == width or x - start > 0.75 * width):
+                mask[base + start:base + x] = bytes([_REMOVED]) * (x - start)
             else:
                 runs.append((y, start, x))
     groups = _text_lines_of(_glyphs(runs), LINE_GAP * scale, round(LINE_WIDTH * scale) + 1)

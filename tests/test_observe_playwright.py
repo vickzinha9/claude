@@ -738,6 +738,19 @@ class RealContinuousTest(unittest.TestCase):
         self.assertEqual(json.loads((self.runtime / continuous.STATE_FILE_NAME).read_text(encoding="utf-8"))["pausa"], state["pausa"])
 
 
+def scripted(answers, out):
+    """read_line giving answers in order; one question more fails with what the program printed to out."""
+    pending = iter(answers)
+
+    def read_line(prompt=""):
+        try:
+            return next(pending)
+        except StopIteration:
+            raise AssertionError(f"pergunta inesperada {prompt!r}; a saída até aqui:\n{out.getvalue()[-6000:]}") from None
+
+    return read_line
+
+
 CANDLE_URL = "https://observe.test/velas/?ssid=SEGREDO"
 # ARTIFICIAL candles (open, high, low, close), oldest first; the last one is forming. They are drawn
 # by the page below, which is not the Pocket Option, and say nothing about any market.
@@ -835,13 +848,12 @@ class RealChartTest(unittest.TestCase):
         from pocketautonomo import candles, chart, chart_analysis
 
         moments = iter(datetime(2026, 10, 18, 12, 0, 20, tzinfo=timezone.utc) + timedelta(milliseconds=10 * n) for n in range(10**6))
-        answers = iter(["", "60", ""])  # Enter after the login, the period, accept the reading
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = chart.main(
                 ["--url", CANDLE_URL, "--configure", "--count", "2", "--interval", "1"],
                 open_session=self.open_session,
-                read_line=lambda prompt="": next(answers),
+                read_line=scripted(["", "60", ""], out),  # Enter after the login, the period, accept the reading
                 now=lambda: next(moments),
                 show_image=lambda path: None,
             )
@@ -870,13 +882,12 @@ class RealChartTest(unittest.TestCase):
         (self.runtime / observe.SELECTORS_FILE_NAME).write_text(json.dumps(sources), encoding="utf-8")
         self.page = HANGING_PAGE.replace("__BARS__", json.dumps(HANGING_BARS))
         moments = iter(datetime(2026, 10, 18, 12, 0, 20, tzinfo=timezone.utc) + timedelta(milliseconds=10 * n) for n in range(10**6))
-        answers = iter(["", "60", ""])  # Enter after the login, the period, accept the reading
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = chart.main(
                 ["--url", CANDLE_URL, "--configure", "--count", "1"],
                 open_session=self.open_session,
-                read_line=lambda prompt="": next(answers),
+                read_line=scripted(["", "60", ""], out),  # Enter after the login, the period, accept the reading
                 now=lambda: next(moments),
                 show_image=lambda path: None,
             )
@@ -987,8 +998,8 @@ const last = BARS[BARS.length - 1][3], y = row(last);
 p.fillStyle = "rgba(74,118,168,0.8)";
 for (let x = 0; x < AXIS; x += 6) p.fillRect(x, y, 4, 1);
 p.fillRect(AXIS + 12, y, 55, 23);
-p.fillStyle = "#ffffff"; p.fillText(last.toFixed(3), AXIS + 16, y + 7);
-p.font = "9px Arial"; p.fillText("00:42", AXIS + 16, y + 17);
+p.fillStyle = "#ffffff"; p.font = "12px Arial"; p.fillText(last.toFixed(3), AXIS + 15, y + 7);
+p.font = "9px Arial"; p.fillText("00:42", AXIS + 15, y + 18);
 </script>
 </body></html>
 """
