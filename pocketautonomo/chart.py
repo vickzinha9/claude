@@ -21,7 +21,12 @@ operation and analisar_windows.cmd find them.
 the down candles, asks the period of each candle, reads the candles with that calibration and
 shows them numbered on a new image, runtime/velas-previa-<data>-<hora>-<sufixo>.png, beside the
 labels of the axis read by the OCR and the last candles' prices. Nothing is saved before you
-accept a reading that worked; the calibration goes to runtime/chart-candles.json.
+accept a reading that worked; the calibration goes to runtime/chart-candles.json. Every reading
+of the calibration also shows its diagnosis (candles.geometry_lines): where the marker, each line
+of text of the axis, the price line and the close of the forming candle are, in the pixels of the
+capture, and how far the labels put the marker's quote from its row in the chart. A reading that
+fails saves the capture as it is, with a ruler on its right that marks those rows, to a new
+runtime/velas-diagnostico-<data>-<hora>-<sufixo>.png.
 
 Exit codes: 0 with at least one usable reading of the candles, 1 without any or after a failure, 2
 for invalid arguments or configuration, and 130 after Ctrl+C.
@@ -51,6 +56,7 @@ from pocketautonomo.observe import (
 DEFAULT_INTERVAL = 5.0
 DEFAULT_PERIOD = 60
 PREVIEW_PREFIX = "velas-previa"
+DIAGNOSTIC_PREFIX = "velas-diagnostico"  # the capture of a reading that failed in the calibration
 CONFIGURATION_MOMENT = "durante a calibração das velas; nada foi gravado"
 INTRO = (
     "LEITURA DO GRÁFICO do PocketAutonomo: lê as velas do ativo que está na tela, sem clicar, sem digitar e sem enviar"
@@ -228,14 +234,17 @@ def configure(session, selectors, current, read_line, ctx):
             colors, reason = (None, f"o marcador da cotação não foi achado: {reason}") if box is None else candles.detect_colors(image, box.x0)
             if colors is None:
                 say(f"  As cores das velas não foram achadas: {reason}.")
+                save_diagnostic(ctx, image, None, read_line)
             else:
                 model = candles.CandleModel(colors[0], colors[1], period)
                 reading = candles.read_candles(image, scale, model, source.marker, ctx.engine.get())
-                for line in preview_lines(model, reading):
+                for line in preview_lines(model, reading) + candles.geometry_lines(reading):
                     say(line)
                 if reading.available:
                     boxes = [(index if index < 6 else "", candle.box()) for index, candle in zip(reading.indices, reading.candles)]
                     observe.save_preview(ctx, PREVIEW_PREFIX, image, boxes, read_line, "Velas lidas, numeradas da que se forma (0) para trás")
+                else:
+                    save_diagnostic(ctx, image, reading, read_line)
         if reading is not None and reading.available:
             answer = ask(
                 read_line,
@@ -252,6 +261,25 @@ def configure(session, selectors, current, read_line, ctx):
     candles.save_calibration(path, model)
     say(f"Calibração das velas gravada em {path}.")
     return model
+
+
+def save_diagnostic(ctx, image, reading, read_line):
+    """Save the capture of a reading that failed, with the ruler of the rows found, and say how to read it.
+
+    reading is None when the colors of the candles were not found: the ruler then marks nothing.
+    """
+    title = (
+        "Imagem de diagnóstico, a captura sem marcas e uma régua à direita" if reading is not None
+        else "Imagem de diagnóstico, a captura sem marcas (nada foi achado para marcar)"
+    )
+    path = observe.save_preview(ctx, DIAGNOSTIC_PREFIX, image, [], read_line, title, data=candles.diagnostic_png(image, reading))
+    if path is None or path == observe.PREVIEW_GIVE_UP:
+        return
+    if reading is not None:
+        say(f"  Na imagem, a {candles.RULER_LEGEND}.")
+        say("  Para investigar a falha, envie essa imagem e as linhas do diagnóstico acima; não mostre dados seus nela.")
+    else:
+        say("  Para investigar a falha, envie essa imagem e o motivo acima; não mostre dados seus nela.")
 
 
 def preview_lines(model, reading):

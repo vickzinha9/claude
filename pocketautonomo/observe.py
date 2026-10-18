@@ -1604,21 +1604,23 @@ def new_preview_path(runtime_dir, prefix):
             return path
 
 
-def write_preview(ctx, prefix, image, labelled_boxes):
+def write_preview(ctx, prefix, image, labelled_boxes, data=None):
     """Write a preview PNG to a new file in runtime/ and return its path.
 
     Each image gets a new name and is created with "x", so no file is ever overwritten: an
     earlier image may still be open in a viewer, and on Windows a file open there cannot be
-    truncated. The capture stays out of every other file.
+    truncated. The capture stays out of every other file. data, when given, is the PNG
+    itself, written instead of the image with its boxes.
     """
-    data = quote_reader.annotated_png(image, labelled_boxes)
+    if data is None:
+        data = quote_reader.annotated_png(image, labelled_boxes)
     path = new_preview_path(ctx.runtime_dir, prefix)
     with open(path, "xb") as file:
         file.write(data)
     return path
 
 
-def save_preview(ctx, prefix, image, labelled_boxes, read_line, title):
+def save_preview(ctx, prefix, image, labelled_boxes, read_line, title, data=None):
     """Write and open a preview image; PREVIEW_GIVE_UP, None without the image, or the path.
 
     A failure to write it is reported with its cause and lets you try again, go on without
@@ -1626,7 +1628,7 @@ def save_preview(ctx, prefix, image, labelled_boxes, read_line, title):
     """
     while True:
         try:
-            path = write_preview(ctx, prefix, image, labelled_boxes)
+            path = write_preview(ctx, prefix, image, labelled_boxes, data)
         except OSError as error:
             warn(
                 f"AVISO: não foi possível gravar a imagem de conferência em {ctx.runtime_dir}"

@@ -175,6 +175,49 @@ class LiveChartTest(ChartTestCase):
         self.assertEqual(len(list(self.runtime.glob("velas-previa-*.png"))), 1)
         self.assertNotIn("click", {call[0] for call in session.calls})
 
+    def test_an_attempt_without_labels_shows_its_diagnosis_and_the_next_one_saves_the_calibration(self):
+        good = chart_for(rising_bars())
+        bad = chart_for(rising_bars())
+        bad.answers = bad.answers[:2] + [("", 0.1)] * (len(bad.answers) - 2)  # the OCR reads no label this time
+        session = ChartSession([bad, good])
+        code = self.run_chart("--configure", "--count", "1", session=session, answers=("", "60", "", ""))
+        self.assertEqual(code, 0, self.err + self.out)
+        self.assertEqual(candles.load_calibration(self.runtime / candles.CALIBRATION_FILE_NAME), CALIBRATION)
+        for text in (
+            "  A leitura das velas falhou: a escala de preços não pôde ser lida: 0 rótulo(s) do eixo lido(s), de pelo menos 2.",
+            "  Diagnóstico, em pixels da captura (640x360, 1 por pixel CSS; linha 0 no topo):",
+            ": o OCR leu 'nada', que não é um preço",
+            "  Imagem de diagnóstico, a captura sem marcas e uma régua à direita: ",
+            "  Na imagem, a régua à direita da captura, de 4 colunas: na 1ª, amarelo = bordas de cima e de baixo do marcador",
+            "  Para investigar a falha, envie essa imagem e as linhas do diagnóstico acima; não mostre dados seus nela.",
+            "a reta dos rótulos põe a cotação do marcador na linha",  # the second attempt, which worked
+            "Calibração das velas gravada em",
+        ):
+            self.assertIn(text, self.out)
+        self.assertEqual(
+            self.answers.prompts[2:],
+            [
+                "Enter lê de novo; - desiste: ",
+                "Compare as velas numeradas e os preços acima com o gráfico. Enter aceita e grava; r lê de novo; - desiste: ",
+            ],
+        )
+        [diagnostic] = list(self.runtime.glob("velas-diagnostico-*.png"))
+        self.assertTrue(diagnostic.read_bytes().startswith(b"\x89PNG"))
+        self.assertEqual(len(list(self.runtime.glob("velas-previa-*.png"))), 1)
+        self.assertNotIn("click", {call[0] for call in session.calls})
+
+    def test_an_attempt_refused_for_its_spacing_shows_its_diagnosis_without_stopping_the_calibration(self):
+        bars = rising_bars()
+        low, high = min(bar[2] for bar in bars) - 0.0002, max(bar[1] for bar in bars) + 0.0002
+        irregular = ci.CandleChart(bars, low, high, blobs=[(300, 30, 304, 40, ci.CANDLE_GREEN)])  # out of place
+        session = ChartSession([irregular, chart_for(bars)])
+        code = self.run_chart("--configure", "--count", "1", session=session, answers=("", "60", "", ""))
+        self.assertEqual(code, 0, self.err + self.out)
+        self.assertIn("A leitura das velas falhou: o espaçamento entre as velas é irregular", self.out)
+        self.assertIn("    velas: ", self.out)  # the diagnosis of the refused attempt, with its forming candle
+        self.assertEqual(len(list(self.runtime.glob("velas-diagnostico-*.png"))), 1)
+        self.assertEqual(candles.load_calibration(self.runtime / candles.CALIBRATION_FILE_NAME), CALIBRATION)
+
     def test_each_reading_shows_the_exploratory_reading_apart_from_the_validated_decision(self):
         self.calibrate()
         session = ChartSession([chart_for(rising_bars())])

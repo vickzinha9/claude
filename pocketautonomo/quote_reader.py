@@ -226,6 +226,7 @@ class QuoteReading:
     reason: object = None
     box: object = None  # the marker that was read, when one was found
     note: object = None  # how the two readings agreed, when they were not equal texts
+    rows: object = None  # (first, last + 1): the rows of the capture where the line read lies, with a value
 
 
 def color_hex(color):
@@ -612,8 +613,8 @@ def _luminance_free_crop(image, box):
     return GrayImage(x1 - x0, y1 - y0, bytes(values))
 
 
-def _text_lines(gray):
-    """Each text line of gray (dark text on white), cropped and padded with white."""
+def _text_line_spans(gray):
+    """(first, last + 1) of the rows of each text line of gray (dark text on white), top down."""
     width = gray.width
     dark_rows = [
         any(value < 128 for value in gray.data[y * width:(y + 1) * width]) for y in range(gray.height)
@@ -629,8 +630,14 @@ def _text_lines(gray):
             y += 1
         if y - start >= 3:
             lines.append((start, y))
+    return lines
+
+
+def _text_lines(gray):
+    """Each text line of gray (dark text on white), cropped and padded with white."""
+    width = gray.width
     result = []
-    for start, end in lines:
+    for start, end in _text_line_spans(gray):
         columns = [
             x for x in range(width) if any(gray.data[row * width + x] < 128 for row in range(start, end))
         ]
@@ -679,8 +686,10 @@ def read_marker_text(image, box, engine):
     lines = _text_lines(gray) if gray is not None else []
     if not lines:
         return QuoteReading(None, "o marcador não tem texto legível", box)
+    # The crop starts one row inside the box: these are the rows of each line in the capture.
+    spans = [(box.y0 + 1 + start, box.y0 + 1 + end) for start, end in _text_line_spans(gray)]
     quotes, problems, seen = [], [], []
-    for line in lines:
+    for line, rows in zip(lines, spans):
         (text_a, score_a), (text_b, score_b) = engine.recognize(line), engine.recognize(black_and_white(line))
         text_a, text_b = "".join(text_a.split()), "".join(text_b.split())
         seen.append(text_a or text_b)
@@ -695,10 +704,10 @@ def read_marker_text(image, box, engine):
                 f"o OCR leu {read} com confiança {min(score_a, score_b):.2f}, abaixo de {MIN_SCORE:.2f}"
             )
         else:
-            quotes.append((quote, note))
+            quotes.append((quote, note, rows))
     if len(quotes) == 1 and not problems:
-        quote, note = quotes[0]
-        return QuoteReading(quote, None, box, note)
+        quote, note, rows = quotes[0]
+        return QuoteReading(quote, None, box, note, rows)
     if len(quotes) + len(problems) > 1:
         return QuoteReading(None, "o marcador tem mais de uma linha com número; leitura ambígua", box)
     if problems:
@@ -763,6 +772,11 @@ def annotated_png(image, labelled_boxes):
                         for dy in range(size):
                             for dx in range(size):
                                 paint(left + (n * 4 + column) * size + dx, top + row * size + dy)
+    return png_bytes(width, height, pixels)
+
+
+def png_bytes(width, height, pixels):
+    """A PNG of RGB pixels, 3 bytes each, row by row."""
     raw = b"".join(b"\x00" + bytes(pixels[y * width * 3:(y + 1) * width * 3]) for y in range(height))
 
     def chunk(kind, data):

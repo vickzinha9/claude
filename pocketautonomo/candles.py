@@ -14,15 +14,23 @@ the current quote.
 Reading a capture (read_candles):
 
 1. The marker of the current quote is found and read as in quote_reader (locate_marker and
-   read_marker_text): its price, and the row of its center.
-2. The price scale. The labels of the axis, the plain text in the columns of the marker, are
-   cut into lines, and each line is read twice by the OCR, in gray and in black and white, with
-   the checks of the marker (QUOTE_PATTERN, agreed_quote, MIN_SCORE). A straight line is fitted
-   through the (row, price) of the labels read: at least MIN_LABELS of them, each within
+   read_marker_text): its price. Where in the box that price lies is not assumed: a label may
+   hold a second line, such as a countdown, or hang beside the price instead of being centered on
+   it. On the Pocket Option, the center of the box was 11 to 13 pixels from where the axis put the
+   marker's price, in every attempt and at every zoom (STATUS, item 38).
+2. The labels of the axis (read_axis): the plain text in the columns of the marker. The pixels
+   that differ from the background are text unless they are of a candle color (a candle under the
+   axis), part of a vertical run taller than a line of text (a vertical line of the chart) or of a
+   horizontal run longer than MAX_TEXT_RUN (a line drawn across the axis). The touching pixels
+   make glyphs, and the glyphs side by side at the same height make lines of text. Each line of the
+   size and shape of a price is read twice by the OCR, in gray and in black and white, with the
+   checks of the marker (QUOTE_PATTERN, agreed_quote, MIN_SCORE); the black-and-white reading is
+   made on the line enlarged first, so that the decimal point of a small font survives. The row
+   of a label's price is the middle of its digits or, when every label has a thin line of the grid
+   beside it, at the same distance from all of them, that line (grid_ticks). A straight line is
+   fitted through the (row, price) of the labels: at least MIN_LABELS of them, each within
    SCALE_TOLERANCE of the line (one label far from it is left out when four or more remain), with
-   the price going down the rows. The marker must fall on that line too, within
-   MARKER_TOLERANCE. Two readings that do not depend on each other, the axis and the marker, must
-   agree on the scale, or nothing is read.
+   the price going down the rows. Its slope is the price of a pixel.
 3. The candles. Every pixel left of the axis is an up candle's, a down candle's or neither, by the
    calibrated colors (CandleModel) and their blends with the background, so that the
    anti-aliased edges and wicks count. Runs of one color in a row longer than MAX_CANDLE_WIDTH are
@@ -32,12 +40,23 @@ Reading a capture (read_candles):
    irregular gap or a shape wider than MAX_WIDTH_RATIO times the others makes the reading
    unavailable, because something there is not a candle. A candle cut by an edge of the capture
    is not read.
-4. The rightmost candle is the one still forming: its close must be at the marker's row, within
-   MARKER_TOLERANCE. Otherwise the chart may be scrolled back, zoomed or still loading, and
-   nothing is read.
-5. Prices. Each edge of a body or a wick gives a price on the fitted line. The resolution, the
-   price of one device pixel, says how precise every value is: nothing smaller than it can be
-   seen.
+4. The row of the marker's quote, from what the chart draws at that price: the close of the
+   rightmost candle, the one still forming, and the price line, a thin line across the chart
+   with the marker's color at the marker's height, when there is one. The two must agree within
+   MARKER_TOLERANCE, and that row must be within the marker's box: otherwise the chart may be
+   scrolled back, zoomed or still loading, and nothing is read. Pieces of a candle color one
+   spacing right of the last candle, at that row, are a candle just opened and hidden by the price
+   line: the one before it would pass for the forming one, and nothing is read either. The candles
+   are numbered by counting the spacings from each to the forming one, gap by gap.
+5. The check of the scale. The line of the labels must put the marker's quote at that row,
+   within MARKER_TOLERANCE: the labels and the marker, two readings of the OCR that do not depend
+   on each other, and the drawing of the chart must agree, or nothing is read. Then the scale
+   is the slope of the labels through the marker's quote at its row.
+6. Prices. Each edge of a body or a wick gives a price on the scale. The resolution, the price
+   of one device pixel, says how precise every value is: nothing smaller than it can be seen.
+
+Every reading carries its Geometry: where each of these was found, in the pixels of the capture,
+for the diagnosis that the calibration shows (geometry_lines and diagnostic_png).
 
 Times. The time axis of the chart is not read. The period comes from the calibration, and the
 times from this computer's clock (stamp): the forming candle started at the last multiple of the
@@ -49,7 +68,7 @@ asset's chart (chart_analysis.CandleHistory).
 """
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from itertools import groupby
 
@@ -71,10 +90,25 @@ from pocketautonomo.quote_reader import (
 UP, DOWN = "alta", "baixa"  # the two colors of candles
 MIN_LABELS = 2  # labels of the axis read, at least; the marker is checked against their line
 MAX_AXIS_LABELS = 8  # labels read, at most, from the top down: each costs two readings of the OCR
+MAX_AXIS_READINGS = 16  # lines of the axis given to the OCR, at most, labels or not
 SCALE_TOLERANCE = 1.5  # CSS pixels: how far a label may be from the fitted line
-MARKER_TOLERANCE = 2.5  # CSS pixels: the marker on the line, and the forming candle's close at the marker
+# CSS pixels: the quote's row by the labels against the chart's, and the forming candle's close against
+# the price line and the marker's box.
+MARKER_TOLERANCE = 2.5
 AXIS_CONTRAST = 48  # smallest difference per channel between the axis text and the background
 TEXT_HEIGHT = (5.0, 24.0)  # CSS pixels: the height of a line of the axis
+LABEL_REACH = 24.0  # CSS pixels: the labels of the axis are looked for from this far left of the marker
+EDGE_ALPHA = 0.1  # a pixel with this much of a candle color over the background, or more, is a candle's, not text
+LINE_GAP = 8.0  # CSS pixels: glyphs this close side by side, at the same height, are one line of text
+MAX_TEXT_RUN = 16.0  # CSS pixels: a longer run of text pixels in a row is a line drawn across the axis
+MIN_TEXT_RATIO = 1.5  # a line of text narrower than this many times its height is not a price
+BW_HEIGHT = 32  # device pixels: a lower line of the axis is enlarged before its black-and-white reading
+LINE_WIDTH = 2.0  # CSS pixels: the thickest line taken for a thin line of the chart (price line, grid)
+LINE_CONTRAST = 24  # per channel: a pixel of the price line differs this much from the rows around it
+GRID_CONTRAST = 10  # the same for a line of the grid, which may be faint
+LINE_SHARE = 0.3  # share of the columns left of the axis that such a line covers, at least
+GRID_REACH = 1.5  # heights of a label's digits: how far from them its grid line may be
+GRID_AGREEMENT = 1.0  # CSS pixels: how much the labels' distances to their grid lines may differ
 MAX_CANDLE_WIDTH = 40.0  # CSS pixels: a longer run of one color in a row is a line
 MIN_CANDLE_WIDTH = 2.0  # CSS pixels: a narrower shape is not a candle
 MAX_WIDTH_RATIO = 1.7  # a shape this much wider than the median candle is not one candle
@@ -172,11 +206,12 @@ class CandleReading:
     scale: object = None  # ScaleLine
     marker_text: object = None  # the quote of the marker, as read
     marker_price: object = None
-    marker_row: object = None  # its center, in device pixels
+    marker_row: object = None  # the row of that quote in the chart, in device pixels: the price line or the close
     spacing: float = 0.0  # device pixels between two candles
     resolution: float = 0.0  # price of one device pixel
     decimals: int = 0  # of the marker's quote: how the prices are shown
     unread_labels: int = 0  # lines of the axis that the OCR could not read as a price
+    geometry: object = None  # Geometry: where each part was found, for the diagnosis
 
     @property
     def available(self):
@@ -193,6 +228,63 @@ class CandleReading:
 
     def text(self, value):
         return f"{value:.{self.decimals}f}"
+
+
+@dataclass(frozen=True)
+class AxisLine:
+    """A line of text in the columns of the axis, in device pixels, and what became of it."""
+
+    top: int  # the first row of its digits
+    bottom: int  # one past their last row
+    left: int
+    right: int  # exclusive
+    text: object = None  # the quote that both readings of the OCR agreed on
+    price: object = None  # its value, when the line is a label of the scale
+    problem: object = None  # why it is not a label, or None
+    read: bool = False  # whether the OCR read it
+    tick: object = None  # the row of the grid line beside it, when the grid marks the labels
+
+    @property
+    def center(self):
+        return (self.top + self.bottom) / 2
+
+    @property
+    def row(self):
+        """The row of its price: its grid line, or else the middle of its digits."""
+        return self.center if self.tick is None else self.tick
+
+
+@dataclass(frozen=True)
+class Geometry:
+    """Where read_candles found each part of the chart, in the pixels of the capture, row 0 at the top.
+
+    For the diagnosis of a reading (geometry_lines, diagnostic_png); nothing here changes a price.
+    """
+
+    scale: float = 1.0
+    width: int = 0
+    height: int = 0
+    marker_box: object = None  # Box
+    marker_rows: object = None  # (first, last + 1) of the line of the quote inside the marker
+    axis_x0: object = None  # the first column of the axis: the candles are read left of it
+    label_x0: object = None  # the first column where the labels are looked for
+    axis_lines: tuple = ()  # AxisLine, top down
+    grid_offset: object = None  # rows from the middle of the labels' digits to their grid lines, when used
+    label_line: object = None  # ScaleLine through the labels alone, before the check
+    shapes: int = 0  # shapes of the candle colors taken for candles
+    forming: object = None  # the Shape of the forming candle
+    close_row: object = None  # the row of its close
+    marker_lines: object = None  # ThinLine of each thin line across the chart at the marker's height, once looked for
+    price_line: object = None  # the row of the price marked by the only one of them of the marker's color
+    price_row: object = None  # the row of the marker's quote: the price line, else the close
+    predicted_row: object = None  # where label_line puts the marker's quote
+
+    @property
+    def deviation(self):
+        """Rows from the quote's row in the chart to where the labels put it, or None."""
+        if self.predicted_row is None or self.price_row is None:
+            return None
+        return self.predicted_row - self.price_row
 
 
 def unavailable(reason, **values):
@@ -275,71 +367,420 @@ def detect_colors(image, x_end):
 
 # The price scale.
 
-
-def _text_crop(image, x0, y0, x1, y1, background):
-    """The region as gray, dark where it differs most from the background."""
-    distances = []
-    for y in range(y0, y1):
-        for pixel in image.row(y, x0, x1):
-            distances.append(max(abs(pixel[0] - background[0]), abs(pixel[1] - background[1]), abs(pixel[2] - background[2])))
-    full = max(distances) if distances else 0
-    if full < AXIS_CONTRAST:
-        return None
-    data = bytes(255 - min(255, round(255 * distance / full)) for distance in distances)
-    return GrayImage(x1 - x0, y1 - y0, data)
+_TEXT, _REMOVED = 1, 2  # the text pixels of the axis, and those of a line of the chart across it
 
 
-def axis_labels(image, scale, x0, skip, engine):
-    """([(row, text, price)], unread) of the price labels of the axis, in the columns from x0.
+def _glyphs(runs):
+    """The runs (y, x0, x1) that touch, side by side or at a corner: [top, bottom, left, right, runs]."""
+    parent = list(range(len(runs)))
 
-    skip, (first, last + 1), are the rows of the marker, left out. The labels are read from the
-    top down, each twice, as the marker's text is.
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    by_row = {}
+    for index, (y, xa, xb) in enumerate(runs):
+        for other in by_row.get(y - 1, ()):
+            _, oa, ob = runs[other]
+            if oa <= xb and xa <= ob:
+                a, b = root(index), root(other)
+                if a != b:
+                    parent[a] = b
+        by_row.setdefault(y, []).append(index)
+    groups = {}
+    for index in range(len(runs)):
+        groups.setdefault(root(index), []).append(runs[index])
+    return [
+        [min(y for y, _, _ in group), max(y for y, _, _ in group) + 1, min(a for _, a, _ in group),
+         max(b for _, _, b in group), group]
+        for group in groups.values()
+    ]
+
+
+def _text_lines_of(glyphs, gap, bridge=0):
+    """The glyphs that share rows and lie within gap of each other side by side, grouped, top down.
+
+    Glyphs up to bridge rows apart count as sharing rows: a thin line of the chart across a label,
+    taken out, leaves the upper and the lower parts of its digits.
     """
+    glyphs = sorted(glyphs, key=lambda glyph: glyph[2])
+    parent = list(range(len(glyphs)))
+
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i, (top, bottom, left, right, _) in enumerate(glyphs):
+        for j in range(i):
+            other = glyphs[j]
+            if min(bottom, other[1]) + bridge > max(top, other[0]) and left - other[3] <= gap:
+                a, b = root(i), root(j)
+                if a != b:
+                    parent[a] = b
+    groups = {}
+    for index, glyph in enumerate(glyphs):
+        groups.setdefault(root(index), []).append(glyph)
+    return sorted(groups.values(), key=lambda group: min(glyph[0] for glyph in group))
+
+
+def _enlarged(gray, height):
+    """gray enlarged by a whole factor, by linear interpolation, to height rows or more."""
+    factor = -(-height // gray.height)
+    if factor <= 1:
+        return gray
+
+    def taps(size):
+        found = []
+        for out in range(size * factor):
+            source = (out + 0.5) / factor - 0.5
+            low = min(size - 1, max(0, math.floor(source)))
+            found.append((low, min(size - 1, low + 1), min(1.0, max(0.0, source - low))))
+        return found
+
+    width, data = gray.width, gray.data
+    columns = taps(gray.width)
+    out = bytearray()
+    for y0, y1, fy in taps(gray.height):
+        a_row, b_row = y0 * width, y1 * width
+        for x0, x1, fx in columns:
+            a = data[a_row + x0] + (data[a_row + x1] - data[a_row + x0]) * fx
+            b = data[b_row + x0] + (data[b_row + x1] - data[b_row + x0]) * fx
+            out.append(round(a + (b - a) * fy))
+    return GrayImage(gray.width * factor, gray.height * factor, bytes(out))
+
+
+def read_axis(image, scale, x0, skip, engine, candle_colors=()):
+    """AxisLine of each line of text in the columns from x0 to the right edge, top down.
+
+    skip, (first, last + 1), are the rows of the marker, left out. candle_colors, the colors of the
+    candles, tell the pixels of a candle under the axis, its faint edges too: they are not text. The
+    lines of the size and shape of a price are read by the OCR from the top down, each twice, as the
+    marker's text is, until MAX_AXIS_LABELS of them are labels.
+    """
+    width, height = image.width - x0, image.height
+    if width <= 0:
+        return []
     background = background_color(image, x0, image.width)
 
-    def text_pixel(color):
-        return max(abs(color[0] - background[0]), abs(color[1] - background[1]), abs(color[2] - background[2])) >= AXIS_CONTRAST
+    def measure(color):
+        for base in candle_colors:
+            share, off = blend_share(color, base, background)
+            if share >= EDGE_ALPHA and off <= OFF_AXIS:
+                return -1  # a candle's pixel, never text
+        return max(abs(color[0] - background[0]), abs(color[1] - background[1]), abs(color[2] - background[2]))
 
-    rows = []
-    for y in range(image.height):
-        if skip is not None and skip[0] <= y < skip[1]:
-            rows.append(False)
-        else:
-            rows.append(any(map(text_pixel, image.row(y, x0, image.width))))
+    distance_of = quote_reader._Classifier(measure)
+    first, end = skip if skip is not None else (0, 0)
+    distances = [None] * height  # of each pixel to the background, row by row; None in the marker's rows
+    mask = bytearray(width * height)
+    for y in range(height):
+        if first <= y < end:
+            continue
+        row = distances[y] = [distance_of[color] for color in image.row(y, x0, image.width)]
+        base = y * width
+        for x, distance in enumerate(row):
+            if distance >= AXIS_CONTRAST:
+                mask[base + x] = _TEXT
+    # A vertical line of the chart in these columns, such as the line of the expiration time, is a run
+    # of text pixels down a column taller than a line of text.
+    tallest = TEXT_HEIGHT[1] * scale
+    for x in range(width):
+        y = 0
+        while y < height:
+            if mask[y * width + x] != _TEXT:
+                y += 1
+                continue
+            start = y
+            while y < height and mask[y * width + x] == _TEXT:
+                y += 1
+            if y - start > tallest:
+                for row in range(start, y):
+                    mask[row * width + x] = _REMOVED
+    longest = MAX_TEXT_RUN * scale
+    runs = []
+    for y in range(height):
+        base, x = y * width, 0
+        while x < width:
+            if mask[base + x] != _TEXT:
+                x += 1
+                continue
+            start = x
+            while x < width and mask[base + x] == _TEXT:
+                x += 1
+            if x - start > longest:
+                mask[base + start:base + x] = bytes([_REMOVED]) * (x - start)  # a line drawn across the axis
+            else:
+                runs.append((y, start, x))
+    groups = _text_lines_of(_glyphs(runs), LINE_GAP * scale, round(LINE_WIDTH * scale) + 1)
+    owner = {}
+    for number, group in enumerate(groups):
+        for glyph in group:
+            for y, xa, xb in glyph[4]:
+                for x in range(xa, xb):
+                    owner[y * width + x] = number
     low, high = TEXT_HEIGHT[0] * scale, TEXT_HEIGHT[1] * scale
-    labels, unread = [], 0
-    y = 0
-    while y < image.height and len(labels) < MAX_AXIS_LABELS:
-        if not rows[y]:
-            y += 1
+    lines, labels, readings = [], 0, 0
+    for number, group in enumerate(groups):
+        # The middle of the digits, without the decimal point or a stray dot beside them.
+        tallest_glyph = max(glyph[1] - glyph[0] for glyph in group)
+        digits = [glyph for glyph in group if glyph[1] - glyph[0] >= 0.5 * tallest_glyph]
+        top, bottom = min(glyph[0] for glyph in digits), max(glyph[1] for glyph in digits)
+        left, right = min(glyph[2] for glyph in group), max(glyph[3] for glyph in group)
+        upper, lower = min(glyph[0] for glyph in group), max(glyph[1] for glyph in group)
+        place = (top, bottom, x0 + left, x0 + right)
+        if upper == 0 or lower == height:
+            problem = "cortada pela borda de cima ou de baixo da captura"
+        elif skip is not None and (lower == first or upper == end):
+            problem = "cortada pelas linhas do marcador"
+        elif left == 0:
+            problem = "cortada pela borda esquerda das colunas do eixo"
+        elif right == width:
+            problem = "cortada pela borda direita da captura"
+        elif not low <= bottom - top <= high:
+            problem = f"{bottom - top} pixels de altura, fora da altura de uma linha de texto ({low:.0f} a {high:.0f})"
+        elif right - left < MIN_TEXT_RATIO * (bottom - top):
+            problem = "estreita demais para um preço"
+        elif labels >= MAX_AXIS_LABELS:
+            problem = f"não lida: {MAX_AXIS_LABELS} rótulos já tinham sido lidos acima dela"
+        elif readings >= MAX_AXIS_READINGS:
+            problem = f"não lida: {MAX_AXIS_READINGS} linhas já tinham ido para o OCR acima dela"
+        else:
+            line = _axis_line_image(
+                group, number, owner, mask, distances, width, height, (first, end), round(LINE_WIDTH * scale) + 1,
+            )
+            reading = _read_label(line, engine)
+            lines.append(AxisLine(*place, **reading, read=True))
+            labels += reading.get("price") is not None
+            readings += 1
             continue
-        start = y
-        while y < image.height and rows[y]:
-            y += 1
-        cut = start == 0 or y == image.height or (skip is not None and (start == max(0, skip[0]) or start == skip[1] or y == skip[0]))
-        if not low <= y - start <= high or cut:
-            continue  # not a line of text, or cut by an edge or by the marker: its middle is not its price's row
-        columns = [
-            x for x in range(x0, image.width) if any(text_pixel(image.pixel(x, row)) for row in range(start, y))
+        lines.append(AxisLine(*place, problem=problem))
+    return lines
+
+
+def _axis_line_image(group, number, owner, mask, distances, width, height, skip, reach):
+    """The line of text of group as gray, dark where it differs most from the background, padded.
+
+    Only its own glyphs and the faint edges around them are kept: a pixel of another line, of a candle
+    or of the marker's rows is white. A pixel of a line of the chart across the text, taken out of it,
+    is as light as the lighter of the nearest pixels on its two sides, within reach, across the line:
+    a stroke of a digit that the line crosses goes on through it, and the background stays white.
+    """
+    upper, lower = min(glyph[0] for glyph in group), max(glyph[1] for glyph in group)
+    left, right = min(glyph[2] for glyph in group), max(glyph[3] for glyph in group)
+    full = max(
+        distances[y][x] for glyph in group for y, xa, xb in glyph[4] for x in range(xa, xb)
+    )
+
+    def gray(y, x):
+        """The gray of the pixel for this line, or None for a pixel taken out."""
+        row = distances[y] if 0 <= y < height and 0 <= x < width else None
+        if row is None or skip[0] <= y < skip[1] or row[x] < 0:
+            return 255
+        index = y * width + x
+        if mask[index] == _REMOVED:
+            return None
+        if mask[index] == _TEXT and owner.get(index) != number:
+            return 255
+        return 255 - min(255, round(255 * row[x] / full))
+
+    def across(y, x, dy, dx):
+        for k in range(1, reach + 1):
+            value = gray(y + k * dy, x + k * dx)
+            if value is not None:
+                return value
+        return None
+
+    x0, x1 = max(0, left - 2), min(width, right + 3)
+    y0, y1 = max(0, upper - 2), min(height, lower + 2)
+    data = bytearray()
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            value = gray(y, x)
+            if value is None:
+                sides = [(across(y, x, -1, 0), across(y, x, 1, 0)), (across(y, x, 0, -1), across(y, x, 0, 1))]
+                pairs = [max(a, b) for a, b in sides if a is not None and b is not None]
+                value = pairs[0] if pairs else 255
+            data.append(value)
+    return GrayImage(x1 - x0, y1 - y0, bytes(data))
+
+
+def _read_label(gray, engine):
+    """{text, price} of a line of the axis read twice by the OCR as a price, or {problem}."""
+    lines = quote_reader._text_lines(gray)
+    if len(lines) != 1:
+        return {"problem": f"o recorte tem {len(lines)} linhas de texto, e não uma"}
+    line = lines[0]
+    # The black-and-white reading is made on the line enlarged: at the size of the axis's font, the
+    # threshold alone can erase the decimal point or join two digits.
+    (text_a, score_a), (text_b, score_b) = (
+        engine.recognize(line), engine.recognize(black_and_white(_enlarged(line, BW_HEIGHT)))
+    )
+    text_a, text_b = "".join(text_a.split()), "".join(text_b.split())
+    if not (QUOTE_PATTERN.fullmatch(text_a) or QUOTE_PATTERN.fullmatch(text_b)):
+        return {"problem": f"o OCR leu {text_a or text_b or 'nada'!r}, que não é um preço"}
+    quote, _ = agreed_quote(text_a, text_b)
+    if quote is None:
+        return {"problem": f"as duas leituras do OCR divergiram: {text_a!r} e {text_b!r}"}
+    value = number_of(quote)
+    if value is None or not QUOTE_PATTERN.fullmatch(quote):
+        return {"problem": f"o OCR leu {quote!r}, que não é um preço"}
+    if min(score_a, score_b) < MIN_SCORE:
+        return {"problem": f"o OCR leu {quote!r} com confiança {min(score_a, score_b):.2f}, abaixo de {MIN_SCORE:.2f}"}
+    return {"text": quote, "price": value}
+
+
+@dataclass(frozen=True)
+class ThinLine:
+    """A thin horizontal line across the chart: its rows, its most frequent color, and that of each row."""
+
+    top: int
+    bottom: int  # exclusive
+    color: tuple
+    row_colors: tuple
+
+    def row_of(self, weight):
+        """The row of the price that the line marks, weight(color) telling how much of the line a color is.
+
+        A line one pixel high drawn between two rows of pixels leaves part of its color in each: its
+        center is the middle of the rows weighed by that share, and the price is at its upper edge,
+        as at the edge of a candle's body (half a pixel off for a line drawn centered on the price).
+        """
+        weights = [max(0.0, weight(color)) for color in self.row_colors]
+        total = sum(weights)
+        if total <= 0:
+            return float(self.top)
+        return sum((self.top + n + 0.5) * w for n, w in enumerate(weights)) / total - 0.5
+
+
+def blend_share(color, base, background):
+    """(share, off): how much of base over background color is, and how far it is from that blend."""
+    axis = (base[0] - background[0], base[1] - background[1], base[2] - background[2])
+    norm = axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]
+    if not norm:
+        return 0.0, 255.0
+    share = sum((color[i] - background[i]) * axis[i] for i in range(3)) / norm
+    return share, max(abs(color[i] - (background[i] + share * axis[i])) for i in range(3))
+
+
+def thin_lines(image, scale, x0, x1, first, end, contrast, share=LINE_SHARE):
+    """ThinLine of each thin horizontal line across the columns x0..x1, in the rows first..end.
+
+    A pixel is on such a line when it differs by contrast or more from the pixels just above and
+    below it, which do not differ that much from each other: a line over the background or over a
+    candle's body, and not the edge of a body. A line is at most LINE_WIDTH thick and covers share
+    of the columns, at least; its color is the most frequent of its pixels.
+    """
+    reach = round(LINE_WIDTH * scale) + 1
+    width = x1 - x0
+    if width <= 0:
+        return []
+    step = 2 if width >= 200 else 1  # half the columns measure the share as well
+    data, stride = image.data, image.width * 3
+    rows = []
+    for y in range(max(reach, first), min(image.height - reach, end)):
+        here = y * stride + 3 * x0
+        above, below = here - reach * stride, here + reach * stride
+        count, colors = 0, {}
+        for offset in range(0, 3 * width, 3 * step):
+            i, a, b = here + offset, above + offset, below + offset
+            red, green, blue = data[i], data[i + 1], data[i + 2]
+            if max(abs(red - data[a]), abs(green - data[a + 1]), abs(blue - data[a + 2])) < contrast:
+                continue
+            if max(abs(red - data[b]), abs(green - data[b + 1]), abs(blue - data[b + 2])) < contrast:
+                continue
+            if max(abs(data[a] - data[b]), abs(data[a + 1] - data[b + 1]), abs(data[a + 2] - data[b + 2])) >= contrast:
+                continue
+            count += 1
+            colors[(red, green, blue)] = colors.get((red, green, blue), 0) + 1
+        if count * step >= share * width:
+            rows.append((y, colors))
+    found = []
+    for _, group in groupby(enumerate(rows), key=lambda item: item[1][0] - item[0]):
+        block = [row for _, row in group]
+        if len(block) <= reach:
+            colors = {}
+            for _, counts in block:
+                for color, n in counts.items():
+                    colors[color] = colors.get(color, 0) + n
+            found.append(
+                ThinLine(
+                    block[0][0], block[-1][0] + 1, max(colors, key=colors.get),
+                    tuple(max(counts, key=counts.get) for _, counts in block),
+                )
+            )
+    return found
+
+
+MIN_LINE_PAINT = 0.6  # the marker's paint that the price line holds, at least, added up over its rows
+
+
+def _marker_share(color, model, background):
+    """How much of one of the marker's colors over the background color is: 0 when it is no such blend."""
+    best = 0.0
+    for base in model.colors:
+        share, off = blend_share(color, base, background)
+        if off <= OFF_AXIS:
+            best = max(best, min(share, 1.0))
+    return best
+
+
+def _price_line(lines, model, background):
+    """The row of the price line among lines, the thin lines at the marker's height, or None.
+
+    The price line is drawn with the marker's paint: added up over its rows, the share of a marker
+    color over the background in each row is MIN_LINE_PAINT or more. A line one pixel high between
+    two rows of pixels splits its paint between them, and a faint line of the grid, even a bluish
+    one, holds a fraction of it. Only one such line can be taken; none, or two, leave the row to the
+    close of the forming candle.
+    """
+    own = [
+        line for line in lines
+        if sum(_marker_share(color, model, background) for color in line.row_colors) >= MIN_LINE_PAINT
+    ]
+    if len(own) != 1:
+        return None
+    return own[0].row_of(lambda color: _marker_share(color, model, background))
+
+
+def grid_ticks(image, scale, x_end, labels, skip=None, background=None):
+    """(rows, offset): the row of the grid line beside each label, and their distance, or (None, None).
+
+    A line of the grid marks its label's price exactly, wherever the label's digits are drawn around
+    it. The lines are taken only when every label has a thin line across the chart beside it, within
+    GRID_REACH heights of its digits and outside the marker's rows, all at the same distance from
+    their labels within GRID_AGREEMENT; otherwise the middle of the digits stands for each price.
+    background is the color of the chart left of x_end, measured when not given.
+    """
+    if len(labels) < MIN_LABELS:
+        return None, None
+    background = background if background is not None else background_color(image, 0, x_end)
+
+    def contrast(color):
+        return max(abs(color[0] - background[0]), abs(color[1] - background[1]), abs(color[2] - background[2]))
+
+    ticks = []
+    for label in labels:
+        reach = GRID_REACH * (label.bottom - label.top)
+        found = [
+            line.row_of(contrast)
+            for line in thin_lines(
+                image, scale, 0, x_end, math.floor(label.center - reach), math.ceil(label.center + reach) + 1,
+                GRID_CONTRAST,
+            )
+            if skip is None or not skip[0] <= line.top < skip[1]
         ]
-        if not columns:
-            continue
-        left, right = max(0, columns[0] - 2), min(image.width, columns[-1] + 3)
-        gray = _text_crop(image, left, max(0, start - 2), right, min(image.height, y + 2), background)
-        lines = quote_reader._text_lines(gray) if gray is not None else []
-        if len(lines) != 1:
-            unread += 1
-            continue
-        line = lines[0]
-        (text_a, score_a), (text_b, score_b) = engine.recognize(line), engine.recognize(black_and_white(line))
-        text_a, text_b = "".join(text_a.split()), "".join(text_b.split())
-        quote, _ = agreed_quote(text_a, text_b)
-        value = number_of(quote) if quote is not None and QUOTE_PATTERN.fullmatch(quote) else None
-        if value is None or min(score_a, score_b) < MIN_SCORE:
-            unread += 1
-            continue
-        labels.append(((start + y) / 2, quote, value))
-    return labels, unread
+        if not found:
+            return None, None
+        ticks.append(min(found, key=lambda row: abs(row - label.center)))
+    offsets = sorted(tick - label.center for tick, label in zip(ticks, labels))
+    middle = offsets[len(offsets) // 2]
+    if max(abs(offset - middle) for offset in offsets) > GRID_AGREEMENT * scale + 0.5:
+        return None, None
+    return ticks, middle
 
 
 def fit_scale(labels, scale):
@@ -473,56 +914,73 @@ def shapes_of(image, scale, x_end, classify):
     return sorted(shapes, key=lambda shape: shape.center)
 
 
+def _px(value):
+    """A row or a column for the messages: whole, or with one decimal."""
+    return f"{value:.0f}" if float(value).is_integer() else f"{value:.1f}"
+
+
 def read_candles(image, scale, model, marker_model, engine):
     """CandleReading of a capture of the whole chart element, in device pixels, scale per CSS pixel."""
+    seen = {"scale": scale, "width": image.width, "height": image.height}
+
+    def refuse(reason, **values):
+        return unavailable(reason, geometry=Geometry(**seen), **values)
+
     box, reason = locate_marker(image, scale, marker_model)
     if box is None:
-        return unavailable(f"o marcador da cotação não foi achado: {reason}")
+        return refuse(f"o marcador da cotação não foi achado: {reason}")
+    seen["marker_box"] = box
     marker = read_marker_text(image, box, engine)
+    seen["marker_rows"] = marker.rows
     if marker.value is None:
-        return unavailable(f"o marcador da cotação não foi lido: {marker.reason}")
+        return refuse(f"o marcador da cotação não foi lido: {marker.reason}")
     marker_price = number_of(marker.value)
-    marker_row = (box.y0 + box.y1) / 2
     decimals = decimals_of(marker.value)
-    found = {"marker_text": marker.value, "marker_price": marker_price, "marker_row": marker_row, "decimals": decimals}
+    found = {"marker_text": marker.value, "marker_price": marker_price, "decimals": decimals}
     axis_x0 = max(0, box.x0 - round(2 * scale))
-    margin = round(2 * scale)
-    labels, unread = axis_labels(image, scale, axis_x0, (box.y0 - margin, box.y1 + margin), engine)
-    found["unread_labels"] = unread
-    line, problem = fit_scale(labels, scale)
-    if line is None:
-        return unavailable(problem, **found)
-    found["scale"] = line
-    found["resolution"] = abs(line.slope)
-    tolerance = MARKER_TOLERANCE * scale + 0.5
-    expected = line.row(marker_price)
-    if abs(expected - marker_row) > tolerance:
-        return unavailable(
-            f"o marcador ({marker.value}) não confere com a escala lida no eixo: ele está a"
-            f" {abs(expected - marker_row) / scale:.1f} pixels de onde a escala põe esse preço",
-            **found,
-        )
-    # The marker is centered on its price, while the ink of a label's digits sits a pixel or so off its
-    # tick: the slope comes from the labels, and the line goes through the marker.
-    line = ScaleLine(marker_price - line.slope * marker_row, line.slope, line.labels, line.dropped, line.residual)
-    found["scale"] = line
+    seen["axis_x0"] = axis_x0
     background = background_color(image, 0, axis_x0)
+    candle_kind = classifier(model, background)
+    margin = round(2 * scale)
+    skip = (box.y0 - margin, box.y1 + margin)
+    # The labels may start left of the marker: on a chart drawn under its axis, the box of the marker is
+    # narrower than the text of the labels or not aligned with it.
+    label_x0 = max(0, box.x0 - round(LABEL_REACH * scale))
+    seen["label_x0"] = label_x0
+    lines = read_axis(image, scale, label_x0, skip, engine, (model.up, model.down))
+    labels = [line for line in lines if line.price is not None]
+    ticks, offset = grid_ticks(image, scale, axis_x0, labels, skip, background)
+    if ticks is not None:
+        tick_of = dict(zip(labels, ticks))
+        lines = [replace(line, tick=tick_of[line]) if line in tick_of else line for line in lines]
+        labels = [line for line in lines if line.price is not None]
+        seen["grid_offset"] = offset
+    seen["axis_lines"] = tuple(lines)
+    found["unread_labels"] = sum(1 for line in lines if line.read and line.price is None)
+    label_line, problem = fit_scale([(line.row, line.text, line.price) for line in labels], scale)
+    if label_line is None:
+        return refuse(problem, **found)
+    seen["label_line"] = label_line
+    seen["predicted_row"] = label_line.row(marker_price)
+    found["scale"] = label_line
+    found["resolution"] = abs(label_line.slope)
     shapes = [
         shape
-        for shape in shapes_of(image, scale, axis_x0, classifier(model, background))
+        for shape in shapes_of(image, scale, axis_x0, candle_kind)
         if shape.width >= MIN_CANDLE_WIDTH * scale and shape.pixels >= 4
     ]
     if shapes and shapes[0].x0 == 0:
         shapes = shapes[1:]  # cut by the left edge of the capture
+    seen["shapes"] = len(shapes)
     if len(shapes) < MIN_CANDLES:
-        return unavailable(
+        return refuse(
             f"{len(shapes)} vela(s) com as cores calibradas no gráfico, de pelo menos {MIN_CANDLES}: confira as cores"
             " com --configure e o zoom do gráfico",
             **found,
         )
     heights = sorted(shape.bottom - shape.top + 1 for shape in shapes)
     if heights[len(heights) // 2] < 2 * scale:
-        return unavailable(
+        return refuse(
             "as formas da cor das velas no gráfico são linhas de um pixel, não velas: confira as cores com --configure",
             **found,
         )
@@ -530,34 +988,118 @@ def read_candles(image, scale, model, marker_model, engine):
     median_width = widths[len(widths) // 2]
     wide = [shape for shape in shapes if shape.width > MAX_WIDTH_RATIO * median_width]
     if wide:
-        return unavailable(
+        return refuse(
             f"{len(wide)} forma(s) da cor das velas mais larga(s) que as velas ({wide[0].width} pixels, contra"
             f" {median_width}): velas encostadas umas nas outras ou outro desenho no gráfico; afaste o zoom ou tire os"
             " indicadores",
             **found,
         )
-    gaps = [b.center - a.center for a, b in zip(shapes, shapes[1:])]
+    forming = shapes[-1]
+    # The row of the marker's quote, from what the chart draws at that price: the forming candle closes
+    # there, and the price line, when there is one, crosses the chart there.
+    close_row = forming.body_top if forming.kind == UP else forming.body_bottom + 1
+    seen["forming"], seen["close_row"] = forming, close_row
+    centers = [shape.center for shape in shapes]
+    if forming.x1 >= axis_x0:
+        # Its right part is under the axis, behind the marker: its place comes from its left edge.
+        centers[-1] = forming.x0 + median_width / 2
+    gaps = [b - a for a, b in zip(centers, centers[1:])]
     spacing = sorted(gaps)[len(gaps) // 2]
     if spacing < median_width:
-        return unavailable("as velas se sobrepõem no gráfico", **found)
+        return refuse("as velas se sobrepõem no gráfico", **found)
+    steps = []
     for gap in gaps:
-        steps = round(gap / spacing)
-        if steps < 1 or abs(gap - steps * spacing) > SPACING_TOLERANCE * spacing:
-            return unavailable(
+        step = round(gap / spacing)
+        if step < 1 or abs(gap - step * spacing) > SPACING_TOLERANCE * spacing:
+            return refuse(
                 "o espaçamento entre as velas é irregular: há no gráfico algo da cor das velas que não é uma vela", **found,
             )
+        steps.append(step)
+    # Each candle's place counts the steps from it to the forming one, gap by gap. At a scale such as 1.25,
+    # the candles sit a whole pixel apart in turns (16 and 17 pixels for 16.25), and the median gap is off by
+    # a fraction of a pixel: over forty candles, enough to give an old candle the index of its neighbor.
+    spacing = (centers[-1] - centers[0]) / sum(steps)
     found["spacing"] = spacing
-    forming = shapes[-1]
-    close_row = forming.body_top if forming.kind == UP else forming.body_bottom + 1
-    if abs(close_row - marker_row) > tolerance:
-        return unavailable(
-            "a última vela não termina na cotação do marcador: o gráfico pode estar rolado para trás, com outro zoom ou"
-            " ainda carregando",
+    places = [0] * len(shapes)
+    for index in range(len(shapes) - 2, -1, -1):
+        places[index] = places[index + 1] + steps[index]
+    marker_lines = thin_lines(image, scale, 0, axis_x0, skip[0], skip[1], LINE_CONTRAST)
+    seen["marker_lines"] = tuple(marker_lines)
+    price_line = _price_line(marker_lines, marker_model, background)
+    seen["price_line"] = price_line
+    tolerance = MARKER_TOLERANCE * scale + 0.5
+    scrolled = (
+        ": o gráfico pode estar rolado para trás, com outro zoom ou ainda carregando; deixe a vela que se forma à vista,"
+        " à direita"
+    )
+    if price_line is not None and abs(price_line - close_row) > tolerance:
+        return refuse(
+            f"a última vela não termina na cotação do marcador (o fechamento dela está na linha {_px(close_row)} da"
+            f" captura, e a linha do preço, na linha {_px(price_line)}){scrolled}",
             **found,
         )
-    last = forming.center
+    price_row = price_line if price_line is not None else close_row
+    source = "a linha do preço" if price_line is not None else "o fechamento da vela que se forma"
+    by = "pela linha do preço" if price_line is not None else "pelo fechamento da vela que se forma"
+    seen["price_row"] = price_row
+    found["marker_row"] = price_row
+    if not box.y0 - tolerance <= price_row <= box.y1 + tolerance:
+        return refuse(
+            f"a última vela não termina na cotação do marcador (a linha da cotação no gráfico, {_px(price_row)} da"
+            f" captura {by}, fica fora das linhas do marcador, {box.y0} a {box.y1 - 1}){scrolled}",
+            **found,
+        )
+    # A candle that has just opened is a row or two high, at the price: an opaque price line over it can
+    # hide all of it but a few pixels, and the candle before it would pass for the forming one. Such
+    # pixels would be one spacing right of the last candle, in pieces no wider than a candle: a line of a
+    # candle color across that place is not one.
+    near = round(LINE_WIDTH * scale) + 1
+    expected = centers[-1] + spacing
+    left = max(forming.x1 + 1, math.floor(expected - median_width))
+    right = min(axis_x0, math.ceil(expected + median_width))
+    rows = range(max(0, math.floor(price_row) - near), min(image.height, math.floor(price_row) + near + 1))
+    smallest = max(2, round(MIN_CANDLE_WIDTH * scale))  # a thinner piece, such as a vertical line, is no candle
+    hidden = 0
+    if right - left >= median_width:
+        for y in rows:
+            for key, group in groupby(map(candle_kind.__getitem__, image.row(y, left, right))):
+                n = sum(1 for _ in group)
+                if key is not None and smallest <= n <= 1.25 * median_width:
+                    hidden += n
+    if hidden:
+        # A line of a candle color along the quote's row, such as a price line colored by the direction,
+        # crosses the gaps between the candles too, while a hidden candle is only in its own place.
+        between = [(a.x1, b.x0) for a, b in zip(shapes, shapes[1:]) if b.x0 > a.x1]
+        crossed = sum(
+            1
+            for x0, x1 in between
+            if any(candle_kind[color] is not None for y in rows for color in image.row(y, x0, x1))
+        )
+        if len(between) >= MIN_CANDLES - 1 and crossed >= 0.5 * len(between):
+            hidden = 0
+    if hidden:
+        return refuse(
+            f"há {hidden} pixel(s) da cor das velas à direita da última vela, na linha do preço: a vela que se forma pode"
+            " estar escondida pela linha do preço, e a anterior passaria por ela; leia de novo em alguns segundos",
+            **found,
+        )
+    deviation = label_line.row(marker_price) - price_row
+    if abs(deviation) > tolerance:
+        return refuse(
+            f"o marcador ({marker.value}) não confere com a escala lida no eixo: os rótulos põem esse preço na linha"
+            f" {label_line.row(marker_price):.1f} da captura, a {abs(deviation):.1f} pixels da linha da cotação no"
+            f" gráfico ({_px(price_row)}, {source}), e o limite é {tolerance:.1f}",
+            **found,
+        )
+    # The slope comes from the labels, and the line goes through the quote's row in the chart: the
+    # labels' digits may sit a pixel or so off their ticks.
+    line = ScaleLine(
+        marker_price - label_line.slope * price_row, label_line.slope, label_line.labels, label_line.dropped,
+        label_line.residual,
+    )
+    found["scale"] = line
     candles, indices = [], []
-    for shape in shapes:
+    for shape, place in zip(shapes, places):
         if shape.top == 0 or shape.bottom >= image.height - 1:
             continue  # cut by the top or the bottom: its high or low is not on the screen
         upper, lower = line.price(shape.body_top), line.price(shape.body_bottom + 1)
@@ -568,15 +1110,158 @@ def read_candles(image, scale, model, marker_model, engine):
                 open_, line.price(shape.top), line.price(shape.bottom + 1), close,
             )
         )
-        indices.append(round((last - shape.center) / spacing))
+        indices.append(place)
     if not indices or indices[-1] != 0:
-        return unavailable("a vela que está se formando foi cortada pela borda da captura", **found)
+        return refuse("a vela que está se formando foi cortada pela borda da captura", **found)
     present = set(indices)
     missing = tuple(index for index in range(1, max(indices) + 1) if index not in present)
     return CandleReading(
-        None, tuple(candles), tuple(indices), missing, line, marker.value, marker_price, marker_row, spacing,
-        abs(line.slope), decimals, unread,
+        None, tuple(candles), tuple(indices), missing, line, marker.value, marker_price, price_row, spacing,
+        abs(line.slope), decimals, found["unread_labels"], Geometry(**seen),
     )
+
+
+# The diagnosis.
+
+
+def geometry_lines(reading, limit=12):
+    """What read_candles found where, in the pixels of the capture: the lines of the diagnosis."""
+    g = reading.geometry
+    if g is None:
+        return []
+    lines = [
+        f"  Diagnóstico, em pixels da captura ({g.width}x{g.height}, {g.scale:g} por pixel CSS; linha 0 no topo):"
+    ]
+    box = g.marker_box
+    if box is not None:
+        text = (
+            f"    marcador: colunas {box.x0} a {box.x1 - 1}, linhas {box.y0} a {box.y1 - 1}, centro na linha"
+            f" {_px((box.y0 + box.y1) / 2)}"
+        )
+        if g.marker_rows is not None:
+            text += f"; a cotação está nas linhas {g.marker_rows[0]} a {g.marker_rows[1] - 1} dele"
+        lines.append(text + ".")
+    if g.label_x0 is not None:
+        lines.append(
+            f"    rótulos do eixo, procurados da coluna {g.label_x0} à borda direita: {len(g.axis_lines)} linha(s) de"
+            f" texto; as velas, à esquerda da coluna {g.axis_x0}."
+        )
+        for axis_line in g.axis_lines[:limit]:
+            place = f"      linhas {axis_line.top} a {axis_line.bottom - 1}, meio na linha {_px(axis_line.center)}"
+            if axis_line.tick is not None:
+                place += f", linha da grade {_px(axis_line.tick)}"
+            if axis_line.price is not None:
+                lines.append(f"{place}: rótulo {axis_line.text}")
+            else:
+                lines.append(f"{place}: {axis_line.problem}")
+        if len(g.axis_lines) > limit:
+            lines.append(f"      e mais {len(g.axis_lines) - limit} linha(s), não mostradas.")
+        if g.grid_offset is not None:
+            lines.append(
+                f"    linhas da grade ao lado de todos os rótulos, a {g.grid_offset:+.1f} pixels do meio dos algarismos: os"
+                " preços dos rótulos ficam nelas."
+            )
+        elif any(axis_line.price is not None for axis_line in g.axis_lines):
+            lines.append("    linhas da grade: não há uma ao lado de cada rótulo; vale o meio dos algarismos.")
+    if g.label_line is not None:
+        text = (
+            f"    reta dos rótulos: 1 pixel = {abs(g.label_line.slope):.6g}; maior distância de um rótulo à reta:"
+            f" {g.label_line.residual:.1f} pixels"
+        )
+        if g.label_line.dropped:
+            text += f"; deixado de fora: {', '.join(label for _, label in g.label_line.dropped)}"
+        lines.append(text + ".")
+    if g.forming is not None:
+        shape = g.forming
+        closes = f", fecha na linha {_px(g.close_row)}" if g.close_row is not None else ""
+        lines.append(
+            f"    velas: {g.shapes} formas das cores calibradas; a que se forma, de {shape.kind}, nas colunas {shape.x0} a"
+            f" {shape.x1 - 1} e linhas {shape.top} a {shape.bottom}{closes}."
+        )
+    if g.marker_lines is not None:
+        if g.marker_lines:
+            shown = ", ".join(
+                (f"linha {line.top}" if line.bottom - line.top == 1 else f"linhas {line.top} a {line.bottom - 1}")
+                + f" ({color_hex(line.color)})"
+                for line in g.marker_lines
+            )
+            lines.append(f"    linhas finas na altura do marcador: {shown}.")
+        else:
+            lines.append("    linhas finas na altura do marcador: nenhuma.")
+        if g.price_line is not None:
+            lines.append(f"    linha do preço (a única da cor do marcador): preço na linha {g.price_line:.1f}.")
+        else:
+            lines.append("    linha do preço: nenhuma linha única da cor do marcador; vale o fechamento da vela.")
+    if g.price_row is not None:
+        lines.append(f"    linha da cotação no gráfico: {_px(g.price_row)}.")
+        if box is not None:
+            lines.append(
+                f"    o centro da caixa do marcador está a {(box.y0 + box.y1) / 2 - g.price_row:+.1f} pixels dela; a"
+                f" borda de cima, a {box.y0 - g.price_row:+.1f}; a de baixo, a {box.y1 - g.price_row:+.1f}."
+            )
+    if g.predicted_row is not None and g.price_row is not None:
+        tolerance = MARKER_TOLERANCE * g.scale + 0.5
+        lines.append(
+            f"    a reta dos rótulos põe a cotação do marcador na linha {g.predicted_row:.1f}: {g.deviation:+.1f} pixels"
+            f" da linha da cotação no gráfico (limite: {tolerance:.1f})."
+        )
+    elif g.predicted_row is not None:
+        lines.append(f"    a reta dos rótulos põe a cotação do marcador na linha {g.predicted_row:.1f}.")
+    return lines
+
+
+RULER = 56  # device pixels: the width of the ruler right of the capture, in the diagnostic image
+RULER_COLORS = {
+    "marker": (255, 220, 0),  # the top and bottom rows of the marker's box
+    "quote": (255, 140, 0),  # the rows of the quote's line inside the marker
+    "text": (128, 128, 128),  # the top and bottom rows of each line of text of the axis
+    "label": (0, 230, 0),  # the row of a label's price
+    "unread": (230, 0, 0),  # the middle of a line of text that is not a label
+    "close": (255, 255, 255),  # the close of the forming candle, and the quote's row in the chart
+    "line": (0, 220, 255),  # the price line
+    "predicted": (255, 0, 255),  # where the labels put the marker's quote
+}
+RULER_LEGEND = (
+    "régua à direita da captura, de 4 colunas: na 1ª, amarelo = bordas de cima e de baixo do marcador e laranja = a linha"
+    " da cotação dentro dele; na 2ª, cinza = bordas de cada linha de texto do eixo, verde = posição de um rótulo lido e"
+    " vermelho = linha de texto que não é rótulo; na 3ª, branco = fechamento da vela que se forma e ciano = linha do"
+    " preço; na 4ª, branco = linha da cotação no gráfico e magenta = onde os rótulos põem a cotação do marcador"
+)
+
+
+def diagnostic_png(image, reading=None):
+    """A PNG of the capture as it is, with a ruler on its right that marks the rows found in it."""
+    width = image.width + RULER
+    pixels = bytearray(width * image.height * 3)
+    row_bytes = image.width * 3
+    for y in range(image.height):
+        pixels[y * width * 3:y * width * 3 + row_bytes] = image.data[y * row_bytes:(y + 1) * row_bytes]
+
+    def mark(row, color, band, length=12):
+        if row is None:
+            return
+        y = math.floor(row)
+        if 0 <= y < image.height:
+            start = (y * width + image.width + 14 * band + 1) * 3
+            pixels[start:start + 3 * length] = bytes(RULER_COLORS[color]) * length
+
+    g = reading.geometry if reading is not None else None
+    if g is not None:
+        if g.marker_box is not None:
+            mark(g.marker_box.y0, "marker", 0)
+            mark(g.marker_box.y1 - 1, "marker", 0)
+        if g.marker_rows is not None:
+            mark(g.marker_rows[0], "quote", 0, 6)
+            mark(g.marker_rows[1] - 1, "quote", 0, 6)
+        for axis_line in g.axis_lines:
+            mark(axis_line.top, "text", 1)
+            mark(axis_line.bottom - 1, "text", 1)
+            mark(axis_line.row, "label" if axis_line.price is not None else "unread", 1)
+        mark(g.close_row, "close", 2)
+        mark(g.price_line, "line", 2, 6)
+        mark(g.price_row, "close", 3)
+        mark(g.predicted_row, "predicted", 3, 6)
+    return quote_reader.png_bytes(width, image.height, pixels)
 
 
 def stamp(reading, captured_at, period):

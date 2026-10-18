@@ -817,7 +817,7 @@ class RealChartTest(unittest.TestCase):
         session = observe.open_playwright_session(profile_dir, headless=True)
         original_close = session.close
         self.addCleanup(original_close)
-        page = CANDLE_PAGE.replace("__BARS__", json.dumps(CANDLE_BARS))
+        page = getattr(self, "page", None) or CANDLE_PAGE.replace("__BARS__", json.dumps(CANDLE_BARS))
         session._context.route(
             "https://observe.test/**",
             lambda route: route.fulfill(status=200, content_type="text/html; charset=utf-8", body=page),
@@ -861,6 +861,137 @@ class RealChartTest(unittest.TestCase):
                 self.assertLessEqual(abs(got - want), 1.5 * resolution, (bar, (open_, high, low, close)))
         self.assertIsNone(self.clicks)  # nothing on the page was clicked
         self.assertNotIn("SEGREDO", text)
+
+    def test_a_marker_hanging_below_its_price_with_a_countdown_is_read_from_the_chart_drawing(self):
+        """The geometry of the reported failure, drawn in canvas: the quote's row is not the box's middle."""
+        from pocketautonomo import candles, chart, chart_analysis
+
+        sources = {"asset": "#asset", "price": "", "payout": "#payout", "price_ocr": {"chart": "#plot", "marker": HANGING_MARKER}}
+        (self.runtime / observe.SELECTORS_FILE_NAME).write_text(json.dumps(sources), encoding="utf-8")
+        self.page = HANGING_PAGE.replace("__BARS__", json.dumps(HANGING_BARS))
+        moments = iter(datetime(2026, 10, 18, 12, 0, 20, tzinfo=timezone.utc) + timedelta(milliseconds=10 * n) for n in range(10**6))
+        answers = iter(["", "60", ""])  # Enter after the login, the period, accept the reading
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = chart.main(
+                ["--url", CANDLE_URL, "--configure", "--count", "1"],
+                open_session=self.open_session,
+                read_line=lambda prompt="": next(answers),
+                now=lambda: next(moments),
+                show_image=lambda path: None,
+            )
+        text = out.getvalue()
+        self.assertEqual(code, 0, text + err.getvalue())
+        self.assertIsNotNone(candles.load_calibration(self.runtime / candles.CALIBRATION_FILE_NAME))
+        self.assertIn("rótulo 161.600", text)
+        self.assertIn("rótulo 161.000", text)
+        # The middle of the 23-pixel box is about 11.5 pixels below the quote's row in the chart.
+        self.assertRegex(text, r"o centro da caixa do marcador está a \+1[0-2]\.\d pixels dela")
+        self.assertRegex(text, r"a reta dos rótulos põe a cotação do marcador na linha \d+\.\d: [+-][0-2]\.\d pixels")
+        history = chart_analysis.load_candles(self.runtime)
+        series = history.get("EUR/USD OTC", 60)
+        self.assertEqual(len(series.bars), 45)
+        resolution = series.bars[0].resolution
+        for bar, (open_, high, low, close) in zip(series.bars, HANGING_BARS):
+            for got, want in ((bar.open, open_), (bar.high, high), (bar.low, low), (bar.close, close)):
+                self.assertLessEqual(abs(got - want), 2 * resolution, (bar, (open_, high, low, close)))
+        self.assertIsNone(self.clicks)
+
+
+@unittest.skipUnless(HAVE_OCR or REQUIRED, "Playwright e OCR local (rapidocr) não estão instalados neste Python")
+class RealCandleScaleTest(unittest.TestCase):
+    """The candles of HANGING_PAGE read at display scales of 125% and 150%, with real Chromium and the real OCR.
+
+    At such scales the candles sit a whole pixel apart in turns and the price line falls between two rows
+    of pixels: each candle must keep its place, and each price must be within 2 pixels.
+    """
+
+    def test_every_candle_keeps_its_place_and_prices_at_125_and_150_percent(self):
+        from playwright.sync_api import sync_playwright
+
+        from pocketautonomo import candles, quote_ocr, quote_reader
+
+        engine = quote_ocr.RapidOcrEngine()
+        model = candles.CandleModel((0x45, 0xB7, 0x34), (0xFF, 0x3E, 0x1F), 60)
+        marker = quote_reader.MarkerModel.from_json(HANGING_MARKER)
+        page_html = HANGING_PAGE.replace("__BARS__", json.dumps(HANGING_BARS))
+        captures = {}
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                for ratio in (1.25, 1.5):
+                    page = browser.new_page(device_scale_factor=ratio, viewport={"width": 800, "height": 600})
+                    page.set_content(page_html)
+                    box = page.locator("#plot").bounding_box()
+                    captures[ratio] = (quote_ocr.decode_png(page.screenshot(clip=box)), box["width"])
+                    page.close()
+            finally:
+                browser.close()
+        for ratio, (image, css_width) in captures.items():
+            with self.subTest(scale=ratio):
+                reading = candles.read_candles(image, image.width / css_width, model, marker, engine)
+                self.assertTrue(reading.available, reading.reason)
+                self.assertEqual(list(reading.indices), list(range(45, -1, -1)))
+                for index, candle in zip(reading.indices, reading.candles):
+                    bar = HANGING_BARS[45 - index]
+                    for got, want in zip((candle.open, candle.high, candle.low, candle.close), bar):
+                        self.assertLessEqual(abs(got - want), 2 * reading.resolution, (ratio, index, candle, bar))
+                g = reading.geometry
+                self.assertIsNotNone(g.price_line)
+                self.assertAlmostEqual((g.marker_box.y0 + g.marker_box.y1) / 2 - g.price_row, 11.5 * ratio, delta=1.5)
+
+
+# ARTIFICIAL candles with three decimals, like a quote of 161.xxx, for HANGING_PAGE; not the Pocket Option.
+HANGING_BARS = []
+_price = 161.420
+for _n in range(46):
+    _move = (-0.012 if _n % 4 == 3 else 0.009) if _n < 20 else (0.008 if _n % 3 == 0 else -0.019)
+    _open, _close = round(_price, 3), round(_price + _move, 3)
+    HANGING_BARS.append((_open, round(max(_open, _close) + 0.004, 3), round(min(_open, _close) - 0.005, 3), _close))
+    _price = _close
+HANGING_MARKER = {"colors": ["#3f638e"], "width": 55.0, "height": 23.0, "right_gap": 3.0, "tolerance": 40}
+# The geometry of the reported failure: a marker 55x23, 80% opaque, whose top is at the price, with the quote
+# and a countdown under it; the labels every 0.200, at fractional rows; a dashed price line; and a vertical
+# line through the columns of the axis, left of the marker, like a line of the expiration time.
+HANGING_PAGE = """<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><title>Velas de teste local</title>
+<style>body { margin: 0; background: #11131c; color: #ccc; font-family: Arial, sans-serif; }
+#plot { display: block; margin: 10px; width: 760px; height: 480px; }</style></head>
+<body>
+<div id="asset">EUR/USD OTC</div><div id="payout">+92%</div>
+<canvas id="plot"></canvas>
+<p>Página de teste do PocketAutonomo, com velas ARTIFICIAIS; não é a Pocket Option.</p>
+<button id="call" onclick="this.dataset.n = (+this.dataset.n || 0) + 1">CALL</button>
+<script>
+const BARS = __BARS__;
+const W = 760, H = 480, AXIS = 690, TOP = 20, BOTTOM = 460, SPACING = 13, BODY = 9, LOW = 160.98, HIGH = 161.70;
+const dpr = window.devicePixelRatio || 1;
+const plot = document.getElementById("plot"); plot.width = W * dpr; plot.height = H * dpr;
+const p = plot.getContext("2d"); p.setTransform(dpr, 0, 0, dpr, 0, 0);
+const row = price => TOP + (HIGH - price) / (HIGH - LOW) * (BOTTOM - TOP);
+p.fillStyle = "#141726"; p.fillRect(0, 0, W, H);
+const left = AXIS - 40 - (BARS.length - 1) * SPACING - BODY;
+BARS.forEach(([o, h, l, c], i) => {
+  const x = left + i * SPACING, color = c >= o ? "#45b734" : "#ff3e1f";
+  const upper = row(Math.max(o, c)), lower = Math.max(upper + 1, row(Math.min(o, c)));
+  p.fillStyle = color; p.fillRect(x, upper, BODY, lower - upper);
+  p.fillRect(x + Math.floor(BODY / 2), row(h), 1, row(l) - row(h));
+});
+p.fillStyle = "rgba(255,255,255,0.35)"; p.fillRect(AXIS + 2, 0, 1, H);
+p.font = "11px Arial"; p.textBaseline = "middle"; p.fillStyle = "#8a8f9e";
+for (let k = Math.ceil(LOW / 0.2); k * 0.2 <= HIGH; k++) {
+  const y = row(k * 0.2);
+  if (y > TOP + 8 && y < BOTTOM - 8) p.fillText((k * 0.2).toFixed(3), AXIS + 8, y);
+}
+const last = BARS[BARS.length - 1][3], y = row(last);
+p.fillStyle = "rgba(74,118,168,0.8)";
+for (let x = 0; x < AXIS; x += 6) p.fillRect(x, y, 4, 1);
+p.fillRect(AXIS + 12, y, 55, 23);
+p.fillStyle = "#ffffff"; p.fillText(last.toFixed(3), AXIS + 16, y + 7);
+p.font = "9px Arial"; p.fillText("00:42", AXIS + 16, y + 17);
+</script>
+</body></html>
+"""
 
 
 @unittest.skipUnless(HAVE_OCR or REQUIRED, "Playwright e OCR local (rapidocr) não estão instalados neste Python")
