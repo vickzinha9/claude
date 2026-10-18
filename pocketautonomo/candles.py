@@ -246,6 +246,7 @@ class AxisLine:
     problem: object = None  # why it is not a label, or None
     read: bool = False  # whether the OCR read it
     tick: object = None  # the row of the grid line beside it, when the grid marks the labels
+    note: object = None  # how its two readings agreed, when they were not the same text
 
     @property
     def center(self):
@@ -456,13 +457,14 @@ def _enlarged(gray, height):
     return GrayImage(gray.width * factor, gray.height * factor, bytes(out))
 
 
-def read_axis(image, scale, x0, skip, engine, candle_colors=()):
+def read_axis(image, scale, x0, skip, engine, candle_colors=(), decimals=None):
     """AxisLine of each line of text in the columns from x0 to the right edge, top down.
 
     skip, (first, last + 1), are the rows of the marker, left out. candle_colors, the colors of the
     candles, tell the pixels of a candle under the axis, its faint edges too: they are not text. The
     lines of the size and shape of a price are read by the OCR from the top down, each twice, as the
-    marker's text is, until MAX_AXIS_LABELS of them are labels.
+    marker's text is, until MAX_AXIS_LABELS of them are labels. decimals, those of the marker's quote,
+    confirm a decimal point that only one of the two readings of a label saw (lost_separator).
     """
     width, height = image.width - x0, image.height
     if width <= 0:
@@ -557,7 +559,7 @@ def read_axis(image, scale, x0, skip, engine, candle_colors=()):
             line = _axis_line_image(
                 group, number, owner, mask, distances, width, height, (first, end), round(LINE_WIDTH * scale) + 1,
             )
-            reading = _read_label(line, engine)
+            reading = _read_label(line, engine, decimals)
             lines.append(AxisLine(*place, **reading, read=True))
             labels += reading.get("price") is not None
             readings += 1
@@ -613,7 +615,24 @@ def _axis_line_image(group, number, owner, mask, distances, width, height, skip,
     return GrayImage(x1 - x0, y1 - y0, bytes(data))
 
 
-def _read_label(gray, engine):
+def lost_separator(text_a, text_b, decimals):
+    """The quote of two readings that differ only in a decimal separator missing from one, or None.
+
+    At the size of the axis's font, the decimal point is a pixel or two, fainter than the digits,
+    and the black-and-white reading can lose it (on the Windows of the CI, '161.600' and '161600').
+    The digits must be the same in both readings, and the one separator must leave decimals digits
+    after it, the decimals of the marker's quote, which its own two readings agreed on: the place of
+    the point is then confirmed apart from the reading that lost it.
+    """
+    for with_point, without in ((text_a, text_b), (text_b, text_a)):
+        match = quote_reader.SINGLE_SEPARATOR.fullmatch(with_point)
+        if match is not None and without.isdigit() and without == match.group(1) + match.group(2):
+            if decimals is not None and len(match.group(2)) == decimals:
+                return f"{match.group(1)}.{match.group(2)}"
+    return None
+
+
+def _read_label(gray, engine, decimals=None):
     """{text, price} of a line of the axis read twice by the OCR as a price, or {problem}."""
     lines = quote_reader._text_lines(gray)
     if len(lines) != 1:
@@ -627,7 +646,13 @@ def _read_label(gray, engine):
     text_a, text_b = "".join(text_a.split()), "".join(text_b.split())
     if not (QUOTE_PATTERN.fullmatch(text_a) or QUOTE_PATTERN.fullmatch(text_b)):
         return {"problem": f"o OCR leu {text_a or text_b or 'nada'!r}, que não é um preço"}
-    quote, _ = agreed_quote(text_a, text_b)
+    quote, note = agreed_quote(text_a, text_b)
+    if quote is None:
+        quote = lost_separator(text_a, text_b, decimals)
+        note = (
+            f"o separador decimal só apareceu numa das leituras ({text_a!r} e {text_b!r}), com as casas do marcador"
+            if quote is not None else None
+        )
     if quote is None:
         return {"problem": f"as duas leituras do OCR divergiram: {text_a!r} e {text_b!r}"}
     value = number_of(quote)
@@ -635,7 +660,7 @@ def _read_label(gray, engine):
         return {"problem": f"o OCR leu {quote!r}, que não é um preço"}
     if min(score_a, score_b) < MIN_SCORE:
         return {"problem": f"o OCR leu {quote!r} com confiança {min(score_a, score_b):.2f}, abaixo de {MIN_SCORE:.2f}"}
-    return {"text": quote, "price": value}
+    return {"text": quote, "price": value, "note": note}
 
 
 @dataclass(frozen=True)
@@ -952,7 +977,7 @@ def read_candles(image, scale, model, marker_model, engine):
     # narrower than the text of the labels or not aligned with it.
     label_x0 = max(0, box.x0 - round(LABEL_REACH * scale))
     seen["label_x0"] = label_x0
-    lines = read_axis(image, scale, label_x0, skip, engine, (model.up, model.down))
+    lines = read_axis(image, scale, label_x0, skip, engine, (model.up, model.down), decimals)
     labels = [line for line in lines if line.price is not None]
     ticks, offset = grid_ticks(image, scale, axis_x0, labels, skip, background)
     if ticks is not None:
@@ -1156,7 +1181,7 @@ def geometry_lines(reading, limit=12):
             if axis_line.tick is not None:
                 place += f", linha da grade {_px(axis_line.tick)}"
             if axis_line.price is not None:
-                lines.append(f"{place}: rótulo {axis_line.text}")
+                lines.append(f"{place}: rótulo {axis_line.text}" + (f" ({axis_line.note})" if axis_line.note else ""))
             else:
                 lines.append(f"{place}: {axis_line.problem}")
         if len(g.axis_lines) > limit:

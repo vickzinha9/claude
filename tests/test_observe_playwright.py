@@ -998,7 +998,7 @@ const last = BARS[BARS.length - 1][3], y = row(last);
 p.fillStyle = "rgba(74,118,168,0.8)";
 for (let x = 0; x < AXIS; x += 6) p.fillRect(x, y, 4, 1);
 p.fillRect(AXIS + 12, y, 55, 23);
-p.fillStyle = "#ffffff"; p.font = "12px Arial"; p.fillText(last.toFixed(3), AXIS + 15, y + 7);
+p.fillStyle = "#ffffff"; p.font = "bold 13px Arial"; p.fillText(last.toFixed(3), AXIS + 15, y + 7);
 p.font = "9px Arial"; p.fillText("00:42", AXIS + 15, y + 18);
 </script>
 </body></html>

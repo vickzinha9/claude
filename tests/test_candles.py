@@ -397,7 +397,9 @@ class AxisTest(unittest.TestCase):
     def test_a_label_whose_two_readings_disagree_or_are_unsure_is_left_out(self):
         chart = yen_chart()
         for wrong, problem in (
-            (("161400", 0.99), "as duas leituras do OCR divergiram: '161.400' e '161400'"),
+            (("161.460", 0.99), "as duas leituras do OCR divergiram: '161.400' e '161.460'"),
+            (("161409", 0.99), "as duas leituras do OCR divergiram: '161.400' e '161409'"),  # another digit, too
+            (("16.1400", 0.99), "as duas leituras do OCR divergiram: '161.400' e '16.1400'"),
             (("161.400", 0.62), "o OCR leu '161.400' com confiança 0.62, abaixo de 0.90"),
         ):
             with self.subTest(problem=problem):
@@ -409,6 +411,35 @@ class AxisTest(unittest.TestCase):
                 self.assertEqual([text for _, text in reading.scale.labels], ["161.600", "161.200", "161.000"])
                 [unread] = [line for line in reading.geometry.axis_lines if line.price is None]
                 self.assertEqual(unread.problem, problem)
+
+    def test_a_decimal_point_lost_by_one_reading_is_confirmed_by_the_decimals_of_the_marker(self):
+        # As on the Windows of the CI: the black-and-white reading lost the faint point of every label.
+        chart = yen_chart()
+        answers = list(chart.answers)
+        for at in range(3, len(answers), 2):
+            answers[at] = (answers[at][0].replace(".", ""), 0.99)
+        reading = read(chart, engine=ci.FakeEngine(answers=answers))
+        self.assertTrue(reading.available, reading.reason)
+        self.assertEqual([text for _, text in reading.scale.labels], ["161.600", "161.400", "161.200", "161.000"])
+        line = reading.geometry.axis_lines[0]
+        self.assertEqual(
+            line.note, "o separador decimal só apareceu numa das leituras ('161.600' e '161600'), com as casas do marcador"
+        )
+        self.assertIn("rótulo 161.600 (o separador decimal só apareceu numa das leituras", "\n".join(candles.geometry_lines(reading)))
+
+    def test_a_lost_point_needs_the_digits_and_the_decimals_of_the_marker(self):
+        for gray, bw, decimals, quote in (
+            ("161.600", "161600", 3, "161.600"),
+            ("161600", "161,600", 3, "161.600"),  # either reading may keep it, a comma too
+            ("161.600", "161600", 5, None),  # a label with other decimals than the marker's
+            ("16.1600", "161600", 3, None),
+            ("161.600", "161690", 3, None),
+            ("161.600", "16160", 3, None),
+            ("161.600", "161600", None, None),
+            ("1.61.600", "161600", 3, None),
+        ):
+            with self.subTest(gray=gray, bw=bw, decimals=decimals):
+                self.assertEqual(candles.lost_separator(gray, bw, decimals), quote)
 
     def test_without_any_label_read_the_reading_says_why_for_each_line(self):
         chart = yen_chart()
