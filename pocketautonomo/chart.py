@@ -36,6 +36,7 @@ import argparse
 import math
 import sys
 from dataclasses import dataclass
+from datetime import timedelta
 
 from pocketautonomo import analysis, candles, chart_analysis, observe, scan
 from pocketautonomo.observe import (
@@ -56,6 +57,7 @@ from pocketautonomo.observe import (
 DEFAULT_INTERVAL = 5.0
 DEFAULT_PERIOD = 60
 PREVIEW_PREFIX = "velas-previa"
+PREVIEW_TITLE = "Velas lidas, numeradas da que se forma (0) para trás, com o número logo acima de cada uma"
 DIAGNOSTIC_PREFIX = "velas-diagnostico"  # the capture of a reading that failed in the calibration
 CONFIGURATION_MOMENT = "durante a calibração das velas; nada foi gravado"
 INTRO = (
@@ -224,7 +226,9 @@ def configure(session, selectors, current, read_line, ctx):
     while True:
         if session.is_closed():
             raise ObserverStopped(observe.WINDOW_CLOSED_IN_CONFIGURATION)
+        captured_at = ctx.now()
         capture, problem = observe.capture_chart(session, source.chart)
+        captured_by = ctx.now()  # the screen was taken between captured_at and captured_by
         reading = None
         if capture is None:
             say(f"  O gráfico não foi capturado: {problem}.")
@@ -238,11 +242,14 @@ def configure(session, selectors, current, read_line, ctx):
             else:
                 model = candles.CandleModel(colors[0], colors[1], period)
                 reading = candles.read_candles(image, scale, model, source.marker, ctx.engine.get())
-                for line in preview_lines(model, reading) + candles.geometry_lines(reading):
+                for line in preview_lines(model, reading, captured_at, captured_by) + candles.geometry_lines(reading):
                     say(line)
                 if reading.available:
-                    boxes = [(index if index < 6 else "", candle.box()) for index, candle in zip(reading.indices, reading.candles)]
-                    observe.save_preview(ctx, PREVIEW_PREFIX, image, boxes, read_line, "Velas lidas, numeradas da que se forma (0) para trás")
+                    path = observe.save_preview(
+                        ctx, PREVIEW_PREFIX, image, [], read_line, PREVIEW_TITLE, data=candles.preview_png(image, reading),
+                    )
+                    if path is not None and path != observe.PREVIEW_GIVE_UP:
+                        say(f"  Na imagem, {candles.preview_legend(reading)}.")
                 else:
                     save_diagnostic(ctx, image, reading, read_line)
         if reading is not None and reading.available:
@@ -282,8 +289,11 @@ def save_diagnostic(ctx, image, reading, read_line):
         say("  Para investigar a falha, envie essa imagem e o motivo acima; não mostre dados seus nela.")
 
 
-def preview_lines(model, reading):
-    """What the calibration found, for you to compare with the chart."""
+def preview_lines(model, reading, captured_at=None, captured_by=None):
+    """What the calibration found, for you to compare with the chart.
+
+    captured_at and captured_by are this computer's clock just before and just after the capture.
+    """
     lines = [
         f"  Cores achadas: velas de alta {candles.color_hex(model.up)}, de baixa {candles.color_hex(model.down)};"
         f" período de {model.period} s."
@@ -301,12 +311,50 @@ def preview_lines(model, reading):
         + (f"; {len(reading.missing)} posição(ões) sem vela lida" if reading.missing else "")
         + "."
     )
-    for index, candle in list(zip(reading.indices, reading.candles))[-6:]:
+    # The same candles as the numbers of the preview: 0, the forming one, to PREVIEW_NUMBERED - 1, oldest first.
+    present = dict(zip(reading.indices, reading.candles))
+    for index in range(min(candles.PREVIEW_NUMBERED, max(reading.indices) + 1) - 1, -1, -1):
         name = "a que se forma" if index == 0 else f"{index}"
+        candle = present.get(index)
+        if candle is None:
+            lines.append(f"    vela {name}: nenhuma vela lida nesta posição")
+            continue
         lines.append(
             f"    vela {name}: {candle.kind}, abertura {reading.text(candle.open)}, máxima {reading.text(candle.high)},"
             f" mínima {reading.text(candle.low)}, fechamento {reading.text(candle.close)}"
         )
+    lines += timing_lines(model, reading, captured_at, captured_by)
+    return lines
+
+
+def timing_lines(model, reading, captured_at, captured_by=None):
+    """When each candle started by this computer's clock, and the countdown of the marker against that clock.
+
+    The starts come from captured_at, as in every reading (candles.stamp). The countdown is compared at the
+    middle of the capture, between captured_at and captured_by, which it may have taken a moment.
+    """
+    if captured_at is None:
+        return []
+    starts, near = candles.stamp(reading, captured_at, model.period)
+    forming = starts[0]
+    previous = forming - timedelta(seconds=model.period)
+    lines = [
+        f"  Pelo relógio deste computador, a vela que se forma (0) começou às {forming:%H:%M:%S} UTC"
+        f" ({forming.astimezone():%H:%M:%S} no fuso deste computador), e a última fechada (1), às {previous:%H:%M:%S}"
+        f" UTC ({previous.astimezone():%H:%M:%S}); cada vela, um período antes da seguinte."
+        + (f" Atenção: {near}." if near else "")
+    ]
+    if reading.countdown is not None:
+        middle = captured_at if captured_by is None else captured_at + (captured_by - captured_at) / 2
+        remaining, problem = candles.countdown_check(reading, middle, model.period)
+        verdict = f"não confere: {problem}" if problem else "confere"
+        lines.append(
+            f"  Contador no marcador: {reading.countdown_text}. Pelo relógio deste computador, com velas de {model.period} s,"
+            f" a que se forma fecha em {chart_analysis.number(remaining, 1)} s: {verdict}."
+        )
+    elif reading.marker_others:
+        shown = ", ".join(f"{a!r} e {b!r}" for a, b in reading.marker_others)
+        lines.append(f"  Contador no marcador: não lido (o OCR leu {shown}, sem duas leituras iguais de um contador).")
     return lines
 
 

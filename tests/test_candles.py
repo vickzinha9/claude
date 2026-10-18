@@ -191,19 +191,7 @@ class ReadCandlesTest(unittest.TestCase):
         )
 
 
-def yen_bars(count=40, end=161.085, step=0.02, seed=11):
-    """ARTIFICIAL candles with 3 decimals, like a quote of 161.xxx, ending at end."""
-    bars = ci.artificial_bars(count, start=1.0, step=step, seed=seed)
-    shift = end - bars[-1][3]
-    return [tuple(round(value + shift, 3) for value in bar) for bar in bars]
-
-
-def yen_chart(bars=None, **options):
-    """A chart like the one of the reported failure: labels every 0.200 and a quote near 161.085."""
-    options.setdefault("label_step", 0.2)
-    return ci.CandleChart(bars or yen_bars(), 160.98, 161.70, decimals=3, **options)
-
-
+yen_bars, yen_chart = ci.yen_bars, ci.yen_chart
 HANGING = {"marker_height": 23, "marker_top": 0, "countdown": "00:42"}  # a 23-pixel marker below its price
 
 
@@ -553,11 +541,176 @@ class CalibrationTest(unittest.TestCase):
                         candles.load_calibration(path)
                     self.assertIn(message, str(raised.exception))
 
-    def test_the_preview_marks_the_candles(self):
-        chart = chart_of(ci.artificial_bars(20))
+class IndexTest(unittest.TestCase):
+    """Each candle read: its index, its place in the capture, its color and prices, and its number on the preview.
+
+    ARTIFICIAL DATA. On the preview of the Pocket Option, the 0 was on the red candle before the green one that
+    was forming: the numbers were drawn left of each candle's box, over the candle before it. These charts draw
+    that case, a green candle forming after a red one, and check, candle by candle, that the reading puts it at
+    its index, at the columns where it was drawn, with its color and prices, and that the preview draws that
+    index over those columns and no other.
+    """
+
+    CASES = (
+        ("as on the reported preview", {}),
+        ("candles 12.25 pixels apart, as at 125%", {"spacing": 12.25}),
+        ("a screen of density 2", {"scale": 2}),
+        ("candles 8 pixels apart", {"spacing": 8, "body": 5}),
+        ("index 3 not read", {"skip": {36}}),
+        ("the hanging two-line marker", HANGING),
+    )
+
+    def chart(self, **options):
+        return yen_chart(ci.green_after_red(yen_bars()), **options)
+
+    def assert_indexed(self, chart, reading, prices=True):
+        """Every candle of reading at the columns, color and prices of bars[last - index], oldest first."""
+        self.assertTrue(reading.available, reading.reason)
+        last = len(chart.bars) - 1
+        self.assertEqual(reading.indices[-1], 0)
+        self.assertEqual(list(reading.indices), sorted(reading.indices, reverse=True))
+        self.assertEqual(reading.forming.kind, candles.UP)  # the green one, the rightmost
+        for index, candle in zip(reading.indices, reading.candles):
+            bar = chart.bars[last - index]
+            x0, x1 = chart.columns[last - index]
+            self.assertLessEqual(max(abs(candle.x0 - x0), abs(candle.x1 - x1)), 1, (index, candle, (x0, x1)))
+            self.assertEqual(candle.kind, candles.UP if bar[3] >= bar[0] else candles.DOWN, index)
+            for got, want in zip((candle.open, candle.high, candle.low, candle.close), bar if prices else ()):
+                self.assertLessEqual(abs(got - want), 1.5 * chart.resolution, (index, candle, bar))
+
+    def assert_numbered(self, chart, reading, png):
+        """Each index under PREVIEW_NUMBERED drawn once, over the columns of its own candle and of no other one."""
+        image = ci.decode_png(png)
+        numbers = ci.preview_numbers(image)
+        last = len(chart.bars) - 1
+        expected = sorted(index for index in reading.indices if index < candles.PREVIEW_NUMBERED)
+        self.assertEqual(sorted(int(text) for text, _, _ in numbers), expected)
+        by_index = dict(zip(reading.indices, reading.candles))
+        half = chart.spacing_px / 2
+        for text, color, (x0, y0, x1, y1) in numbers:
+            index = int(text)
+            own = chart.columns[last - index]
+            center = (own[0] + own[1]) / 2
+            self.assertTrue(center - half <= x0 and x1 <= center + half, (index, (x0, x1), own))
+            for other, (a, b) in enumerate(chart.columns):
+                if other != last - index:
+                    self.assertFalse(a < x1 and x0 < b, f"o número {index} cobre a vela {last - other}")
+            candle = by_index[index]
+            self.assertTrue(y1 <= candle.top or y0 > candle.bottom, (index, (y0, y1), candle))
+            self.assertEqual(color, candles.FORMING_COLOR if index == 0 else candles.PREVIEW_COLOR)
+        forming = reading.forming
+        self.assertEqual(image.pixel(forming.x0 - 1, (forming.top + forming.bottom) // 2), candles.FORMING_COLOR)
+        for index, candle in zip(reading.indices, reading.candles):
+            if index >= candles.PREVIEW_NUMBERED:  # the other candles read: a tick under each
+                self.assertEqual(image.pixel(round(candle.center), candle.bottom + 2), candles.PREVIEW_COLOR, index)
+
+    def test_the_forming_candle_is_0_and_the_last_closed_1_at_their_places_and_on_the_preview(self):
+        for name, options in self.CASES:
+            with self.subTest(name):
+                chart = self.chart(**options)
+                reading = read(chart)
+                self.assert_indexed(chart, reading)
+                by_index = dict(zip(reading.indices, reading.candles))
+                self.assertEqual(by_index[1].kind, candles.DOWN)  # the red one before it
+                self.assert_numbered(chart, reading, candles.preview_png(chart.image, reading))
+                if "skip" in options:
+                    self.assertEqual(reading.missing, (3,))
+
+    def test_a_number_that_does_not_fit_above_its_candle_goes_below_it(self):
+        bars = ci.green_after_red(yen_bars())
+        open_, high, low, close = bars[-4]
+        bars[-4] = (open_, 161.70, low, close)  # the wick of candle 3 up to the top of the chart
+        chart = yen_chart(bars, top=4)
         reading = read(chart)
-        png = candles.preview_png(chart.image, reading)
-        self.assertTrue(png.startswith(b"\x89PNG"))
+        # The places and colors; the prices are those of the other cases, on another scale, where a candle with
+        # its open at its close can fall a pixel and a half from its price.
+        self.assert_indexed(chart, reading, prices=False)
+        numbers = {int(text): box for text, _, box in ci.preview_numbers(ci.decode_png(candles.preview_png(chart.image, reading)))}
+        candle = dict(zip(reading.indices, reading.candles))[3]
+        self.assertGreater(numbers[3][1], candle.bottom)  # below it
+        self.assert_numbered(chart, reading, candles.preview_png(chart.image, reading))
+
+    def test_candles_too_close_for_numbers_get_only_their_outline(self):
+        chart = self.chart(spacing=6, body=4)
+        reading = read(chart)
+        self.assert_indexed(chart, reading)
+        self.assertLess(reading.spacing, candles.MIN_NUMBER_SPACING)
+        image = ci.decode_png(candles.preview_png(chart.image, reading))
+        self.assertEqual(ci.preview_numbers(image), [])  # no number that could be read as another
+        forming = reading.forming
+        self.assertEqual(image.pixel(forming.x0 - 1, (forming.top + forming.bottom) // 2), candles.FORMING_COLOR)
+        self.assertIn("os números não caberiam sem confusão", candles.preview_legend(reading))
+        self.assertEqual(candles.preview_legend(read(self.chart())), candles.PREVIEW_LEGEND)
+
+    def test_a_forming_candle_not_read_that_moved_beyond_the_tolerance_is_refused_not_replaced(self):
+        # A green that the calibration does not know, risen 0.012, 5 pixels: the red one before it closes 5 pixels
+        # from the price line, and the reading is refused. Within MARKER_TOLERANCE, 3 pixels here, it would pass
+        # for the red one: the limit that STATUS, item 39, keeps.
+        bars = ci.green_after_red(yen_bars())
+        chart = yen_chart(bars, colors={len(bars) - 1: (120, 220, 100)})
+        reading = read(chart)
+        self.assertFalse(reading.available)
+        self.assertIn("a última vela não termina na cotação do marcador", reading.reason)
+        self.assertEqual(reading.candles, ())
+
+    def test_the_terminal_lists_the_same_candles_as_the_numbers_of_the_preview(self):
+        from pocketautonomo import chart as chart_program
+
+        chart = self.chart(skip={36})
+        reading = read(chart)
+        lines = chart_program.preview_lines(MODEL, reading)
+        listed = [line for line in lines if line.startswith("    vela ")]
+        self.assertEqual(len(listed), candles.PREVIEW_NUMBERED)
+        self.assertTrue(listed[-1].startswith("    vela a que se forma: alta, abertura 161.0"), listed[-1])
+        self.assertTrue(listed[-2].startswith("    vela 1: baixa, abertura"), listed[-2])
+        self.assertEqual(listed[2], "    vela 3: nenhuma vela lida nesta posição")
+
+
+class CountdownTest(unittest.TestCase):
+    """The countdown of the marker, against this computer's clock. ARTIFICIAL readings."""
+
+    def test_a_countdown_is_read_only_when_both_readings_are_the_same(self):
+        for others, expected in (
+            ((("00:42", "00:42", 0.99, (1, 2)),), (42, "00:42")),
+            ((("01:05:09", "01:05:09", 0.95, (1, 2)),), (3909, "01:05:09")),
+            ((("00:42", "00:43", 0.99, (1, 2)),), (None, None)),
+            ((("00:42", "00:42", 0.62, (1, 2)),), (None, None)),
+            ((("00:61", "00:61", 0.99, (1, 2)),), (None, None)),
+            ((("M1", "M1", 0.99, (1, 2)),), (None, None)),
+            ((("00:42", "00:42", 0.99, (1, 2)), ("00:10", "00:10", 0.99, (3, 4))), (None, None)),
+            ((), (None, None)),
+        ):
+            with self.subTest(others=others):
+                self.assertEqual(candles.countdown_of(others), expected)
+
+    def test_the_countdown_is_compared_with_the_time_left_by_this_computers_clock(self):
+        reading = candles.CandleReading(countdown=42, countdown_text="00:42")
+        at = datetime(2026, 10, 18, 12, 0, 18, 300000, tzinfo=timezone.utc)  # 41.7 s left by this clock
+        remaining, problem = candles.countdown_check(reading, at, 60)
+        self.assertAlmostEqual(remaining, 41.7)
+        self.assertIsNone(problem)
+        remaining, problem = candles.countdown_check(reading, at - timedelta(seconds=8), 60)  # 49.7 s left by this clock
+        self.assertIn("o contador (00:42) mostra 7,7 s a menos que o relógio deste computador para o fim da vela", problem)
+        self.assertIn("mostra 10,3 s a mais", candles.countdown_check(reading, at + timedelta(seconds=10), 60)[1])  # 31.7 s left
+        # 40 s apart in the middle of a candle is 40 s, never 20 s by a period's turn.
+        ten = candles.CandleReading(countdown=10, countdown_text="00:10")
+        self.assertIn("mostra 40,0 s a menos", candles.countdown_check(ten, datetime(2026, 10, 18, 12, 0, 10, tzinfo=timezone.utc), 60)[1])
+        # At a change of candle, the platform already in the next candle, or still in this one, agrees.
+        for countdown, second in ((59, 59.5), (0, 0.5)):
+            changing = candles.CandleReading(countdown=countdown, countdown_text=f"00:{countdown:02d}")
+            moment = datetime(2026, 10, 18, 12, 0, 0, tzinfo=timezone.utc) + timedelta(seconds=second)
+            self.assertIsNone(candles.countdown_check(changing, moment, 60)[1], (countdown, second))
+        other_period = candles.CandleReading(countdown=252, countdown_text="04:12")
+        self.assertIn(
+            "passa do período calibrado, 60 s: se ele conta o fim da vela", candles.countdown_check(other_period, at, 60)[1]
+        )
+        self.assertEqual(candles.countdown_check(candles.CandleReading(), at, 60), (None, None))
+
+    def test_the_countdown_line_of_the_marker_is_kept_with_the_reading(self):
+        reading = read(yen_chart(**HANGING))
+        self.assertTrue(reading.available, reading.reason)
+        self.assertEqual((reading.countdown, reading.countdown_text), (42, "00:42"))
+        self.assertEqual(reading.marker_others, (("00:42", "00:42"),))
 
 
 class StampTest(unittest.TestCase):

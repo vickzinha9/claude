@@ -81,6 +81,11 @@ MIN_AGREEING = 3
 EXPANSION = 1.5
 MAX_READING_AGE = analysis.DECISION_WINDOW_SECONDS
 ENTRY_WINDOW_SECONDS = 10.0  # a decision is made only this soon after a candle closed, as the evaluation assumes
+# Without the last closed candle, index 1, the last candle analyzed would be an older one, taken for the latest.
+LAST_CLOSED_MISSING = (
+    "a última vela fechada (1), logo à esquerda da que se forma, não foi lida nesta captura: sem ela, a leitura e as"
+    " regras tomariam uma vela mais velha pela última"
+)
 WRITE_RETRY_SECONDS = 30.0
 
 EXPLORATORY = "LEITURA EXPLORATÓRIA, não é sinal de entrada"
@@ -895,7 +900,11 @@ def assess(setup, observation, payout, now):
         return ChartAssessment(observation, market, analysis.Decision(name, WAIT, reason, validation), validation, setup.model.period)
     reading = observation.reading
     age = (now - observation.captured_at).total_seconds()
-    market = read_market(observation.bars(), reading.resolution, setup.model.period, age)
+    last_closed = 1 in reading.indices
+    if last_closed:
+        market = read_market(observation.bars(), reading.resolution, setup.model.period, age)
+    else:
+        market = MarketReading(INDEFINIDO, LAST_CLOSED_MISSING, limitations=(NOT_VALIDATED,))
     sample = analysis.Sample(observation.captured_at, reading.marker_price, reading.marker_text, payout, ORIGIN_CHART)
 
     def wait(reason):
@@ -903,6 +912,8 @@ def assess(setup, observation, payout, now):
 
     if not validation.validated:
         return wait(validation.reason)
+    if not last_closed:
+        return wait(f"{validation.reason}; mas {LAST_CLOSED_MISSING}")
     if not 0 <= age <= MAX_READING_AGE:
         return wait(f"{validation.reason}; mas a leitura é de há {number(age, 1)} s, e uma decisão só vale até {number(MAX_READING_AGE, 0)} s depois da captura")
     if observation.stamp_problem is not None:

@@ -7,7 +7,10 @@ the strokes, so each test says what it "reads".
 """
 
 import math
+import struct
+import zlib
 
+from pocketautonomo import candles, quote_reader
 from pocketautonomo.quote_reader import MarkerModel, RgbImage
 
 BACKGROUND = (27, 31, 45)
@@ -149,14 +152,18 @@ class CandleChart:
         label_step=None, decimals=5, scale=1, marker_price=None, skip=(), lines=(), blobs=(), answers=None,
         background=DARK_BACKGROUND, up=CANDLE_GREEN, down=CANDLE_RED, top=20, bottom=340,
         marker_height=18, marker_top=None, countdown=None, label_shift=0, grid=None, price_line=True,
-        under_axis=(),
+        under_axis=(), colors=None,
     ):
         """marker_top: CSS pixels from the price's row to the top of the marker's box (centered by default).
         countdown: a second line of text in the marker, under the price, that the OCR "reads" as given.
         label_shift: CSS pixels from each label's price to the middle of its digits, down.
         grid: the color of a grid line drawn across the chart at each label's price, under the candles.
         price_line: whether the dashed price line is drawn. under_axis: (top, bottom, color) of shapes in
-        the columns of the axis, drawn before the labels, as a candle under them.
+        the columns of the axis, drawn before the labels, as a candle under them. colors: {index: color} of
+        candles drawn in another color than up's or down's.
+
+        columns[i] is (x0, x1), x1 exclusive, of the body of bars[i] in device pixels, drawn or skipped:
+        where the candle at index len(bars) - 1 - i of a reading must be.
         """
         s = scale
         self.scale, self.bars, self.decimals = scale, list(bars), decimals
@@ -183,10 +190,12 @@ class CandleChart:
         if grid is not None:
             for row, _ in ticks:
                 canvas.fill(0, row, axis, row + s, grid)
+        self.columns = [(left + round(index * spacing * s), left + round(index * spacing * s) + body * s) for index in range(count)]
+        self.spacing_px = spacing * s
         for index, (open_, high, low, close) in enumerate(self.bars):
             if index in skip:
                 continue
-            color = up if close >= open_ else down
+            color = (colors or {}).get(index, up if close >= open_ else down)
             x0 = left + round(index * spacing * s)
             body_top = round(self.row(max(open_, close)))
             body_bottom = max(body_top + 1, round(self.row(min(open_, close))))
@@ -265,6 +274,104 @@ def artificial_bars(count=40, start=1.08500, step=0.00004, drift=0.0, seed=7):
         bars.append((open_, round(max(open_, close) + upper, 5), round(min(open_, close) - lower, 5), close))
         price = close
     return bars
+
+
+def yen_bars(count=40, end=161.085, step=0.02, seed=11):
+    """ARTIFICIAL candles with 3 decimals, like a quote of 161.xxx, ending at end."""
+    bars = artificial_bars(count, start=1.0, step=step, seed=seed)
+    shift = end - bars[-1][3]
+    return [tuple(round(value + shift, 3) for value in bar) for bar in bars]
+
+
+def yen_chart(bars=None, **options):
+    """A chart like the one of the reported failure: labels every 0.200 and a quote near 161.085."""
+    options.setdefault("label_step", 0.2)
+    return CandleChart(bars or yen_bars(), 160.98, 161.70, decimals=3, **options)
+
+
+def green_after_red(bars, fall=0.020, rise=0.012):
+    """bars with the last two rewritten as on the reported preview: a red candle, then the forming one, green.
+
+    ARTIFICIAL: the red one opens at the close before it and falls by fall; the green one opens at its close and
+    rises by rise; both with short wicks. Prices with 3 decimals.
+    """
+    bars = list(bars)
+    open_ = bars[-3][3]
+    red_close = round(open_ - fall, 3)
+    bars[-2] = (open_, round(open_ + 0.004, 3), round(red_close - 0.005, 3), red_close)
+    green_close = round(red_close + rise, 3)
+    bars[-1] = (red_close, round(green_close + 0.004, 3), round(red_close - 0.003, 3), green_close)
+    return bars
+
+
+def decode_png(data):
+    """RgbImage of a PNG written by quote_reader.png_bytes (8-bit RGB, filter 0 on every row), without Pillow."""
+    width, height = struct.unpack(">II", data[16:24])
+    position, compressed = 8, b""
+    while position < len(data):
+        (length,) = struct.unpack(">I", data[position:position + 4])
+        if data[position + 4:position + 8] == b"IDAT":
+            compressed += data[position + 8:position + 8 + length]
+        position += 12 + length
+    raw = zlib.decompress(compressed)
+    stride = 1 + 3 * width
+    rows = []
+    for y in range(height):
+        if raw[y * stride] != 0:
+            raise ValueError("só o filtro 0 é lido aqui")
+        rows.append(raw[y * stride + 1:(y + 1) * stride])
+    return RgbImage(width, height, b"".join(rows))
+
+
+def preview_numbers(image, colors=(candles.FORMING_COLOR, candles.PREVIEW_COLOR)):
+    """(text, color, (x0, y0, x1, y1)) of every digit drawn on a preview of the candles, found by its pixels.
+
+    A digit is a group of touching pixels of one of colors whose box is 3 by 5 cells of one size, each cell
+    all of that color or none of it, in the pattern of a digit of quote_reader._DIGITS. Outlines and ticks
+    are of the same colors but have no such pattern. The box is in the pixels of image, x1 and y1 exclusive.
+    """
+    patterns = {"".join(rows): digit for digit, rows in quote_reader._DIGITS.items()}
+    width, height = image.width, image.height
+    found = []
+    for color in colors:
+        target, painted = bytes(color), set()
+        position = image.data.find(target)
+        while position != -1:  # every pixel of this color, by its index
+            if position % 3 == 0:
+                painted.add(position // 3)
+                position = image.data.find(target, position + 3)
+            else:
+                position = image.data.find(target, position + 1)
+        while painted:
+            start = painted.pop()
+            stack, pixels = [start], []
+            while stack:
+                index = stack.pop()
+                pixels.append(index)
+                x, y = index % width, index // width
+                for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                    near = ny * width + nx
+                    if 0 <= nx < width and 0 <= ny < height and near in painted:
+                        painted.discard(near)
+                        stack.append(near)
+            xs, ys = [i % width for i in pixels], [i // width for i in pixels]
+            x0, y0, x1, y1 = min(xs), min(ys), max(xs) + 1, max(ys) + 1
+            if (x1 - x0) % 3 or (y1 - y0) % 5 or (x1 - x0) // 3 != (y1 - y0) // 5:
+                continue
+            size, ink, cells = (x1 - x0) // 3, set(pixels), []
+            for row in range(5):
+                for column in range(3):
+                    inside = [
+                        (y0 + row * size + dy) * width + x0 + column * size + dx in ink
+                        for dy in range(size) for dx in range(size)
+                    ]
+                    if any(inside) != all(inside):
+                        break
+                    cells.append("1" if all(inside) else "0")
+            digit = patterns.get("".join(cells)) if len(cells) == 15 else None
+            if digit is not None:
+                found.append((digit, tuple(color), (x0, y0, x1, y1)))
+    return found
 
 
 def right_strip(image, width):

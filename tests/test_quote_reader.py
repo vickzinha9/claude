@@ -274,10 +274,30 @@ class ReadTextTest(unittest.TestCase):
         canvas.label(WIDTH - 69, 140, MARKER, height=26, lines=2)
         image = canvas.image()
         model = qr.MarkerModel.from_box(qr.candidate_boxes(image, 1.0)[0], image, 1.0)
-        countdown = FakeEngine(answers=[("1.26543", 0.99), ("1.26543", 0.99), ("00:42", 0.99), ("00:42", 0.99)])
+        countdown = FakeEngine(answers=[("1.26543", 0.99), ("1.26543", 0.99), ("00:42", 0.99), ("00:42", 0.97)])
         reading = qr.read_quote(image, 1.0, model, countdown)
         self.assertEqual(reading.value, "1.26543")
         self.assertEqual(len(countdown.calls), 4)  # two lines, two readings each
+        # The countdown is kept apart, with both readings, the lower score and its rows, under the quote's.
+        [(text_a, text_b, score, rows)] = reading.others
+        self.assertEqual((text_a, text_b, score), ("00:42", "00:42", 0.97))
+        self.assertGreater(rows[0], reading.rows[0])
+        # In a small font, the black-and-white reading took the colon of 00:03 for a point, as the real OCR did
+        # on a local page in the last 10 s of each candle: the line is still a countdown, not a second number.
+        colon = FakeEngine(answers=[("1.26543", 0.99), ("1.26543", 0.99), ("00:03", 1.0), ("00.03", 0.9)])
+        reading = qr.read_quote(image, 1.0, model, colon)
+        self.assertEqual(reading.value, "1.26543")
+        self.assertEqual([other[:2] for other in reading.others], [("00:03", "00.03")])
+        # A line shaped as a countdown above the quote may be the quote itself, its point read as a colon: it still
+        # counts as a number, and two numbers are still ambiguous, never the lower one taken for the quote.
+        quote_as_countdown = FakeEngine(answers=[("12.34", 0.99), ("12:34", 0.99), ("00.42", 0.99), ("00.42", 0.99)])
+        reading = qr.read_quote(image, 1.0, model, quote_as_countdown)
+        self.assertIsNone(reading.value)
+        self.assertIn("mais de uma linha com número", reading.reason)
+        alone = FakeEngine(answers=[("12.34", 0.99), ("12:34", 0.99), ("00:42", 0.99), ("00:42", 0.99)])
+        reading = qr.read_quote(image, 1.0, model, alone)
+        self.assertIsNone(reading.value)
+        self.assertEqual(reading.reason, "as duas leituras do OCR divergiram: '12.34' e '12:34'")
         two_numbers = FakeEngine("1.26543", 0.99)
         reading = qr.read_quote(image, 1.0, model, two_numbers)
         self.assertIsNone(reading.value)

@@ -13,8 +13,11 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import chart_images as ci  # noqa: E402
 
 from pocketautonomo import analysis, candles  # noqa: E402
 from pocketautonomo import chart_analysis as ca  # noqa: E402
@@ -347,6 +350,101 @@ class AbsorbTest(unittest.TestCase):
         observation = ca.absorb(setup, observation_of(trend(30), self.MOMENT, stamp_problem="perto da troca"))
         self.assertEqual(observation.added, 0)
         self.assertIsNone(setup.history.get("EUR/USD OTC", PERIOD))
+
+
+class IndexToAnalysisTest(unittest.TestCase):
+    """From a drawn chart to the recorded file and to the analysis, candle by candle. ARTIFICIAL DATA.
+
+    The chart is that of the reported preview: a green candle forming after a red one. The forming candle is
+    never recorded nor analyzed; the last closed one, the red, is the last candle of both, with the start of the
+    candle before the forming one, and each other closed candle comes in its order with its own start.
+    """
+
+    MOMENT = datetime(2026, 10, 18, 12, 0, 4, tzinfo=timezone.utc)  # 4 s into the candle that started at 12:00
+
+    def observe(self, chart):
+        model = candles.CandleModel(ci.CANDLE_GREEN, ci.CANDLE_RED, PERIOD)
+        reading = candles.read_candles(chart.image, chart.scale, model, chart.marker, chart.engine())
+        self.assertTrue(reading.available, reading.reason)
+        stamps, problem = candles.stamp(reading, self.MOMENT, PERIOD)
+        self.assertIsNone(problem)
+        return ca.ChartObservation("EUR/USD OTC", reading, self.MOMENT, self.MOMENT, stamps)
+
+    def expected(self, chart, skip=()):
+        """{start: bar} of the closed candles drawn: bars[i] started (last - i) periods before the forming one."""
+        last = len(chart.bars) - 1
+        forming = datetime(2026, 10, 18, 12, 0, tzinfo=timezone.utc)
+        return {
+            forming - timedelta(seconds=PERIOD * (last - i)): bar for i, bar in enumerate(chart.bars[:-1]) if i not in skip
+        }
+
+    def assert_same(self, got, bar, resolution, start):
+        open_, high, low, close = bar
+        self.assertEqual(got.kind, candles.UP if close >= open_ else candles.DOWN, start)
+        for value, want in zip((got.open, got.high, got.low, got.close), bar):
+            self.assertLessEqual(abs(value - want), 1.5 * resolution, (start, got, bar))
+
+    def test_the_closed_candles_reach_the_file_and_the_analysis_by_their_index(self):
+        for skip in ((), (30,)):
+            with self.subTest(skip=skip), tempfile.TemporaryDirectory() as directory:
+                chart = ci.yen_chart(ci.green_after_red(ci.yen_bars()), skip=set(skip))
+                observation = self.observe(chart)
+                expected = self.expected(chart, skip)
+                runtime = Path(directory)
+                log = ca.CandleLog(runtime, lambda text: None)
+                setup = ca.ChartSetup(
+                    candles.CandleModel(ci.CANDLE_GREEN, ci.CANDLE_RED, PERIOD), None, "#ativo", 300.0, ca.CandleHistory(), log,
+                )
+                observation = ca.absorb(setup, observation)
+                log.close()
+                self.assertIsNone(observation.problem)
+                with open(log.path, newline="", encoding="utf-8") as file:
+                    rows = list(csv.DictReader(file))
+                starts = [datetime.fromisoformat(row["start_utc"]) for row in rows]
+                self.assertEqual(starts, sorted(expected))  # in order of time, the forming one never, a gap left out
+                for row, start in zip(rows, starts):
+                    self.assert_same(ca.bar_of(row)[2], expected[start], observation.reading.resolution, start)
+                last = rows[-1]
+                self.assertEqual((last["start_utc"], last["kind"]), ("2026-10-18T11:59:00.000+00:00", candles.DOWN))
+                with mock.patch.object(ca, "read_market", wraps=ca.read_market) as spy:
+                    ca.assess(setup, observation, 92.0, self.MOMENT + timedelta(seconds=1))
+                analyzed = spy.call_args.args[0]
+                self.assertEqual([bar.start for bar in analyzed], sorted(expected))
+                for bar in analyzed:
+                    self.assert_same(bar, expected[bar.start], bar.resolution, bar.start)
+                self.assertEqual(analyzed[-1].kind, candles.DOWN)  # the red one, the last closed
+                tail = ca.contiguous_tail(analyzed, PERIOD)  # what a validated rule decides on
+                self.assertEqual(tail[-1].start, datetime(2026, 10, 18, 11, 59, tzinfo=timezone.utc))
+                self.assertEqual(len(tail), 8 if skip else 39)  # after the gap at bar 30, only bars 31 to 38
+
+    def test_without_the_last_closed_candle_nothing_is_analyzed_as_if_an_older_one_were_the_last(self):
+        # Candle 1, the red one, not read (not drawn here): the other closed candles are still recorded, at their
+        # own starts, but neither the exploratory reading nor a validated rule may take candle 2 for the last one.
+        chart = ci.yen_chart(ci.green_after_red(ci.yen_bars()), skip={38})
+        observation = self.observe(chart)
+        self.assertEqual(observation.reading.missing, (1,))
+        written = []
+
+        class Log:
+            def write(self, name, period, bars, read_at):
+                written.extend(bars)
+
+        setup = setup_of(log=Log())
+        observation = ca.absorb(setup, observation)
+        self.assertEqual([bar.start for bar in written], sorted(self.expected(chart, (38,))))
+        self.assertEqual(written[-1].start, datetime(2026, 10, 18, 11, 58, tzinfo=timezone.utc))
+        with mock.patch.object(ca, "read_market", wraps=ca.read_market) as spy:
+            result = ca.assess(setup, observation, 92.0, self.MOMENT + timedelta(seconds=1))
+        # The validation of the rules reads windows of the recorded candles; the reading of the chart now is
+        # the only call with the period and the age, and there is none.
+        self.assertEqual([call for call in spy.call_args_list if len(call.args) > 2], [])
+        self.assertEqual(result.market.direction, ca.INDEFINIDO)
+        self.assertIn("a última vela fechada (1), logo à esquerda da que se forma, não foi lida", result.market.summary)
+        self.assertEqual(result.decision.action, WAIT)
+        validated = AssessTest.validated_setup(self)
+        result = ca.assess(validated, observation, 92.0, self.MOMENT + timedelta(seconds=1))
+        self.assertEqual(result.decision.action, WAIT)
+        self.assertIn("mas a última vela fechada (1), logo à esquerda da que se forma, não foi lida", result.decision.reason)
 
 
 class AssessTest(unittest.TestCase):

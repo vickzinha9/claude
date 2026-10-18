@@ -169,11 +169,57 @@ class LiveChartTest(ChartTestCase):
             "39 velas completas e a que se forma",
             "    vela a que se forma: baixa, abertura",  # crossed by the price line: a pixel off, and never analyzed
             "    vela 1: alta, abertura 1.0876",  # 1.08763 drawn: read within the resolution, one pixel of 0.00001
-            "Velas lidas, numeradas da que se forma (0) para trás:",
+            f"{chart.PREVIEW_TITLE}:",
         ):
             self.assertIn(text, self.out)
         self.assertEqual(len(list(self.runtime.glob("velas-previa-*.png"))), 1)
         self.assertNotIn("click", {call[0] for call in session.calls})
+
+    def test_the_preview_the_terminal_and_the_file_agree_on_which_candle_is_0_and_which_is_1(self):
+        # ARTIFICIAL: the reported case, a green candle forming after a red one, with the countdown of the marker.
+        bars = ci.green_after_red(ci.yen_bars())
+        drawn = ci.yen_chart(bars, marker_height=23, marker_top=0, countdown="00:55")
+        session = ChartSession([drawn])
+        code = self.run_chart("--configure", "--count", "1", session=session, answers=("", "60", ""))
+        self.assertEqual(code, 0, self.err + self.out)
+        for text in (
+            "    vela 1: baixa, abertura",
+            "    vela a que se forma: alta, abertura",
+            "  Pelo relógio deste computador, a vela que se forma (0) começou às 12:00:00 UTC",
+            "e a última fechada (1), às 11:59:00 UTC",
+            "  Contador no marcador: 00:55. Pelo relógio deste computador, com velas de 60 s, a que se forma fecha em 55,0 s:"
+            " confere.",
+            f"  Na imagem, {candles.PREVIEW_LEGEND}.",
+        ):
+            self.assertIn(text, self.out)
+        [preview] = list(self.runtime.glob("velas-previa-*.png"))
+        numbers = {int(text): box for text, _, box in ci.preview_numbers(ci.decode_png(preview.read_bytes()))}
+        self.assertEqual(sorted(numbers), [0, 1, 2, 3, 4, 5])
+        last = len(bars) - 1
+        for index, (x0, _, x1, _) in numbers.items():
+            covered = [last - i for i, (a, b) in enumerate(drawn.columns) if a < x1 and x0 < b]
+            self.assertEqual(covered, [index], f"o número {index} cobre as velas {covered}")
+        rows = self.candle_rows()
+        self.assertEqual(len(rows), last)  # every closed candle, and the forming one never
+        self.assertEqual((rows[-1]["start_utc"], rows[-1]["kind"]), ("2026-10-18T11:59:00.000+00:00", candles.DOWN))
+        self.assertAlmostEqual(float(rows[-1]["close"]), bars[-2][3], delta=1.5 * drawn.resolution)
+        self.assertNotIn("2026-10-18T12:00:00.000+00:00", {row["start_utc"] for row in rows})
+
+    def test_a_countdown_that_disagrees_with_the_clock_is_shown_and_decides_nothing(self):
+        bars = ci.green_after_red(ci.yen_bars())
+        for countdown, problem in (
+            ("00:30", "o contador (00:30) mostra 25,0 s a menos que o relógio deste computador para o fim da vela"),
+            ("04:12", "o contador (04:12) passa do período calibrado, 60 s: se ele conta o fim da vela"),
+        ):
+            with self.subTest(countdown=countdown):
+                for path in self.runtime.glob(candles.CALIBRATION_FILE_NAME):
+                    path.unlink()
+                drawn = ci.yen_chart(bars, marker_height=23, marker_top=0, countdown=countdown)
+                code = self.run_chart("--configure", "--count", "1", session=ChartSession([drawn]), answers=("", "60", ""))
+                self.assertEqual(code, 0, self.err + self.out)
+                self.assertIn(f"  Contador no marcador: {countdown}.", self.out)
+                self.assertIn(f": não confere: {problem}", self.out)
+                self.assertTrue((self.runtime / candles.CALIBRATION_FILE_NAME).exists())
 
     def test_an_attempt_without_labels_shows_its_diagnosis_and_the_next_one_saves_the_calibration(self):
         good = chart_for(rising_bars())

@@ -26,7 +26,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from pocketautonomo import continuous, observe, operate, scan
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import chart_images  # noqa: E402
+
+from pocketautonomo import continuous, observe, operate, scan  # noqa: E402
 
 HAVE_PLAYWRIGHT = importlib.util.find_spec("playwright") is not None
 HAVE_OCR = HAVE_PLAYWRIGHT and importlib.util.find_spec("rapidocr") is not None
@@ -906,6 +910,25 @@ class RealChartTest(unittest.TestCase):
         for bar, (open_, high, low, close) in zip(series.bars, HANGING_BARS):
             for got, want in ((bar.open, open_), (bar.high, high), (bar.low, low), (bar.close, close)):
                 self.assertLessEqual(abs(got - want), 2 * resolution, (bar, (open_, high, low, close)))
+        # As on the reported preview, the forming candle is green and the one before it red. The terminal, the
+        # file and the numbers of the preview must agree: 0 the green, never recorded; 1 the red, recorded with
+        # the start of the minute before; each number over its own candle, as the page drew them.
+        self.assertIn("    vela a que se forma: alta, abertura", text)
+        self.assertIn("    vela 1: baixa, abertura", text)
+        self.assertEqual(series.bars[-1].start, datetime(2026, 10, 18, 11, 59, tzinfo=timezone.utc))
+        self.assertEqual(series.bars[-1].kind, candles.DOWN)
+        self.assertIsNone(series.get(datetime(2026, 10, 18, 12, 0, tzinfo=timezone.utc)))
+        # The countdown is only shown, whatever the OCR of this system reads in it: nothing above depends on it.
+        self.assertIn("  Contador no marcador: ", text)
+        [preview] = list(self.runtime.glob("velas-previa-*.png"))
+        numbers = chart_images.preview_numbers(chart_images.decode_png(preview.read_bytes()))
+        last = len(HANGING_BARS) - 1
+        drawn = [(HANGING_LEFT + 13 * i, HANGING_LEFT + 13 * i + 9) for i in range(len(HANGING_BARS))]  # scale 1
+        self.assertEqual(sorted(int(text_) for text_, _, _ in numbers), [0, 1, 2, 3, 4, 5])
+        for text_, color, (x0, _, x1, _) in numbers:
+            covered = [last - i for i, (a, b) in enumerate(drawn) if a < x1 and x0 < b]
+            self.assertEqual(covered, [int(text_)], f"o número {text_} cobre as velas {covered}")
+            self.assertEqual(color, candles.FORMING_COLOR if text_ == "0" else candles.PREVIEW_COLOR)
         self.assertIsNone(self.clicks)
 
 
@@ -950,6 +973,19 @@ class RealCandleScaleTest(unittest.TestCase):
                 g = reading.geometry
                 self.assertIsNotNone(g.price_line)
                 self.assertAlmostEqual((g.marker_box.y0 + g.marker_box.y1) / 2 - g.price_row, 11.5 * ratio, delta=1.5)
+                # Each number of the preview over the candle of its index, where the page drew it, and no other.
+                drawn = [
+                    (round((HANGING_LEFT + 13 * i) * ratio), round((HANGING_LEFT + 13 * i + 9) * ratio))
+                    for i in range(len(HANGING_BARS))
+                ]
+                for index, candle in zip(reading.indices, reading.candles):
+                    a, b = drawn[45 - index]
+                    self.assertLessEqual(max(abs(candle.x0 - a), abs(candle.x1 - b)), 1, (ratio, index, candle, (a, b)))
+                numbers = chart_images.preview_numbers(chart_images.decode_png(candles.preview_png(image, reading)))
+                self.assertEqual(sorted(int(text) for text, _, _ in numbers), [0, 1, 2, 3, 4, 5])
+                for text, _, (x0, _, x1, _) in numbers:
+                    covered = [45 - i for i, (a, b) in enumerate(drawn) if a < x1 and x0 < b]
+                    self.assertEqual(covered, [int(text)], (ratio, text, covered))
 
 
 # ARTIFICIAL candles with three decimals, like a quote of 161.xxx, for HANGING_PAGE; not the Pocket Option.
@@ -960,6 +996,7 @@ for _n in range(46):
     _open, _close = round(_price, 3), round(_price + _move, 3)
     HANGING_BARS.append((_open, round(max(_open, _close) + 0.004, 3), round(min(_open, _close) - 0.005, 3), _close))
     _price = _close
+HANGING_LEFT = 690 - 40 - (len(HANGING_BARS) - 1) * 13 - 9  # CSS pixels: the first column of the first candle drawn
 HANGING_MARKER = {"colors": ["#3f638e"], "width": 55.0, "height": 23.0, "right_gap": 3.0, "tolerance": 40}
 # The geometry of the reported failure: a marker 55x23, 80% opaque, whose top is at the price, with the quote
 # and a countdown under it; the labels every 0.200, at fractional rows; a dashed price line; and a vertical
@@ -999,7 +1036,7 @@ p.fillStyle = "rgba(74,118,168,0.8)";
 for (let x = 0; x < AXIS; x += 6) p.fillRect(x, y, 4, 1);
 p.fillRect(AXIS + 12, y, 55, 23);
 p.fillStyle = "#ffffff"; p.font = "bold 13px Arial"; p.fillText(last.toFixed(3), AXIS + 15, y + 7);
-p.font = "9px Arial"; p.fillText("00:42", AXIS + 15, y + 18);
+p.font = "9px Arial"; p.fillText("00:40", AXIS + 15, y + 18);
 </script>
 </body></html>
 """

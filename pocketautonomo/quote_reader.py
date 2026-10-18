@@ -40,7 +40,10 @@ lines. Each line is read twice, in gray and in black and white. A value is accep
 when exactly one line reads as a quote (digits with a decimal separator), both readings of
 that line agree and both have confidence MIN_SCORE or more. Otherwise the reading is
 unavailable, with the reason: nothing is replaced by zero, no digit is corrected and no
-earlier value is reused.
+earlier value is reused. A line under the quote that one of its readings gives as a
+countdown, MM:SS (COUNTDOWN_PATTERN), is never a second number, even when the other reading
+takes its colon for a point: such lines, and those without a number, are kept apart, in
+QuoteReading.others.
 
 Two readings agree when their texts are equal, or when each has exactly one decimal
 separator and they differ only in it, a comma in one and a point in the other, with the
@@ -59,6 +62,9 @@ from dataclasses import dataclass
 from itertools import groupby
 
 QUOTE_PATTERN = re.compile(r"[0-9]+(?:[.,][0-9]+)+")  # at least one decimal separator
+# A countdown, MM:SS or HH:MM:SS, as the line under the quote in the marker. In a small font, the black-and-white
+# reading can take its colon for a point (00:03 and 00.03, measured on a local page).
+COUNTDOWN_PATTERN = re.compile(r"(?:([0-9]{1,2}):)?([0-9]{1,2}):([0-9]{2})")
 # Exactly one separator, with digits on both sides: the only format in which two readings
 # that differ in the separator alone can be told to be the same quote.
 SINGLE_SEPARATOR = re.compile(r"([0-9]+)[.,]([0-9]+)")
@@ -227,6 +233,9 @@ class QuoteReading:
     box: object = None  # the marker that was read, when one was found
     note: object = None  # how the two readings agreed, when they were not equal texts
     rows: object = None  # (first, last + 1): the rows of the capture where the line read lies, with a value
+    # (text, text, score, rows) of the two readings of each other line of the marker, which is not a quote, such
+    # as a countdown: shown and compared, never taken for the quote. Only with a value.
+    others: tuple = ()
 
 
 def color_hex(color):
@@ -688,12 +697,28 @@ def read_marker_text(image, box, engine):
         return QuoteReading(None, "o marcador não tem texto legível", box)
     # The crop starts one row inside the box: these are the rows of each line in the capture.
     spans = [(box.y0 + 1 + start, box.y0 + 1 + end) for start, end in _text_line_spans(gray)]
-    quotes, problems, seen = [], [], []
+    seen, readings = [], []
     for line, rows in zip(lines, spans):
         (text_a, score_a), (text_b, score_b) = engine.recognize(line), engine.recognize(black_and_white(line))
         text_a, text_b = "".join(text_a.split()), "".join(text_b.split())
         seen.append(text_a or text_b)
-        if not (QUOTE_PATTERN.fullmatch(text_a) or QUOTE_PATTERN.fullmatch(text_b)):
+        readings.append((text_a, text_b, score_a, score_b, rows))
+
+    def shaped(pattern, reading):
+        return bool(pattern.fullmatch(reading[0]) or pattern.fullmatch(reading[1]))
+
+    # A countdown under the quote, as 00:03 under the price, is never a second number, even when one of its
+    # readings takes the colon for a point. A line shaped as a countdown above the first line shaped only as a
+    # quote, or without one, counts as before: it may be the quote itself, with its point read as a colon.
+    first = next(
+        (n for n, reading in enumerate(readings) if shaped(QUOTE_PATTERN, reading) and not shaped(COUNTDOWN_PATTERN, reading)),
+        None,
+    )
+    quotes, problems, others = [], [], []
+    for n, (text_a, text_b, score_a, score_b, rows) in enumerate(readings):
+        countdown = first is not None and n > first and shaped(COUNTDOWN_PATTERN, readings[n])
+        if countdown or not shaped(QUOTE_PATTERN, readings[n]):
+            others.append((text_a, text_b, min(score_a, score_b), rows))
             continue
         quote, note = agreed_quote(text_a, text_b)
         if quote is None:
@@ -707,7 +732,7 @@ def read_marker_text(image, box, engine):
             quotes.append((quote, note, rows))
     if len(quotes) == 1 and not problems:
         quote, note, rows = quotes[0]
-        return QuoteReading(quote, None, box, note, rows)
+        return QuoteReading(quote, None, box, note, rows, tuple(others))
     if len(quotes) + len(problems) > 1:
         return QuoteReading(None, "o marcador tem mais de uma linha com número; leitura ambígua", box)
     if problems:

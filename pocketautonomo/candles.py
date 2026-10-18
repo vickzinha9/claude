@@ -215,6 +215,12 @@ class CandleReading:
     decimals: int = 0  # of the marker's quote: how the prices are shown
     unread_labels: int = 0  # lines of the axis that the OCR could not read as a price
     geometry: object = None  # Geometry: where each part was found, for the diagnosis
+    # The countdown of the marker, a line such as 00:42 under the quote: its seconds and its text, when both
+    # readings of the OCR gave the same text with MIN_SCORE or more. Only shown and compared with this
+    # computer's clock (countdown_check): nothing is decided by it.
+    countdown: object = None
+    countdown_text: object = None
+    marker_others: tuple = ()  # (text, text): the two readings of each line of the marker that is not the quote
 
     @property
     def available(self):
@@ -966,7 +972,11 @@ def read_candles(image, scale, model, marker_model, engine):
         return refuse(f"o marcador da cotação não foi lido: {marker.reason}")
     marker_price = number_of(marker.value)
     decimals = decimals_of(marker.value)
-    found = {"marker_text": marker.value, "marker_price": marker_price, "decimals": decimals}
+    countdown, countdown_text = countdown_of(marker.others)
+    found = {
+        "marker_text": marker.value, "marker_price": marker_price, "decimals": decimals, "countdown": countdown,
+        "countdown_text": countdown_text, "marker_others": tuple((a, b) for a, b, _, _ in marker.others),
+    }
     axis_x0 = max(0, box.x0 - round(2 * scale))
     seen["axis_x0"] = axis_x0
     background = background_color(image, 0, axis_x0)
@@ -1147,8 +1157,68 @@ def read_candles(image, scale, model, marker_model, engine):
     missing = tuple(index for index in range(1, max(indices) + 1) if index not in present)
     return CandleReading(
         None, tuple(candles), tuple(indices), missing, line, marker.value, marker_price, price_row, spacing,
-        abs(line.slope), decimals, found["unread_labels"], Geometry(**seen),
+        abs(line.slope), decimals, found["unread_labels"], Geometry(**seen), countdown, countdown_text,
+        found["marker_others"],
     )
+
+
+# The countdown of the marker.
+
+COUNTDOWN_PATTERN = quote_reader.COUNTDOWN_PATTERN
+COUNTDOWN_TOLERANCE = 2.0  # seconds: the countdown shows whole seconds, and the capture takes a moment
+
+
+def countdown_of(others):
+    """(seconds, text) of the only countdown among the other lines of the marker, or (None, None).
+
+    others are (text, text, score, rows) of the two readings of each line (quote_reader.QuoteReading.others).
+    A countdown is MM:SS or HH:MM:SS, read the same by both readings, with MIN_SCORE or more.
+    """
+    found = []
+    for text_a, text_b, score, _ in others:
+        match = COUNTDOWN_PATTERN.fullmatch(text_a)
+        if match is None or text_a != text_b or score < MIN_SCORE:
+            continue
+        hours, minutes, seconds = (int(group) if group else 0 for group in match.groups())
+        if seconds >= 60 or (match.group(1) is not None and minutes >= 60):
+            continue
+        found.append((hours * 3600 + minutes * 60 + seconds, text_a))
+    return found[0] if len(found) == 1 else (None, None)
+
+
+def countdown_check(reading, captured_at, period):
+    """(remaining, problem): the seconds left in the forming candle by this computer's clock, and what disagrees.
+
+    remaining is None without a countdown read. problem is None when the countdown of the marker, if it is the
+    time left until the forming candle closes, agrees with this computer's clock and the period within
+    COUNTDOWN_TOLERANCE; otherwise it says what does not. Nothing is refused for it: on the Pocket Option, what
+    this countdown counts has not been confirmed.
+    """
+    if reading.countdown is None or captured_at is None:
+        return None, None
+    remaining = period - seconds_into(captured_at, period)
+    if reading.countdown > period:
+        return remaining, (
+            f"o contador ({reading.countdown_text}) passa do período calibrado, {period} s: se ele conta o fim da vela,"
+            " o gráfico está em velas de outro período"
+        )
+    difference = reading.countdown - remaining
+    # Around a change of candle, the platform may already show the next candle's time, or still this one's.
+    near = COUNTDOWN_TOLERANCE
+    if (remaining <= near and reading.countdown >= period - near) or (remaining >= period - near and reading.countdown <= near):
+        difference = min(difference - period, difference + period, key=abs)
+    if abs(difference) > COUNTDOWN_TOLERANCE:
+        more = "a mais" if difference > 0 else "a menos"
+        return remaining, (
+            f"o contador ({reading.countdown_text}) mostra {_seconds(abs(difference))} s {more} que o relógio deste"
+            " computador para o fim da vela: o relógio, o período calibrado ou o que o contador conta não conferem"
+        )
+    return remaining, None
+
+
+def _seconds(value):
+    """Seconds with one decimal and a comma, as the other times of the calibration."""
+    return f"{value:.1f}".replace(".", ",")
 
 
 # The diagnosis.
@@ -1321,12 +1391,113 @@ def seconds_into(captured_at, period):
     return epoch - math.floor(epoch / period) * period
 
 
-def preview_png(image, reading, numbered=6):
-    """A PNG of the capture with every candle outlined; the last numbered ones carry their index."""
-    boxes = []
+PREVIEW_NUMBERED = 6  # candles numbered on the preview, from the forming one (0) back: those the terminal shows
+MIN_NUMBER_SPACING = 7.0  # device pixels: closer candles get their outline on the preview, but no number
+FORMING_COLOR = (255, 220, 0)  # yellow: the outline and the number of the forming candle, 0, on the preview
+PREVIEW_COLOR = quote_reader.MARK_COLOR  # magenta: the outline and the number of the others, and the tick under the rest
+PREVIEW_LEGEND = (
+    f"o número de cada uma das {PREVIEW_NUMBERED} últimas velas fica logo acima dela (abaixo, quando não cabe acima),"
+    " sobre as colunas dela e de nenhuma outra: 0, em amarelo, é a vela que se forma, 1 é a última fechada, e assim por"
+    " diante; as outras velas lidas têm um traço logo abaixo"
+)
+DENSE_LEGEND = (
+    f"as velas estão a menos de {MIN_NUMBER_SPACING:g} pixels umas das outras, e os números não caberiam sem confusão:"
+    f" as {PREVIEW_NUMBERED} últimas têm só um contorno, amarelo na que se forma (0) e magenta nas de 1 a"
+    f" {PREVIEW_NUMBERED - 1}, da direita para a esquerda; as outras velas lidas têm um traço logo abaixo. Aproxime o"
+    " zoom do gráfico para ver os números"
+)
+
+
+def preview_legend(reading):
+    """How to read the preview of reading, for the terminal."""
+    return PREVIEW_LEGEND if reading.spacing >= MIN_NUMBER_SPACING else DENSE_LEGEND
+
+
+@dataclass(frozen=True)
+class PreviewMark:
+    """How one candle is marked on the preview, in the pixels of the capture."""
+
+    index: int
+    candle: Candle
+    color: tuple
+    number: object = None  # (x, y, size, text): the top left corner of the number's digits, their size and text
+    outlined: bool = False  # one of the last PREVIEW_NUMBERED: an outline, else a tick under it
+
+
+def preview_marks(reading, height, numbered=PREVIEW_NUMBERED):
+    """PreviewMark of each candle of reading, in the order of reading.candles.
+
+    The number of a candle is centered on its columns, right above its top, or below its bottom when it does
+    not fit above (inside the capture, over its own columns, when it fits neither). Its digits are those of
+    quote_reader._DIGITS, 3 by 5 cells of size pixels, and the cells are as large as leaves two cells, at
+    least, between two numbers side by side: the digits of one number are one cell apart, so 3 and 2 never
+    read as 32, and no number covers another candle. Candles closer than MIN_NUMBER_SPACING get no number,
+    only their outline: there, numbers of 1-pixel cells would come next to each other or over the next candle.
+    """
+    scale = reading.geometry.scale if reading.geometry is not None else 1.0
+    largest = max(3, round(3 * scale))
+    marks = []
     for index, candle in zip(reading.indices, reading.candles):
-        boxes.append((index if index < numbered else "", candle.box()))
-    return quote_reader.annotated_png(image, boxes)
+        color = FORMING_COLOR if index == 0 else PREVIEW_COLOR
+        if index >= numbered or reading.spacing < MIN_NUMBER_SPACING:
+            marks.append(PreviewMark(index, candle, color, outlined=index < numbered))
+            continue
+        text = str(index)
+        cells = 4 * len(text) - 1  # 3 per digit and 1 between two
+        size = max(1, min(largest, math.floor((reading.spacing - 2) / (cells + 2))))
+        width, tall = cells * size, 5 * size
+        x = round((candle.x0 + candle.x1 - width) / 2)
+        y = candle.top - 3 - tall  # above the outline, with a row free and the black border of the number
+        if y - 1 < 0:
+            y = candle.bottom + 4
+        y = max(1, min(y, height - tall - 1))
+        marks.append(PreviewMark(index, candle, color, (x, y, size, text), True))
+    return marks
+
+
+def preview_png(image, reading, numbered=PREVIEW_NUMBERED):
+    """A PNG of the capture with each candle read marked, and the last numbered ones with their index.
+
+    The last numbered candles get an outline touching them and, when the candles are MIN_NUMBER_SPACING or
+    more apart, their number on their own columns (preview_marks); the forming candle, 0, in FORMING_COLOR.
+    Every other candle read gets a tick two rows under it.
+    """
+    width, height = image.width, image.height
+    pixels = bytearray(image.data)
+
+    def paint(x, y, color):
+        if 0 <= x < width and 0 <= y < height:
+            i = (y * width + x) * 3
+            pixels[i:i + 3] = bytes(color)
+
+    marks = preview_marks(reading, height, numbered)
+    for mark in marks:
+        candle = mark.candle
+        if not mark.outlined:
+            for x in range(candle.x0, candle.x1):
+                paint(x, candle.bottom + 2, mark.color)
+            continue
+        for x in range(candle.x0 - 1, candle.x1 + 1):
+            paint(x, candle.top - 1, mark.color)
+            paint(x, candle.bottom + 1, mark.color)
+        for y in range(candle.top - 1, candle.bottom + 2):
+            paint(candle.x0 - 1, y, mark.color)
+            paint(candle.x1, y, mark.color)
+    for mark in marks:
+        if mark.number is None:
+            continue
+        x0, y0, size, text = mark.number
+        for y in range(y0 - 1, y0 + 5 * size + 1):
+            for x in range(x0 - 1, x0 + (4 * len(text) - 1) * size + 1):
+                paint(x, y, (0, 0, 0))
+        for n, char in enumerate(text):
+            for row, bits in enumerate(quote_reader._DIGITS[char]):
+                for column, bit in enumerate(bits):
+                    if bit == "1":
+                        for dy in range(size):
+                            for dx in range(size):
+                                paint(x0 + (4 * n + column) * size + dx, y0 + row * size + dy, mark.color)
+    return quote_reader.png_bytes(width, height, pixels)
 
 
 # The calibration file.
