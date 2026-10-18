@@ -8,7 +8,8 @@ Python and installs nothing. ScanLauncherOnWindowsTest runs varrer_windows.cmd w
 in a copy of the project, without .venv and then with a .venv without pip, only for --help
 and for a refused link: no browser opens. OperationLauncherOnWindowsTest does the same with
 operar_windows.cmd, and also runs its --demonstracao, which needs no browser.
-ContinuousLauncherOnWindowsTest runs continuo_windows.cmd for --help and refused arguments.
+ContinuousLauncherOnWindowsTest runs continuo_windows.cmd for --help and refused arguments, and
+ChartLauncherOnWindowsTest does the same with grafico_windows.cmd.
 """
 
 import contextlib
@@ -214,7 +215,7 @@ class LaunchersTest(unittest.TestCase):
     def test_launchers_enter_their_folder_and_never_touch_runtime(self):
         for name in (
             "preparar_windows.cmd", "observar_windows.cmd", "varrer_windows.cmd", "analisar_windows.cmd",
-            "diagnosticar_windows.cmd", "operar_windows.cmd", "continuo_windows.cmd",
+            "diagnosticar_windows.cmd", "operar_windows.cmd", "continuo_windows.cmd", "grafico_windows.cmd",
         ):
             with self.subTest(name=name):
                 commands = self.commands(name)
@@ -254,6 +255,9 @@ class LaunchersTest(unittest.TestCase):
         continuous = self.commands("continuo_windows.cmd")
         self.assertIn('".venv\\Scripts\\python.exe" -m pocketautonomo.operate --continuo %*', continuous)
         self.assertIn('set "CODIGO=%ERRORLEVEL%"', continuous)
+        charts = self.commands("grafico_windows.cmd")
+        self.assertIn('".venv\\Scripts\\python.exe" -m pocketautonomo.chart --configure %*', charts)
+        self.assertIn('set "CODIGO=%ERRORLEVEL%"', charts)
 
 
 
@@ -538,6 +542,46 @@ class ContinuousLauncherOnWindowsTest(unittest.TestCase):
         self.assertIn("continuo_windows.cmd terminou com codigo 2.", out)
         code, out = run("--url", "http://example.org/")
         self.assertEqual(code, 2, out)
+        self.assertFalse((project / "runtime").exists())  # nothing was written
+
+
+@unittest.skipUnless(os.name == "nt", "cmd.exe só existe no Windows")
+class ChartLauncherOnWindowsTest(unittest.TestCase):
+    """grafico_windows.cmd with cmd.exe, in a copy of the project: only --help and refused arguments."""
+
+    def test_the_launcher_runs_the_chart_reading_from_its_own_folder(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        base = Path(directory.name)
+        project = base / "projeto"
+        project.mkdir()
+        shutil.copy(ROOT / "grafico_windows.cmd", project)
+        shutil.copytree(ROOT / "pocketautonomo", project / "pocketautonomo", ignore=shutil.ignore_patterns("__pycache__"))
+        env = {key: value for key, value in os.environ.items() if key.upper() not in ("PYTHONPATH", "PYTHONHOME")}
+        env.update(POCKETAUTONOMO_SEM_PAUSA="1", PYTHONIOENCODING="utf-8")
+
+        def run(*args):
+            result = subprocess.run(
+                ["cmd", "/d", "/c", "call", str(project / "grafico_windows.cmd"), *args],
+                cwd=base, env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                encoding="utf-8", errors="replace", timeout=300,
+            )
+            return result.returncode, result.stdout + result.stderr
+
+        code, out = run("--help")
+        self.assertEqual(code, 1, out)
+        self.assertIn("[ERRO] Nao encontrei .venv\\Scripts\\python.exe nesta pasta.", out)
+        venv = subprocess.run(
+            [sys.executable, "-m", "venv", "--without-pip", str(project / ".venv")],
+            capture_output=True, text=True, timeout=300,
+        )
+        self.assertEqual(venv.returncode, 0, venv.stderr)
+        code, out = run("--help")
+        self.assertEqual(code, 0, out)
+        self.assertIn("usage: python -m pocketautonomo.chart", out)
+        code, out = run("--interval", "0")
+        self.assertEqual(code, 2, out)
+        self.assertIn("grafico_windows.cmd terminou com codigo 2.", out)
         self.assertFalse((project / "runtime").exists())  # nothing was written
 
 

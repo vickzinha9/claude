@@ -222,8 +222,16 @@ class Execution:
         self.operator.recover()
 
     def visit(self, session, selectors, favorites_selector, prepare=None):
-        """The scan of the favorites, with the operation after each visit; prepare(state) may add to it."""
+        """The scan of the favorites, with the operation after each visit; prepare(state) may add to it.
+
+        With a calibration of the candles (scan.chart_setup), each clean visit also reads the
+        chart's candles: the exploratory reading is shown, and a CALL or PUT of a rule of the
+        candles validated on separate data reaches the operation as any other decision.
+        """
         state = self.state = scan.Scan(selectors, favorites_selector, self.args.load_timeout, self.progress)
+        state.chart = scan.chart_setup(selectors, self.ctx.runtime_dir, self.args.horizon)
+        if state.chart is not None:
+            self.progress.candle_log = state.chart.log
         state.hooks = OperationHooks(self.operator, state, self.ctx, self.quotes)
         if prepare is not None:
             prepare(state)
@@ -248,7 +256,7 @@ class Execution:
         report(self.operator, self.log, self.database, self.orders, self.quotes)
 
     def close_files(self):
-        for closing in (self.progress.csv, self.progress.timings, self.log, self.quotes):
+        for closing in (self.progress.csv, self.progress.timings, self.progress.candle_log, self.log, self.quotes):
             if closing is not None:
                 closing.close()
 

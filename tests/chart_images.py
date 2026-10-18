@@ -6,7 +6,9 @@ a dashed price line touching the marker. FakeEngine stands in for the OCR: it ca
 the strokes, so each test says what it "reads".
 """
 
-from pocketautonomo.quote_reader import RgbImage
+import math
+
+from pocketautonomo.quote_reader import MarkerModel, RgbImage
 
 BACKGROUND = (27, 31, 45)
 MARKER = (41, 98, 255)
@@ -130,6 +132,111 @@ def chart(marker_y=150, cursor_y=None, marker_color=MARKER, extra=(), width=400,
     for x0, y0, color in extra:
         canvas.label(x0, y0, color)
     return canvas.image()
+
+
+class CandleChart:
+    """A synthetic capture with known candles, and what candles.read_candles should find in it.
+
+    ARTIFICIAL DATA: the candles are the ones given, drawn pixel by pixel; they say nothing about
+    any market. Prices map to rows on a straight line, high_price at row top and low_price at row
+    bottom, scaled by `scale` device pixels per CSS pixel. The axis labels are strokes that the
+    FakeEngine cannot read, so `answers` holds what it must "read", in the order that read_candles
+    asks: the marker's line twice, then each label from the top down, twice.
+    """
+
+    def __init__(
+        self, bars, low_price, high_price, *, width=640, height=360, axis_width=72, spacing=12, body=8,
+        label_step=None, decimals=5, scale=1, marker_price=None, skip=(), lines=(), blobs=(), answers=None,
+        background=DARK_BACKGROUND, up=CANDLE_GREEN, down=CANDLE_RED, top=20, bottom=340,
+    ):
+        s = scale
+        self.scale, self.bars, self.decimals = scale, list(bars), decimals
+        self.width, self.height = width * s, height * s
+        self.top, self.bottom = top * s, bottom * s
+        self.low_price, self.high_price = low_price, high_price
+        canvas = Canvas(self.width, self.height, background=background)
+        axis = self.width - axis_width * s
+        self.axis = axis
+        count = len(self.bars)
+        left = axis - 18 * s - (count - 1) * spacing * s - body * s
+        self.boxes = []
+        for index, (open_, high, low, close) in enumerate(self.bars):
+            if index in skip:
+                continue
+            color = up if close >= open_ else down
+            x0 = left + index * spacing * s
+            body_top = round(self.row(max(open_, close)))
+            body_bottom = max(body_top + 1, round(self.row(min(open_, close))))
+            canvas.fill(x0, body_top, x0 + body * s, body_bottom, color)
+            wick = x0 + (body * s) // 2
+            canvas.fill(wick, round(self.row(high)), wick + s, round(self.row(low)), color)
+        for row, x0, x1, color in lines:
+            canvas.fill(x0 * s, row * s, x1 * s, row * s + s, color)
+        for x0, y0, x1, y1, color in blobs:
+            canvas.fill(x0 * s, y0 * s, x1 * s, y1 * s, color)
+        # The labels sit at round prices, as on an axis: multiples of a step of whole units of the last decimal.
+        unit = 10 ** -decimals
+        units = max(1, round((label_step if label_step is not None else (high_price - low_price) / 6) / unit))
+        self.labels = []
+        k = math.ceil(low_price / unit / units)
+        while k * units * unit <= high_price:
+            price = k * units * unit
+            row = round(self.row(price))
+            if self.top <= row <= self.bottom:
+                self.labels.append((row, f"{price:.{decimals}f}"))
+            k += 1
+        self.labels.sort()
+        self.marker_price = marker_price if marker_price is not None else self.bars[-1][3]
+        self.marker_text = f"{self.marker_price:.{decimals}f}"
+        marker_row = round(self.row(self.marker_price))
+        marker_top = marker_row - 9 * s
+        canvas.dashed_line(marker_row, 0, axis + s, MARKER)
+        canvas.fill(axis + s, marker_top, axis + 69 * s, marker_top + 18 * s, MARKER)
+        for n in range(len(self.marker_text)):
+            x = axis + 6 * s + n * 8 * s
+            canvas.fill(x, marker_top + 4 * s, x + 2 * s, marker_top + 14 * s, TEXT)
+        skipped = (marker_top - 2 * s, marker_top + 18 * s + 2 * s)
+        self.read_labels = []
+        for row, text in self.labels:
+            y0 = row - 5 * s
+            for n in range(len(text)):
+                x = axis + 8 * s + n * 7 * s
+                canvas.fill(x, y0, x + 2 * s, y0 + 10 * s, SCALE_TEXT)
+            if y0 + 10 * s <= skipped[0] or y0 >= skipped[1]:
+                self.read_labels.append((row, text))
+        self.read_labels = self.read_labels[:8]
+        self.image = canvas.image()
+        self.marker = MarkerModel((MARKER,), 68.0, 18.0, float(axis_width - 69), 20)
+        if answers is None:
+            answers = [self.marker_text] * 2 + [text for _, text in self.read_labels for _ in range(2)]
+        self.answers = [(text, 0.99) if isinstance(text, str) else text for text in answers]
+
+    def row(self, price):
+        return self.top + (self.high_price - price) / (self.high_price - self.low_price) * (self.bottom - self.top)
+
+    @property
+    def resolution(self):
+        return (self.high_price - self.low_price) / (self.bottom - self.top)
+
+    def engine(self):
+        return FakeEngine(answers=list(self.answers))
+
+
+def artificial_bars(count=40, start=1.08500, step=0.00004, drift=0.0, seed=7):
+    """ARTIFICIAL candles (open, high, low, close), oldest first: a deterministic pseudo-random walk."""
+    state = seed
+    bars, price = [], start
+    for _ in range(count):
+        state = (state * 1103515245 + 12345) % 2**31
+        move = ((state % 2001) / 1000 - 1) * step + drift
+        state = (state * 1103515245 + 12345) % 2**31
+        upper = (state % 1000) / 1000 * step
+        state = (state * 1103515245 + 12345) % 2**31
+        lower = (state % 1000) / 1000 * step
+        open_, close = round(price, 5), round(price + move, 5)
+        bars.append((open_, round(max(open_, close) + upper, 5), round(min(open_, close) - lower, 5), close))
+        price = close
+    return bars
 
 
 def right_strip(image, width):

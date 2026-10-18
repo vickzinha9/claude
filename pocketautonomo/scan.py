@@ -94,7 +94,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 
-from pocketautonomo import analysis, observe, quote_timings
+from pocketautonomo import analysis, candles, chart_analysis, observe, quote_timings
 from pocketautonomo.observe import (
     COMPLETE,
     EXIT_CONFIG,
@@ -220,6 +220,11 @@ SCAN_COLUMNS = observe.CSV_COLUMNS + (
     "favorite_standby",  # the favorite set aside after unconfirmed switches, its verification or return
     # Added with the protection against attributing a quote to the wrong asset.
     "quote_association",  # empty before any PAUSA; from it on, why the quote and the payout were withheld
+    # Added with the reading of the chart's candles (chart_analysis), only with a calibration of the candles.
+    "chart_status",  # the candles read on the chart after the visit, or why none were
+    "chart_reading",  # ALTA, BAIXA or INDEFINIDO: the exploratory reading, never a decision to enter
+    "chart_signals",  # the signals of that reading and its summary
+    "chart_decision",  # CALL, PUT or AGUARDAR of the validated rules of the candles, and why
 )
 
 # Words of the trade buttons, of the Amount and of money operations, in English and in
@@ -425,6 +430,7 @@ class Visit:
     diagnostic: object = None  # switch_diagnostic() of a switch that was not confirmed
     standby: object = None  # the favorite set aside, verified again or back: what and until when
     paused: object = None  # the Pause in place: the quote and the payout of the visit were withheld
+    chart: object = None  # chart_analysis.ChartAssessment of the chart read after the visit, when calibrated
 
     @property
     def eligibility(self):
@@ -463,6 +469,8 @@ class ScanProgress:
     assets: dict = field(default_factory=dict)  # asset key -> AssetSummary
     paused: object = None  # Pause, from the first switch not confirmed to the end of the run
     withheld: int = 0  # visits during the PAUSA that had a quote or a payout, withheld
+    candle_log: object = None  # chart_analysis.CandleLog of the candles read in this run
+    charts: int = 0  # readings of the chart's candles that were usable
 
 
 @dataclass
@@ -495,6 +503,7 @@ class Scan:
     # The PAUSA ends the run right after the visit that started it (the continuous mode's hooks
     # end it); only the text of the PAUSA changes here.
     pause_ends_run: bool = False
+    chart: object = None  # chart_analysis.ChartSetup when the candles are calibrated (chart_setup)
     click_error: object = None  # the error of the click of this visit, when the click itself failed (click)
 
     @property
@@ -663,6 +672,9 @@ def main(argv=None, *, open_session=None, read_line=input, now=None, monotonic=N
             observe.announce_ocr(ctx)
         lock = ScanLock(runtime_dir / LOCK_FILE_NAME)
         warn_kept_pause(runtime_dir)
+        chart = chart_setup(selectors, runtime_dir, args.horizon)
+        if chart is not None:
+            progress.candle_log = chart.log
         url = args.url
         if url is None:
             url = observe.ask_url(read_line)
@@ -678,6 +690,7 @@ def main(argv=None, *, open_session=None, read_line=input, now=None, monotonic=N
             )
         say(HANDS_OFF)
         scan = Scan(selectors, favorites_selector, args.load_timeout, progress)
+        scan.chart = chart
         run_scan(session, scan, args, ctx)
         return finish(progress)
     except ConfigError as error:
@@ -699,6 +712,8 @@ def main(argv=None, *, open_session=None, read_line=input, now=None, monotonic=N
             progress.csv.close()
         if progress.timings is not None:
             progress.timings.close()
+        if progress.candle_log is not None:
+            progress.candle_log.close()
         observe.close_session(session, interrupted)
         if lock is not None:
             lock.release()
@@ -1140,6 +1155,7 @@ def run_scan(session, scan, args, ctx):
                         recheck = waiting is not None and waiting.set_aside
                         visit = visit_favorite(session, scan, favorite, cycle, favorites.total, ctx, recheck)
                         visit = replace(visit, standby=update_standby(scan, favorite, visit, cycle))
+                        visit = with_chart(session, scan, visit, ctx)
                     before = progress.paused
                     complete += visit.observation.completeness == COMPLETE
                     visit = with_pause(scan, visit)
@@ -1169,6 +1185,8 @@ def run_scan(session, scan, args, ctx):
         if ending is not None or (args.cycles is not None and cycle >= args.cycles):
             say(line)
             say(analysis_summary(scan))
+            if chart_summary(scan):
+                say(chart_summary(scan))
             if ending is not None:
                 raise ending  # the continuous mode ends the run here, before the wait for the next cycle
             return
@@ -1179,6 +1197,8 @@ def run_scan(session, scan, args, ctx):
             line += f" Próximo ciclo em {seconds_text(pause)} s."
         say(line)
         say(analysis_summary(scan))
+        if chart_summary(scan):
+            say(chart_summary(scan))
         session.wait(pause)
 
 
@@ -1824,12 +1844,93 @@ def with_decision(visit, scan):
     number = quote_number(price.value) if price.available else None
     if not state.ready or number is None:
         reason = f"sem dados para análise nesta visita: {state.note}"
-        return replace(visit, decision=analysis.Decision(visit.favorite.name, analysis.WAIT, reason))
-    name = readings["asset"].value
-    payout = payout_number(readings["payout"].value)
-    sample = analysis.Sample(price.captured_at, number, price.value, payout, analysis.ORIGIN_SCAN)
-    scan.analyzer.add(name, sample)
-    return replace(visit, decision=scan.analyzer.decide(name, visit.recorded_at))
+        decision = analysis.Decision(visit.favorite.name, analysis.WAIT, reason)
+    else:
+        name = readings["asset"].value
+        payout = payout_number(readings["payout"].value)
+        sample = analysis.Sample(price.captured_at, number, price.value, payout, analysis.ORIGIN_SCAN)
+        scan.analyzer.add(name, sample)
+        decision = scan.analyzer.decide(name, visit.recorded_at)
+    if visit.chart is not None:  # a CALL or PUT of the candles' rules counts only when the quotes' analysis waits
+        decision = chart_analysis.combine(decision, visit.chart.decision)
+    return replace(visit, decision=decision)
+
+
+def with_chart(session, scan, visit, ctx):
+    """visit with the reading of the chart's candles right after it, when the candles are calibrated.
+
+    Only a clean visit gets one: before any PAUSA, with the switch confirmed or the favorite
+    already selected, and data complete and current. The reading only reads (chart_analysis.
+    observe_chart): the asset field before and after the capture of the chart element, and the
+    OCR of its marker and its axis. The quote of the marker must agree with the visit's, within
+    QUOTE_JUMP, or the capture may not be the visit's chart, and nothing of it is used.
+    """
+    setup = scan.chart
+    if setup is None or scan.progress.paused is not None or visit.switch not in (ALREADY, CONFIRMED):
+        return visit
+    if not visit.analysis.ready:
+        return visit
+    check_window(session)
+    ensure_on_platform(session)
+    observation = chart_analysis.observe_chart(session, setup, visit.favorite.name, ctx)
+    price = visit.observation.readings["price"]
+    if observation.usable:
+        quote = quote_number(price.value)
+        if quote is None or relative_gap(observation.reading.marker_price, quote) > QUOTE_JUMP:
+            observation = replace(
+                observation,
+                problem=(
+                    f"a cotação do gráfico capturado, {observation.reading.marker_text}, não confere com a da visita,"
+                    f" {price.value}: a captura pode não ser deste gráfico"
+                ),
+            )
+    observation = chart_analysis.absorb(setup, observation)
+    payout_reading = visit.observation.readings["payout"]
+    payout = payout_number(payout_reading.value) if payout_reading.available else None
+    return replace(visit, chart=chart_analysis.assess(setup, observation, payout, ctx.now()))
+
+
+def chart_setup(selectors, runtime_dir, horizon):
+    """The chart_analysis.ChartSetup of the candles, with runtime/chart-candles.json; None without the file.
+
+    The candles are read with the visual source of the quote (the chart element and its marker). A
+    calibration file that cannot be used stops the run before the browser opens (ConfigError).
+    """
+    try:
+        model = candles.load_calibration(runtime_dir / candles.CALIBRATION_FILE_NAME)
+    except candles.CalibrationError as error:
+        raise ConfigError(str(error)) from error
+    if model is None:
+        return None
+    source = selectors["price"]
+    if not isinstance(source, QuoteOcrSource):
+        warn(
+            f"AVISO: há uma calibração das velas em {runtime_dir / candles.CALIBRATION_FILE_NAME}, mas a cotação não usa a"
+            " leitura visual do gráfico, de que as velas dependem: a leitura das velas fica desligada nesta execução."
+        )
+        return None
+    history = chart_analysis.load_candles(runtime_dir)
+    total = sum(len(series.bars) for series in history.series.values())
+    say(
+        f"Leitura das velas do gráfico: calibrada, velas de {model.period} s, depois de cada visita com dados para análise;"
+        f" {total} velas já gravadas em {count(len(history.series), 'série', 'séries')}. A leitura exploratória não é sinal de"
+        " entrada; só uma regra das velas validada em dados separados decide."
+    )
+    return chart_analysis.ChartSetup(model, source, selectors["asset"], horizon, history, chart_analysis.CandleLog(runtime_dir, warn))
+
+
+def chart_summary(scan):
+    """The line about the candles at the end of a cycle, when they are calibrated."""
+    setup = scan.chart
+    if setup is None:
+        return None
+    series = list(setup.history.series.values())
+    validated = [item.name for item in series if setup.validation(item.name).validated]
+    line = (
+        f"VELAS DO GRÁFICO (velas de {setup.model.period} s): {count(len(series), 'ativo', 'ativos')} com velas gravadas,"
+        f" {len(validated)} com regra das velas validada em dados separados"
+    )
+    return line + (f" ({', '.join(validated)})." if validated else ".")
 
 
 def analysis_summary(scan):
@@ -1875,6 +1976,8 @@ def record(visit, progress, ctx):
     summary.last_visit = visit
     if ready:
         summary.last_ready = visit  # its quote and payout were read together, never mixed with older ones
+    if visit.chart is not None and visit.chart.observation.usable:
+        progress.charts += 1
     for line in visit_lines(visit):
         say(line)
 
@@ -1928,6 +2031,13 @@ def scan_row(visit):
         spreadsheet_safe(visit.diagnostic or ""),
         visit.standby or "",
         visit.paused.note if visit.paused is not None else "",
+    ]
+    chart = visit.chart
+    row += [
+        spreadsheet_safe(chart.observation.status(chart.period)) if chart else "",
+        chart.market.direction if chart else "",
+        spreadsheet_safe(f"{chart.market.summary}; {chart.market.signals_text()}") if chart else "",
+        spreadsheet_safe(chart.decision.describe()) if chart else "",
     ]
     return row
 
@@ -2011,6 +2121,12 @@ def visit_lines(visit):
         lines += (f"  {visit.paused.note}",)
     if visit.decision is not None:
         lines += (f"  análise CALL/PUT: {visit.decision.describe()}",)
+    chart = visit.chart
+    if chart is not None:
+        lines += (f"  gráfico: {chart.observation.status(chart.period)}", f"  {chart.market.describe()}")
+        if chart.market.signals:
+            lines += (f"    sinais: {chart.market.signals_text()}",)
+        lines += (f"  decisão pelas regras das velas: {chart.decision.describe()}",)
     return lines
 
 
@@ -2125,6 +2241,10 @@ def report(progress):
             " quote_association."
         )
     observe.report_timings(progress.timings)
+    log = progress.candle_log
+    if log is not None:
+        where = f"; velas gravadas em {', '.join(str(path) for path in log.paths)}" if log.paths else ""
+        say(f"Velas do gráfico: {count(progress.charts, 'leitura utilizável', 'leituras utilizáveis')}{where}.")
     if progress.csv is not None:
         say(f"CSV: {progress.csv.path}")
 

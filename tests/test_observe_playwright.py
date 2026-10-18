@@ -738,6 +738,131 @@ class RealContinuousTest(unittest.TestCase):
         self.assertEqual(json.loads((self.runtime / continuous.STATE_FILE_NAME).read_text(encoding="utf-8"))["pausa"], state["pausa"])
 
 
+CANDLE_URL = "https://observe.test/velas/?ssid=SEGREDO"
+# ARTIFICIAL candles (open, high, low, close), oldest first; the last one is forming. They are drawn
+# by the page below, which is not the Pocket Option, and say nothing about any market.
+CANDLE_BARS = []
+_price = 1.08500
+for _n in range(46):
+    _move = (-0.00004 if _n % 4 == 3 else 0.00009) if _n < 30 else (0.00005 if _n % 3 == 0 else -0.00007)
+    _open, _close = round(_price, 5), round(_price + _move, 5)
+    CANDLE_BARS.append((_open, round(max(_open, _close) + 0.00002, 5), round(min(_open, _close) - 0.00003, 5), _close))
+    _price = _close
+CANDLE_MARKER = {"colors": ["#2962ff"], "width": 70.0, "height": 18.0, "right_gap": 1.0, "tolerance": 40}
+CANDLE_PAGE = """<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><title>Velas de teste local</title>
+<style>body { margin: 0; background: #11131c; color: #ccc; font-family: Arial, sans-serif; }
+#plot { display: block; margin: 10px; width: 760px; height: 380px; }</style></head>
+<body>
+<div id="asset">EUR/USD OTC</div><div id="payout">+92%</div>
+<canvas id="plot"></canvas>
+<p>Página de teste do PocketAutonomo, com velas ARTIFICIAIS; não é a Pocket Option.</p>
+<button id="call" onclick="this.dataset.n = (+this.dataset.n || 0) + 1">CALL</button>
+<script>
+const BARS = __BARS__;
+const W = 760, H = 380, AXIS = 680, TOP = 20, BOTTOM = 360, SPACING = 13, BODY = 9;
+const LOW = Math.min(...BARS.map(b => b[2])) - 0.0002, HIGH = Math.max(...BARS.map(b => b[1])) + 0.0002;
+const dpr = window.devicePixelRatio || 1;
+const plot = document.getElementById("plot"); plot.width = W * dpr; plot.height = H * dpr;
+const p = plot.getContext("2d"); p.setTransform(dpr, 0, 0, dpr, 0, 0);
+const row = price => TOP + (HIGH - price) / (HIGH - LOW) * (BOTTOM - TOP);
+p.fillStyle = "#141726"; p.fillRect(0, 0, W, H);
+const left = AXIS - 20 - (BARS.length - 1) * SPACING - BODY;
+BARS.forEach(([o, h, l, c], i) => {
+  const x = left + i * SPACING, color = c >= o ? "#45b734" : "#ff3e1f";
+  const top = Math.round(row(Math.max(o, c))), bottom = Math.max(top + 1, Math.round(row(Math.min(o, c))));
+  p.fillStyle = color; p.fillRect(x, top, BODY, bottom - top);
+  p.fillRect(x + Math.floor(BODY / 2), Math.round(row(h)), 1, Math.round(row(l)) - Math.round(row(h)));
+});
+p.font = "12px Arial"; p.textBaseline = "middle";
+const step = 0.0001;
+for (let k = Math.ceil(LOW / step); k * step <= HIGH; k++) {
+  const y = Math.round(row(k * step));
+  if (y < TOP + 6 || y > BOTTOM - 6) continue;
+  p.fillStyle = "#8a8f9e"; p.fillText((k * step).toFixed(5), AXIS + 8, y);
+}
+const last = BARS[BARS.length - 1][3], y = Math.round(row(last));
+p.fillStyle = "#2962ff";
+for (let x = 0; x < AXIS; x += 6) p.fillRect(x, y, 4, 1);
+p.fillRect(AXIS + 9, y - 9, 70, 18);
+p.fillStyle = "#ffffff"; p.fillText(last.toFixed(5), AXIS + 14, y);
+</script>
+</body></html>
+"""
+
+
+@unittest.skipUnless(HAVE_OCR or REQUIRED, "Playwright e OCR local (rapidocr) não estão instalados neste Python")
+class RealChartTest(unittest.TestCase):
+    """The calibration and the live reading of the candles, with real Chromium and the real OCR, on a local page."""
+
+    def setUp(self):
+        options = {"ignore_cleanup_errors": True} if sys.version_info >= (3, 10) else {}
+        directory = tempfile.TemporaryDirectory(**options)
+        self.addCleanup(directory.cleanup)
+        self.runtime = Path(directory.name) / "runtime"
+        for name, value in (
+            ("RUNTIME_DIR", self.runtime),
+            ("ALLOWED_DOMAIN", "observe.test"),
+            ("HOST_PATTERN", re.compile(r"observe\.test")),
+        ):
+            patcher = mock.patch.object(observe, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.runtime.mkdir(parents=True)
+        sources = {"asset": "#asset", "price": "", "payout": "#payout", "price_ocr": {"chart": "#plot", "marker": CANDLE_MARKER}}
+        (self.runtime / observe.SELECTORS_FILE_NAME).write_text(json.dumps(sources), encoding="utf-8")
+        self.clicks = None
+
+    def open_session(self, profile_dir):
+        session = observe.open_playwright_session(profile_dir, headless=True)
+        original_close = session.close
+        self.addCleanup(original_close)
+        page = CANDLE_PAGE.replace("__BARS__", json.dumps(CANDLE_BARS))
+        session._context.route(
+            "https://observe.test/**",
+            lambda route: route.fulfill(status=200, content_type="text/html; charset=utf-8", body=page),
+        )
+
+        def close():
+            if not session.is_closed():
+                self.clicks = session._page.locator("#call").get_attribute("data-n")
+            original_close()
+
+        session.close = close
+        return session
+
+    def test_the_candles_drawn_are_read_back_by_the_calibration_and_each_reading(self):
+        from pocketautonomo import candles, chart, chart_analysis
+
+        moments = iter(datetime(2026, 10, 18, 12, 0, 20, tzinfo=timezone.utc) + timedelta(milliseconds=10 * n) for n in range(10**6))
+        answers = iter(["", "60", ""])  # Enter after the login, the period, accept the reading
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = chart.main(
+                ["--url", CANDLE_URL, "--configure", "--count", "2", "--interval", "1"],
+                open_session=self.open_session,
+                read_line=lambda prompt="": next(answers),
+                now=lambda: next(moments),
+                show_image=lambda path: None,
+            )
+        text = out.getvalue()
+        self.assertEqual(code, 0, text + err.getvalue())
+        model = candles.load_calibration(self.runtime / candles.CALIBRATION_FILE_NAME)
+        self.assertEqual((candles.color_hex(model.up), candles.color_hex(model.down), model.period), ("#45b734", "#ff3e1f", 60))
+        self.assertIn("45 velas completas e a que se forma", text)
+        self.assertIn("LEITURA EXPLORATÓRIA, não é sinal de entrada:", text)
+        self.assertIn("DECISÃO VALIDADA: AGUARDAR (dados insuficientes: 45 velas de 60 s gravadas", text)
+        history = chart_analysis.load_candles(self.runtime)
+        series = history.get("EUR/USD OTC", 60)
+        self.assertEqual(len(series.bars), 45)  # the forming candle is never recorded
+        resolution = series.bars[0].resolution
+        for bar, (open_, high, low, close) in zip(series.bars, CANDLE_BARS):
+            for got, want in ((bar.open, open_), (bar.high, high), (bar.low, low), (bar.close, close)):
+                self.assertLessEqual(abs(got - want), 1.5 * resolution, (bar, (open_, high, low, close)))
+        self.assertIsNone(self.clicks)  # nothing on the page was clicked
+        self.assertNotIn("SEGREDO", text)
+
+
 @unittest.skipUnless(HAVE_OCR or REQUIRED, "Playwright e OCR local (rapidocr) não estão instalados neste Python")
 class RealDiagnosticTest(unittest.TestCase):
     """The A/B diagnostic of the capture with real Chromium and the real OCR, on local pages."""

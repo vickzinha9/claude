@@ -977,6 +977,10 @@ def main(argv=None, *, now=None):
         return EXIT_FAILED
     for line in report_lines(history, args.horizon, moment):
         print(line, flush=True)
+    from pocketautonomo import chart_analysis  # it builds on this module
+
+    for line in chart_analysis.report_lines(Path(args.runtime), args.horizon):
+        print(line, flush=True)
     return EXIT_OK
 
 
