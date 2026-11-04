@@ -138,7 +138,13 @@ jobs:
         shell: cmd
         env:
           POCKETAUTONOMO_REQUIRE_BROWSER_TESTS: "1" # fail instead of skipping without Playwright or OCR
-        run: .venv\Scripts\python -m unittest -v tests.test_observe_playwright
+        run: .venv\Scripts\python -m unittest -v tests.test_observe_playwright tests.test_trading_playwright
+
+      # The real execution's order panel against a LOCAL imitation page and a local WebSocket server:
+      # it never reaches the Pocket Option and never sends an order to any account.
+      - name: "Launcher: the window opens, refreshes and closes by itself"
+        shell: cmd
+        run: .venv\Scripts\python -m pocketautonomo.app --smoke
 
       # Measurement only: the capture with a visible window, covered and minimized, on a
       # local page. It always exits 0; the timings say nothing about the Pocket Option.
@@ -175,3 +181,38 @@ jobs:
           Write-Output "observe-selectors.json: $selectors"
           if ($profile -ne "existing profile") { exit 1 }
           if ($selectors -ne '{"asset": "#sentinel", "price": "", "payout": ""}') { exit 1 }
+
+  # The chart's candles, the dashed line across the axis and the order panel in Chromium on Linux,
+  # where Arial is drawn with the Liberation Sans font, with the local OCR. Local test pages only.
+  linux-browser:
+    name: ubuntu-latest / Chromium, Liberation fonts and OCR on local test pages
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTHONIOENCODING: utf-8
+      POCKETAUTONOMO_REQUIRE_BROWSER_TESTS: "1"
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install Playwright, Chromium with its system fonts, and the local OCR
+        run: |
+          python -m pip install "$(python -c 'from pocketautonomo.observe import PLAYWRIGHT_REQUIREMENT as r; print(r)')"
+          python -m pip install $(python -c 'from pocketautonomo.quote_ocr import OCR_REQUIREMENTS as r; print(" ".join(r))')
+          python -m playwright install --with-deps chromium
+          fc-match Arial
+
+      - name: Candles, dashed line and order panel in real Chromium (local pages, never the Pocket Option)
+        run: >-
+          python -m unittest -v
+          tests.test_observe_playwright.RealChartTest
+          tests.test_observe_playwright.RealCandleScaleTest
+          tests.test_observe_playwright.RealDashedLineTest
+          tests.test_trading_playwright

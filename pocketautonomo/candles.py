@@ -511,6 +511,8 @@ def read_axis(image, scale, x0, skip, engine, candle_colors=(), decimals=None):
             if y - start > tallest:
                 for row in range(start, y):
                     mask[row * width + x] = _REMOVED
+    # A dashed vertical line has dashes shorter than a line of text: it is found by its comb instead.
+    dashed = _dashed_lines(mask, width, height, scale)
     # A line of the chart drawn across these columns comes in from their left edge or reaches the right one,
     # or crosses most of them; a run of text, even of digits touching each other, does neither.
     longest = MAX_TEXT_RUN * scale
@@ -557,6 +559,11 @@ def read_axis(image, scale, x0, skip, engine, candle_colors=(), decimals=None):
             problem = f"{bottom - top} pixels de altura, fora da altura de uma linha de texto ({low:.0f} a {high:.0f})"
         elif right - left < MIN_TEXT_RATIO * (bottom - top):
             problem = "estreita demais para um preço"
+        elif (crossed := _crossed_by(dashed, mask, width, upper, lower, left, right)) is not None:
+            problem = (
+                f"atravessada por uma linha pontilhada vertical na coluna {x0 + crossed}: os dígitos e a linha"
+                " se tocam, e o rótulo não é lido"
+            )
         elif labels >= MAX_AXIS_LABELS:
             problem = f"não lida: {MAX_AXIS_LABELS} rótulos já tinham sido lidos acima dela"
         elif readings >= MAX_AXIS_READINGS:
@@ -572,6 +579,112 @@ def read_axis(image, scale, x0, skip, engine, candle_colors=(), decimals=None):
             continue
         lines.append(AxisLine(*place, problem=problem))
     return lines
+
+
+MIN_DASHES = 3  # isolated dashes of one comb, at least, to take a column for a dashed line
+DASH_SHARE = 0.8  # a dash is at most this share of its period: there is a gap between two dashes
+
+
+def _runs_down(mask, width, height, x):
+    """The runs (first row, last row + 1) of text pixels down column x."""
+    runs, y = [], 0
+    while y < height:
+        if mask[y * width + x] != _TEXT:
+            y += 1
+            continue
+        start = y
+        while y < height and mask[y * width + x] == _TEXT:
+            y += 1
+        runs.append((start, y))
+    return runs
+
+
+def _dashed_lines(mask, width, height, scale):
+    """{column: dashes} of the dashed vertical lines across the axis's columns; their pixels are taken out.
+
+    A dashed line is a comb down one column: short runs of the same length, at a regular period,
+    with a gap after each, and some of them alone in their rows, with nothing of the axis drawn
+    beside them within the distance that joins the glyphs of one label (between the labels). The
+    vertical stroke of a digit (a 1 in the same place on every label) is a run beside the other
+    digits of its label, at the period of the labels: it is never one of those lone dashes, so a
+    column of 1s is never taken for a dashed line, whatever its height.
+    The dashes are predicted down the whole column from the comb, and only the pixels of a predicted
+    dash are taken out: a stroke of a digit between two dashes is kept, for _crossed_by.
+    """
+    longest_period = TEXT_HEIGHT[1] * scale
+    reach = math.ceil(LINE_GAP * scale) + 2  # the glyphs of one label are closer than this to each other
+    found = {}
+    for x in range(width):
+        runs = _runs_down(mask, width, height, x)
+        if len(runs) < MIN_DASHES:
+            continue
+        # Beside the column, but not its own width of two or three pixels: where a digit next to a 1 is.
+        beside = [
+            column for column in range(max(0, x - reach), min(width, x + reach + 1)) if abs(column - x) > 2
+        ]
+
+        def alone(run):
+            for y in range(*run):
+                base = y * width
+                if any(mask[base + column] == _TEXT for column in beside):
+                    return False
+            return True
+
+        isolated = [run for run in runs if alone(run)]
+        if len(isolated) < MIN_DASHES:
+            continue
+        lengths = sorted(b - a for a, b in isolated)
+        length = lengths[len(lengths) // 2]
+        teeth = [run for run in isolated if abs((run[1] - run[0]) - length) <= max(1, 0.4 * length)]
+        if len(teeth) < MIN_DASHES:
+            continue
+        steps = [b[0] - a[0] for a, b in zip(teeth, teeth[1:])]
+        base_step = min(steps)
+        if base_step <= 0:
+            continue
+        close = [step for step in steps if step < 1.5 * base_step]
+        period = sorted(close)[len(close) // 2]
+        span = teeth[-1][0] - teeth[0][0]
+        periods = round(span / period)
+        if periods < MIN_DASHES - 1:
+            continue
+        period = span / periods  # the comb's own period, to a fraction of a pixel
+        if not (2 <= period <= longest_period and length <= DASH_SHARE * period):
+            continue
+        anchor = teeth[0][0]
+        if any(abs((start - anchor) / period - round((start - anchor) / period)) * period > 1.5 for start, _ in teeth):
+            continue  # not one regular comb
+        dashes = []
+        k = -math.floor(anchor / period)
+        while anchor + k * period < height:
+            first = max(0, math.floor(anchor + k * period) - 1)
+            last = min(height, math.ceil(anchor + k * period + length) + 1)
+            if last > first:
+                dashes.append((first, last))
+                for y in range(first, last):
+                    if mask[y * width + x] == _TEXT:
+                        mask[y * width + x] = _REMOVED
+            k += 1
+        found[x] = dashes
+    return found
+
+
+def _crossed_by(dashed, mask, width, upper, lower, left, right):
+    """The column of a dashed line that touches the line of text in these rows and columns, or None.
+
+    The line passes clear between two glyphs when neither its column, between its dashes, nor the
+    columns beside it have text in these rows. Otherwise the dashes and the digits touch: the pixels
+    of one cannot be told from those of the other, and the label is not read.
+    """
+    for x in sorted(dashed):
+        if not left - 1 <= x <= right:
+            continue
+        for y in range(upper, lower):
+            base = y * width
+            for column in (x - 1, x, x + 1):
+                if 0 <= column < width and mask[base + column] == _TEXT:
+                    return x
+    return None
 
 
 def _axis_line_image(group, number, owner, mask, distances, width, height, skip, reach):

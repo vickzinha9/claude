@@ -90,9 +90,41 @@ FICTITIOUS_BALANCE_CENTS = 10_000  # only lets the reservations through; it is n
 GALE_WINDOW_SECONDS = 5.0
 MIN_GALE_WINDOW, MAX_GALE_WINDOW = 1.0, 60.0
 
-# The value of the execution column: every line says that nothing went to a platform.
+# The value of the execution column: whether the line's orders went to a platform.
 SIMULATED = "simulada"
 DEMONSTRATION = "demonstração (dados artificiais)"
+REAL = "REAL (conta real)"  # pocket_broker.PocketBroker: orders on the account logged in the browser
+REAL_ON_DEMO = "REAL (conta demo)"  # the same orders, on the platform's demo account
+REAL_EXECUTIONS = (REAL, REAL_ON_DEMO)
+# The words of the simulated operation, as the real execution says them in its lines.
+REAL_WORDS = (
+    ("entrada simulada enviada", "ordem real aceita pela conta"),
+    ("resultado simulado", "resultado da conta"),
+    ("ao simulador", "à conta"),
+    ("do simulador", "da conta"),
+    ("pelo simulador", "pela conta"),
+    ("no simulador", "na conta"),
+    ("este simulador", "esta conta"),
+    ("o simulador", "a conta"),
+    ("ordem simulada", "ordem real"),
+    ("entrada simulada", "ordem real"),
+    ("simulador", "conta"),
+)
+SESSION_LIMIT = "limite da sessão"
+
+
+@dataclass(frozen=True)
+class SessionLimits:
+    """When the real execution stops sending for the rest of the run.
+
+    full_losses: cycles that ended with four confirmed LOSS (default 1: the first one ends the
+    sending). loss_cents: the net loss of the run, from the account's own profits. cycles: the
+    cycles started in the run (None: no limit).
+    """
+
+    full_losses: int = 1
+    loss_cents: int = 7500
+    cycles: Optional[int] = None
 SIMULATOR_TIME_NOTE = "tempo do simulador; não comprova a latência da corretora"
 
 # The value of the event column.
@@ -138,6 +170,13 @@ OPERATION_COLUMNS = (
     "result",  # WIN, LOSS, DRAW, CANCELLED, REJECTED or UNKNOWN of the attempt
     "outcome",  # how the cycle ended, when the event ended it
     "reason",
+    # The real execution only (pocket_broker); empty in the simulated operation.
+    "real_order_id",  # the order's id at the platform
+    "real_submit_ms",  # the whole submission: panel checked, click, platform's acceptance
+    "accept_ms",  # from the click to the platform's acceptance
+    "profit_cents",  # the account's net result of the order
+    "balance_cents",  # the account's balance after the event
+    "session_net_cents",  # the run's net result so far, from the account's profits
 )
 
 
@@ -285,7 +324,9 @@ class OperationLog:
 
 def event_line(row):
     """The terminal line of one event."""
-    label = "DEMONSTRAÇÃO" if row["execution"] == DEMONSTRATION else "OPERAÇÃO SIMULADA"
+    label = {
+        DEMONSTRATION: "DEMONSTRAÇÃO", REAL: "EXECUÇÃO REAL", REAL_ON_DEMO: "EXECUÇÃO REAL (CONTA DEMO)",
+    }.get(row["execution"], "OPERAÇÃO SIMULADA")
     parts = [label, row["state"], row["event"]]
     if row.get("cycle_id") is not None:
         parts.append(f"ciclo {row['cycle_id']}")
@@ -298,8 +339,15 @@ def event_line(row):
         parts.append(attempt)
     if row.get("simulated_order_id"):
         parts.append(f"ordem {row['simulated_order_id']}")
+    if row.get("real_order_id"):
+        parts.append(f"ordem da conta {row['real_order_id']}")
     if row.get("result"):
         parts.append(f"resultado {row['result']}")
+    if row.get("profit_cents") is not None:
+        profit = row["profit_cents"]
+        parts.append(f"líquido {'-' if profit < 0 else '+'}{money(abs(profit))}")
+    if row.get("balance_cents") is not None:
+        parts.append(f"saldo {money(row['balance_cents'])}")
     if row.get("outcome"):
         parts.append(f"ciclo terminou com {row['outcome']}")
     if row.get("quote"):
@@ -318,6 +366,12 @@ def event_line(row):
     ]
     if row.get("simulated_submit_ms") is not None:
         times.append(f"envio ao simulador {row['simulated_submit_ms']:.0f} ms ({SIMULATOR_TIME_NOTE})")
+    if row.get("real_submit_ms") is not None:
+        accept = row.get("accept_ms")
+        times.append(
+            f"envio à conta {row['real_submit_ms']:.0f} ms"
+            + (f" (clique até o aceite {accept:.0f} ms)" if accept is not None else "")
+        )
     if times:
         parts.append(", ".join(times))
     if row.get("reason"):
@@ -344,6 +398,8 @@ class Operator:
         monotonic=time.perf_counter,
         horizon=analysis.DEFAULT_HORIZON,
         gale_window=GALE_WINDOW_SECONDS,
+        gate=None,
+        limits=None,
     ):
         self.coordinator = coordinator
         self.broker = broker
@@ -354,6 +410,12 @@ class Operator:
         self.monotonic = monotonic
         self.horizon = horizon
         self.gale_window = gale_window
+        # gate() is None, or why no cycle may start now (execution disarmed, pause asked in the launcher).
+        self.gate = gate
+        self.limits = limits  # SessionLimits of the run, or None
+        self.real = getattr(log, "execution", None) in REAL_EXECUTIONS
+        self._id_key = "real_order_id" if self.real else "simulated_order_id"
+        self.session = {"full_losses": 0, "net_cents": 0, "cycles": 0}
         self.window = None  # the Window of the next gale, while it is open
         self.validated = {}  # asset key -> asset, for the assets whose last decision had a validated rule
         self.recovering = True  # until recover() resolved what the last run left
@@ -362,6 +424,7 @@ class Operator:
         self.counts = {"cycles": 0, "entries": 0, "deadline": 0, "refused": 0, "windows": 0}
         self._latest = {}  # asset key -> the latest Seen
         self._shown = None  # the last state shown in the terminal
+        self.last_event = None  # the last row written, for the launcher's panel
 
     # What the caller asks.
 
@@ -429,6 +492,9 @@ class Operator:
             )
         if self.collection_paused is not None:
             return self._refuse(row, f"varredura em PAUSA: {self.collection_paused}")
+        blocked = self.gate() if self.gate is not None else None
+        if blocked:
+            return self._refuse(row, blocked)
         if not (validation is not None and validation.validated and validation.rule is not None):
             return self._refuse(row, "a decisão não vem de uma regra validada em dados separados")
         if sample is None or decision.valid_until is None:
@@ -470,6 +536,7 @@ class Operator:
         except CoordinatorError as error:
             return self._refuse(row, f"o coordenador não iniciou o ciclo: {error}")
         self.counts["cycles"] += 1
+        self.session["cycles"] += 1
         self._write(
             CYCLE_STARTED,
             row,
@@ -591,21 +658,43 @@ class Operator:
         # start of the submission, saved first, takes it past the window.
         self._timed.last_ms = None
         report = self.executor.submit(reservation.reservation_id, window.closes)
-        row.update(simulated_submit_ms=self._timed.last_ms, quote_age_ms=age_ms(seen.captured_at, now))
+        submit_key = "real_submit_ms" if self.real else "simulated_submit_ms"
+        row.update({submit_key: self._timed.last_ms}, quote_age_ms=age_ms(seen.captured_at, now))
         if report.outcome == ACCEPTANCE_RECORDED:
             self.counts["entries"] += 1
             order = self._guard(lambda: self.broker.order(report.broker_order_id), "a leitura da ordem simulada falhou")
-            self._write(
-                ENTRY_SUBMITTED,
-                row,
-                simulated_order_id=order.order_id,
-                quote=order.entry_quote,
-                quote_captured_at_utc=order.entry_captured_at,
-                reason=(
-                    f"vence às {hour(order.expires_at)} e é liquidada pela primeira cotação de"
-                    f" {order.asset} lida a partir daí, até {hour(order.settle_by)}"
-                ),
-            )
+            if self.real:
+                timings = getattr(self.broker, "last_ms", {}) or {}
+                self._write(
+                    ENTRY_SUBMITTED,
+                    row,
+                    real_order_id=order.order_id,
+                    quote=order.entry_quote,
+                    quote_captured_at_utc=order.entry_captured_at,
+                    accept_ms=timings.get("accept_ms"),
+                    payout_percent=order.payout_percent if order.payout_percent is not None else seen.payout,
+                    balance_cents=order.balance_after_open_cents,
+                    session_net_cents=self.session["net_cents"],
+                    reason=(
+                        f"aceita pela conta {self.log.execution}: {money(order.stake_cents)} em {order.asset}"
+                        f" {order.direction}, 300 s, abertura {order.entry_quote} (cotação na tela"
+                        f" {order.screen_entry_quote or 'indisponível'}); vence às {hour(order.expires_at)}"
+                        + (f"; {order.note}" if order.note else "")
+                    ),
+                )
+                self._check_broker()
+            else:
+                self._write(
+                    ENTRY_SUBMITTED,
+                    row,
+                    simulated_order_id=order.order_id,
+                    quote=order.entry_quote,
+                    quote_captured_at_utc=order.entry_captured_at,
+                    reason=(
+                        f"vence às {hour(order.expires_at)} e é liquidada pela primeira cotação de"
+                        f" {order.asset} lida a partir daí, até {hour(order.settle_by)}"
+                    ),
+                )
         elif report.outcome == REJECTION_RECORDED:
             reason = report.response.reason or "sem motivo"
             event = ENTRY_REJECTED
@@ -621,7 +710,7 @@ class Operator:
                 ENTRY_UNCERTAIN,
                 row,
                 result=UNKNOWN if self.coordinator.status().is_blocked else None,
-                simulated_order_id=report.broker_order_id,
+                **{self._id_key: report.broker_order_id},
                 reason=f"{errors}; nada é reenviado: a reserva fica pendente até a consulta ao simulador",
             )
             self._check_failure(f"a resposta do simulador não pôde ser gravada ({errors})")
@@ -678,7 +767,7 @@ class Operator:
             self._write(
                 ORDER_FOUND,
                 row,
-                simulated_order_id=found.order_id,
+                **{self._id_key: found.order_id},
                 quote=found.entry_quote,
                 reason=(
                     "a consulta ao simulador pela reserva achou a ordem simulada; o resultado dela"
@@ -720,17 +809,29 @@ class Operator:
         attempt = pending.attempt
         row = self._pending_row(
             pending,
-            simulated_order_id=order.order_id,
             quote=order.exit_quote,
             quote_captured_at_utc=order.exit_captured_at,
+            **{self._id_key: order.order_id},
         )
-        self._write(RESULT, row, result=report.result, reason=settlement_reason(order))
+        if self.real:
+            profit = getattr(order, "profit_cents", None)
+            if profit is not None:
+                self.session["net_cents"] += profit
+            row.update(
+                profit_cents=profit, balance_cents=getattr(order, "balance_after_close_cents", None),
+                payout_percent=getattr(order, "payout_percent", None), session_net_cents=self.session["net_cents"],
+            )
+            reason = settlement_reason(order) + (f"; {order.note}" if order.note else "")
+        else:
+            reason = settlement_reason(order)
+        self._write(RESULT, row, result=report.result, reason=reason)
         status = self.coordinator.status()
         if not status.is_active:
             self._cycle_ended()
             return
         if self.recovering:
             return  # a restored cycle releases no gale: _finish_recovery() abandons it
+        self._prepare(stake_for_attempt(status.attempt))  # the gale's amount, before its window
         now = self.now()
         self.window = Window(status.cycle_id, status.attempt, now, now + timedelta(seconds=self.gale_window))
         self._write(
@@ -775,12 +876,51 @@ class Operator:
             detail = f"interrompido antes da tentativa {status.attempt}"
         else:
             detail = f"{outcome} na tentativa {status.attempt}"
+        if outcome == LOSS:
+            self.session["full_losses"] += 1
+        limit = self._limit_reached()
         self._write(
             CYCLE_ENDED,
             self._row(attempt=status.attempt),
             outcome=outcome,
-            reason=f"{detail}; a busca de oportunidades válidas recomeça",
+            session_net_cents=self.session["net_cents"] if self.real else None,
+            reason=f"{detail}; " + (
+                f"{SESSION_LIMIT}: {limit}" if limit else "a busca de oportunidades válidas recomeça"
+            ),
         )
+        if limit:
+            self.pause_collection(f"{SESSION_LIMIT}: {limit}")
+        else:
+            self._prepare(stake_for_attempt(1))
+
+    def _limit_reached(self):
+        """Why the run's limits stop the sending now, or None."""
+        limits = self.limits
+        if limits is None:
+            return None
+        session = self.session
+        if limits.full_losses is not None and session["full_losses"] >= limits.full_losses:
+            return f"{session['full_losses']} ciclo(s) com quatro LOSS confirmadas nesta execução"
+        if limits.loss_cents is not None and -session["net_cents"] >= limits.loss_cents:
+            return f"perda líquida de {money(-session['net_cents'])} nesta execução, limite {money(limits.loss_cents)}"
+        if limits.cycles is not None and session["cycles"] >= limits.cycles:
+            return f"{session['cycles']} ciclos iniciados nesta execução, limite {limits.cycles}"
+        return None
+
+    def _prepare(self, stake_cents):
+        """Let a real broker set the next order's time and amount ahead; nothing is sent."""
+        prepare = getattr(self.broker, "prepare", None)
+        if prepare is None or self.stop_reason is not None or self.collection_paused is not None:
+            return
+        problem = prepare(stake_cents)
+        if problem:
+            self.log.say(f"  AVISO: {problem}; a ordem confere tudo de novo antes do clique")
+
+    def _check_broker(self):
+        """A real order that broke an expectation stops every new order; its result is still followed."""
+        fault = getattr(self.broker, "fault", None)
+        if fault and self.collection_paused is None:
+            self.pause_collection(f"execução real parada: {fault}")
 
     def _finish_recovery(self):
         if not self.recovering:
@@ -844,22 +984,33 @@ class Operator:
         row = {
             "cycle_id": reservation.cycle_id, "asset": entry.asset, "direction": entry.direction,
             "attempt": entry.attempt, "stake_cents": entry.stake_cents, "decision_id": status.decision_id,
-            "reservation_id": reservation.reservation_id, "simulated_order_id": status.broker_order_id,
+            "reservation_id": reservation.reservation_id, self._id_key: status.broker_order_id,
         }
         row.update(values)
         return row
 
     def _write(self, event, row, **values):
         row = dict(row, **values)
-        row.update(at_utc=self.now(), event=event, state=self.state())
+        row.update(at_utc=self.now(), event=self._words(event), state=self.state())
+        if row.get("reason"):
+            row["reason"] = self._words(row["reason"])
         self.log.write(row)
+        self.last_event = row
+
+    def _words(self, text):
+        """text as the real execution says it: the account instead of the simulator."""
+        if not self.real or not text:
+            return text
+        for simulated, real in REAL_WORDS:
+            text = text.replace(simulated, real)
+        return text
 
     def _show_state(self):
         status = self.coordinator.status()
         state = self._state_of(status)
         if state != self._shown:
             self._shown = state
-            self.log.say(f"ESTADO: {state} — {self._explain(state, status)}")
+            self.log.say(self._words(f"ESTADO: {state} — {self._explain(state, status)}"))
 
     def _state_of(self, status):
         if self.stop_reason is not None:

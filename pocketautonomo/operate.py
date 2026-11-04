@@ -82,6 +82,17 @@ from pocketautonomo.storage import SqliteStore, StorageError
 DATABASE_NAME = "operacao-simulada.db"
 ORDERS_NAME = "operacao-simulada-ordens.db"
 CSV_PREFIX = "operacao-"
+# The real execution keeps its own state, apart from the simulation, one per account.
+REAL_NAMES = {
+    "real": ("operacao-real.db", "operacao-real-ordens.db", "operacao-real-"),
+    "demo": ("operacao-real-demo.db", "operacao-real-demo-ordens.db", "operacao-real-demo-"),
+}
+PANEL_FILE_NAME = "painel.json"
+REAL_INTRO = (
+    "EXECUÇÃO REAL do PocketAutonomo: análise -> coordenador -> ordens na conta {account} aberta no"
+    " navegador, no ativo da tela, 300 s, R$ 5 / R$ 10 / R$ 20 / R$ 40 por tentativa. Só envia com o botão"
+    " Armar ligado (ou --armar) e com todas as travas passando; AGUARDAR e dado ruim nunca enviam."
+)
 DEMO_PREFIX = "demonstracao-"
 POLL_SECONDS = scan.POLL_SECONDS  # between two readings of the cycle's asset
 HOLD_MOMENT = "durante o ciclo simulado"  # the moment of these readings in the timings file
@@ -123,14 +134,32 @@ def main(
     args = parse_arguments(argv)
     if args.demonstracao:
         return demonstration(args, now=now)
-    open_session = scan.open_scan_session if open_session is None else open_session
+    if open_session is None:
+        if args.real:
+            from pocketautonomo.trading_session import open_trading_session
+
+            open_session = open_trading_session
+        else:
+            open_session = scan.open_scan_session
     ctx = observe.Context(now=now, engine=engine)
     if monotonic is not None:
         ctx.monotonic = monotonic
+    if args.real:
+        from pocketautonomo import arming
+
+        # A run starts disarmed: only --armar, or Armar in the launcher, lets an order out.
+        if args.armar:
+            arming.arm(ctx.runtime_dir, args.conta, "--armar")
+        else:
+            arming.disarm(ctx.runtime_dir)
     if args.continuo:
         from pocketautonomo import continuous  # it builds on this module
 
-        return continuous.run(args, ctx, open_session, read_line, sleep=sleep, keep_awake=keep_awake)
+        try:
+            return continuous.run(args, ctx, open_session, read_line, sleep=sleep, keep_awake=keep_awake)
+        finally:
+            if args.real:
+                arming.disarm(ctx.runtime_dir)
     runtime_dir = ctx.runtime_dir
     profile_dir = runtime_dir / observe.PROFILE_DIR_NAME
     selectors_path = runtime_dir / observe.SELECTORS_FILE_NAME
@@ -139,7 +168,7 @@ def main(
     lock = session = None
     interrupted = False
     try:
-        say(INTRO)
+        say(REAL_INTRO.format(account=args.conta) if args.real else INTRO)
         selectors = scan.load_reader_selectors(selectors_path)
         favorites_selector, invalid = scan.current_favorites_selector(scan_path, args.configure)
         if isinstance(selectors["price"], observe.QuoteOcrSource):
@@ -151,6 +180,7 @@ def main(
         url = args.url if args.url is not None else observe.ask_url(read_line)
         scan.print_plan(url, args, profile_dir, selectors_path, scan_path)
         session = open_session(profile_dir)
+        run.attach(session)  # before the page opens: the real execution reads its socket from the start
         observe.open_page(session, url)
         scan.wait_for_login(read_line, args.configure)
         if session.is_closed():
@@ -180,6 +210,10 @@ def main(
         run.close_state()
         if lock is not None:
             lock.release()
+        if args.real:
+            from pocketautonomo import arming
+
+            arming.disarm(runtime_dir)  # every run of the real execution ends disarmed
 
 
 # What stops a run with exit code 1: the scan's safety stops, the browser, the files and the
@@ -200,26 +234,62 @@ class Execution:
     def __init__(self, args, ctx):
         self.args = args
         self.ctx = ctx
-        self.database = ctx.runtime_dir / DATABASE_NAME
-        self.orders = ctx.runtime_dir / ORDERS_NAME
+        self.real = getattr(args, "real", False)
+        if self.real:
+            database, orders, self.csv_prefix = REAL_NAMES[args.conta]
+        else:
+            database, orders, self.csv_prefix = DATABASE_NAME, ORDERS_NAME, CSV_PREFIX
+        self.database = ctx.runtime_dir / database
+        self.orders = ctx.runtime_dir / orders
         self.progress = scan.ScanProgress()
         self.coordinator = self.broker = self.log = self.operator = self.quotes = None
+        self.switch = None  # arming.ArmSwitch of the real execution
         self.state = None  # the scan.Scan of the visits, once they start
 
     def open(self, rules=True):
         """Open the saved state and resolve what the last run left, before the browser opens."""
         args, ctx = self.args, self.ctx
         self.coordinator = Coordinator(SqliteStore(self.database))
-        self.broker = PaperBroker(self.orders, args.horizon, ctx.now)
-        self.log = operation.OperationLog(new_csv_path(ctx.runtime_dir, CSV_PREFIX))
+        gate = limits = None
+        if self.real:
+            from pocketautonomo import arming
+            from pocketautonomo.pocket_broker import PocketBroker
+
+            self.switch = arming.ArmSwitch(ctx.runtime_dir, args.conta)
+            self.broker = PocketBroker(
+                self.orders, account=args.conta, armed=self.switch, now=ctx.now, monotonic=ctx.monotonic,
+                horizon=args.horizon,
+            )
+            execution = operation.REAL if args.conta == "real" else operation.REAL_ON_DEMO
+            gate = self.switch.gate
+            limits = operation.SessionLimits(
+                full_losses=args.limite_ciclos_perdidos, loss_cents=round(args.limite_perda * 100),
+                cycles=args.limite_ciclos,
+            )
+        else:
+            self.broker = PaperBroker(self.orders, args.horizon, ctx.now)
+            execution = operation.SIMULATED
+            if getattr(args, "analise", False):
+                gate = lambda: "modo análise: lê e indica CALL/PUT/AGUARDAR, sem entrada nenhuma"  # noqa: E731
+        self.log = operation.OperationLog(new_csv_path(ctx.runtime_dir, self.csv_prefix), execution)
         self.quotes = CycleQuotes(ctx.runtime_dir, warn)
         self.operator = operation.Operator(
             self.coordinator, self.broker, self.log, now=ctx.now, monotonic=ctx.monotonic, horizon=args.horizon,
-            gale_window=args.gale_window,
+            gale_window=args.gale_window, gate=gate, limits=limits,
         )
         if rules:
             print_rules(args, self.database, self.orders)
         self.operator.recover()
+
+    def attach(self, session):
+        """The real execution: read the page's socket from now on, through this session."""
+        if not self.real:
+            return
+        from pocketautonomo.pocket_socket import SocketMonitor
+
+        monitor = SocketMonitor()
+        session.attach_monitor(monitor)
+        self.broker.attach(session, monitor)
 
     def visit(self, session, selectors, favorites_selector, prepare=None):
         """The scan of the favorites, with the operation after each visit; prepare(state) may add to it.
@@ -232,10 +302,18 @@ class Execution:
         state.chart = scan.chart_setup(selectors, self.ctx.runtime_dir, self.args.horizon)
         if state.chart is not None:
             self.progress.candle_log = state.chart.log
-        state.hooks = OperationHooks(self.operator, state, self.ctx, self.quotes)
+        state.hooks = OperationHooks(self.operator, state, self.ctx, self.quotes, self.panel_path(), self.switch)
         if prepare is not None:
             prepare(state)
+        if self.real:
+            self.operator._prepare(500)  # the time and the first stake set ahead, before any decision
         scan.run_scan(session, state, self.args, self.ctx)
+
+    def panel_path(self):
+        """runtime/painel.json for the launcher: always in the real execution, with --painel otherwise."""
+        if self.real or getattr(self.args, "painel", False):
+            return self.ctx.runtime_dir / PANEL_FILE_NAME
+        return None
 
     def finish(self):
         """The exit code of visits that ended, with what the scan and the operation did."""
@@ -323,6 +401,50 @@ def build_parser():
         f" {operation.MAX_GALE_WINDOW:g}); vencida a janela, o ciclo é interrompido",
     )
     parser.add_argument(
+        "--real",
+        action="store_true",
+        help="EXECUÇÃO REAL: cada entrada vira uma ordem na conta aberta no navegador (Comprar/Vender, 300 s,"
+        " R$ 5/10/20/40), só enquanto a execução estiver armada; estado e estatísticas separados da simulação",
+    )
+    parser.add_argument(
+        "--conta",
+        choices=("real", "demo"),
+        default="real",
+        help="com --real: a conta que deve estar na tela; uma ordem nunca vai para a outra (padrão real)",
+    )
+    parser.add_argument(
+        "--armar",
+        action="store_true",
+        help="com --real: começa ARMADA, sem precisar do botão Armar do painel; sem ela, começa desarmada",
+    )
+    parser.add_argument(
+        "--limite-perda",
+        type=scan.seconds_from(5.0, 100_000.0),
+        default=75.0,
+        help="com --real: perda líquida da execução, em reais, que encerra o envio (padrão 75, um ciclo inteiro)",
+    )
+    parser.add_argument(
+        "--limite-ciclos-perdidos",
+        type=observe.positive_int,
+        default=1,
+        help="com --real: ciclos com quatro LOSS que encerram o envio (padrão 1)",
+    )
+    parser.add_argument(
+        "--limite-ciclos",
+        type=observe.positive_int,
+        help="com --real: ciclos iniciados que encerram o envio (padrão: sem limite)",
+    )
+    parser.add_argument(
+        "--analise",
+        action="store_true",
+        help="modo análise: a varredura e a decisão CALL/PUT/AGUARDAR, sem ciclo nem entrada, nem simulada",
+    )
+    parser.add_argument(
+        "--painel",
+        action="store_true",
+        help=f"grava runtime/{PANEL_FILE_NAME} para o painel do launcher (sempre gravado com --real)",
+    )
+    parser.add_argument(
         "--demonstracao",
         action="store_true",
         help="sem navegador: cenas com decisões e cotações ARTIFICIAIS e relógio simulado, em"
@@ -347,6 +469,14 @@ def parse_arguments(argv):
         parser.error("--continuo roda até Ctrl+C e não aceita --cycles")
     if args.continuo and args.demonstracao:
         parser.error("--continuo não pode ser usado com --demonstracao")
+    if args.real and args.demonstracao:
+        parser.error("--real não pode ser usado com --demonstracao")
+    if args.armar and not args.real:
+        parser.error("--armar só vale com --real")
+    if args.analise and args.real:
+        parser.error("--analise não envia nada: não use com --real")
+    if args.real and args.horizon != 300:
+        parser.error("a execução real envia ordens de 300 s: --horizon 300")
     return args
 
 
@@ -369,7 +499,15 @@ def print_rules(args, database, orders):
         " não entram na análise."
     )
     say(f"Estado gravado: {database} e {orders}; uma pendência é conferida na próxima abertura, sem reenvio.")
-    say(f"Os tempos de envio são do simulador: {operation.SIMULATOR_TIME_NOTE}. Ctrl+C encerra.")
+    if getattr(args, "real", False):
+        cycles = "sem limite" if args.limite_ciclos is None else str(args.limite_ciclos)
+        say(
+            f"EXECUÇÃO REAL na conta {args.conta}: ordens só enquanto armada; limite da execução: perda líquida de"
+            f" R$ {args.limite_perda:g}, {args.limite_ciclos_perdidos} ciclo(s) com quatro LOSS, ciclos: {cycles}."
+            " Ctrl+C encerra (e desarma)."
+        )
+    else:
+        say(f"Os tempos de envio são do simulador: {operation.SIMULATOR_TIME_NOTE}. Ctrl+C encerra.")
 
 
 class CycleQuotes:
@@ -482,15 +620,20 @@ def cycle_context(operator):
 class OperationHooks:
     """The scan's hooks: the analysis' decision after each visit, and the hold during a cycle."""
 
-    def __init__(self, operator, state, ctx, quotes=None):
+    def __init__(self, operator, state, ctx, quotes=None, panel_path=None, switch=None):
         self.operator = operator
         self.state = state
         self.ctx = ctx
         self.quotes = quotes
+        self.panel = None
+        if panel_path is not None:
+            from pocketautonomo.panel import Panel
+
+            self.panel = Panel(panel_path, operator, switch, warn)
 
     def before_visit(self, session, favorite):
         if self.operator.busy():  # an entry restored from the last run, still pending
-            hold(session, self.operator, self.state, self.ctx, favorite.position, self.quotes)
+            hold(session, self.operator, self.state, self.ctx, favorite.position, self.quotes, self.panel)
 
     def after_visit(self, session, visit):
         pause = self.state.progress.paused
@@ -498,11 +641,13 @@ class OperationHooks:
             self.operator.pause_collection(pause.cause)
         if visit.decision is not None:
             self.operator.consider(visit.decision, visit.observation.duration_ms, visit.decision_ms)
+        if self.panel is not None:
+            self.panel.visit(visit.decision, visit.observation.duration_ms, visit.decision_ms)
         if self.operator.busy():
-            hold(session, self.operator, self.state, self.ctx, visit.favorite.position, self.quotes)
+            hold(session, self.operator, self.state, self.ctx, visit.favorite.position, self.quotes, self.panel)
 
 
-def hold(session, operator, state, ctx, position, quotes=None):
+def hold(session, operator, state, ctx, position, quotes=None, panel=None):
     """Stay on the open cycle's asset, reading it without any click, until the cycle ends.
 
     Every reading that counts goes to the operation and, through quotes (CycleQuotes), to
@@ -536,11 +681,15 @@ def hold(session, operator, state, ctx, position, quotes=None):
             finally:
                 if quotes is not None:
                     quotes.record(seen, accepted_at, context, state.analyzer)
+                if panel is not None:
+                    panel.reading(seen)
         else:
             if problem != shown:
                 say(f"  leitura durante o ciclo não usada: {problem}")
                 shown = problem
             operator.tick()
+            if panel is not None:
+                panel.write()
         previous = poll
         if operator.busy():
             session.wait(POLL_SECONDS)
@@ -594,9 +743,15 @@ def report(operator, log, database, orders, quotes=None):
     if operator is None:
         return
     counts = operator.counts
+    if operator.real:
+        session = operator.session
+        say(
+            f"Execução real ({operator.log.execution}): líquido desta execução"
+            f" {'-' if session['net_cents'] < 0 else '+'}{money(abs(session['net_cents']))}, pelos lucros da própria conta."
+        )
     say(
-        f"Operação simulada: {count(counts['cycles'], 'ciclo iniciado', 'ciclos iniciados')},"
-        f" {count(counts['entries'], 'entrada simulada', 'entradas simuladas')},"
+        f"{'Execução real' if operator.real else 'Operação simulada'}: {count(counts['cycles'], 'ciclo iniciado', 'ciclos iniciados')},"
+        f" {count(counts['entries'], 'ordem real aceita' if operator.real else 'entrada simulada', 'ordens reais aceitas' if operator.real else 'entradas simuladas')},"
         f" {count(counts['deadline'], 'entrada recusada', 'entradas recusadas')} por prazo vencido e"
         f" {count(counts['windows'], 'janela de gale vencida', 'janelas de gale vencidas')}."
     )

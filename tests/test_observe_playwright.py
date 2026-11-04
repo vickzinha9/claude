@@ -988,6 +988,77 @@ class RealCandleScaleTest(unittest.TestCase):
                     self.assertEqual(covered, [int(text)], (ratio, text, covered))
 
 
+@unittest.skipUnless(HAVE_OCR or REQUIRED, "Playwright e OCR local (rapidocr) não estão instalados neste Python")
+class RealDashedLineTest(unittest.TestCase):
+    """A dashed vertical line through the axis of CANDLE_PAGE, whose labels all start with a 1 in one column.
+
+    Real Chromium and the real OCR, Arial (Liberation Sans on Linux), at 100%, 125% and 150%. The 1s
+    stacked in one column must never be taken for a dashed line (the reading of the plain page is the
+    regression check), a dashed line clear of the digits must be taken out and every candle read as drawn,
+    and a dashed line through the digits must be found: the labels it touches are not read, and whatever
+    is read is right.
+    """
+
+    def capture(self, page_html, ratio):
+        from playwright.sync_api import sync_playwright
+
+        from pocketautonomo import quote_ocr
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                page = browser.new_page(device_scale_factor=ratio, viewport={"width": 800, "height": 500})
+                page.set_content(page_html)
+                box = page.locator("#plot").bounding_box()
+                return quote_ocr.decode_png(page.screenshot(clip=box)), box["width"]
+            finally:
+                browser.close()
+
+    def page(self, dash_x):
+        base = CANDLE_PAGE.replace("__BARS__", json.dumps(CANDLE_BARS))
+        if dash_x is None:
+            return base
+        line = f'p.fillStyle = "#8a8f9e"; for (let y = 0; y < H; y += 8) p.fillRect(AXIS + {dash_x}, y, 1, 4);\n</script>'
+        return base.replace("</script>", line, 1)
+
+    def read(self, image, css_width):
+        from pocketautonomo import candles, quote_ocr, quote_reader
+
+        engine = getattr(RealDashedLineTest, "engine", None) or quote_ocr.RapidOcrEngine()
+        RealDashedLineTest.engine = engine  # one OCR for every reading, as the program keeps it
+        model = candles.CandleModel((0x45, 0xB7, 0x34), (0xFF, 0x3E, 0x1F), 60)
+        marker = quote_reader.MarkerModel.from_json(CANDLE_MARKER)
+        return candles.read_candles(image, image.width / css_width, model, marker, engine)
+
+    def assert_candles_right(self, reading, ratio):
+        self.assertEqual(list(reading.indices), list(range(45, -1, -1)))
+        for index, candle in zip(reading.indices, reading.candles):
+            bar = CANDLE_BARS[45 - index]
+            for got, want in zip((candle.open, candle.high, candle.low, candle.close), bar):
+                self.assertLessEqual(abs(got - want), 2 * reading.resolution, (ratio, index, candle, bar))
+
+    def test_the_stacked_1s_are_kept_and_a_dashed_line_is_taken_out_or_refused(self):
+        from pocketautonomo import candles
+
+        for ratio in (1.0, 1.25, 1.5):
+            with self.subTest(scale=ratio, line="nenhuma"):
+                reading = self.read(*self.capture(self.page(None), ratio))
+                self.assertTrue(reading.available, reading.reason)
+                self.assert_candles_right(reading, ratio)
+                lines = "\n".join(candles.geometry_lines(reading, limit=40))
+                self.assertNotIn("pontilhada", lines)
+            with self.subTest(scale=ratio, line="livre dos dígitos"):
+                reading = self.read(*self.capture(self.page(4), ratio))
+                self.assertTrue(reading.available, reading.reason)
+                self.assert_candles_right(reading, ratio)
+            with self.subTest(scale=ratio, line="através dos dígitos"):
+                reading = self.read(*self.capture(self.page(21), ratio))
+                lines = "\n".join(candles.geometry_lines(reading, limit=40))
+                self.assertIn("atravessada por uma linha pontilhada vertical", lines)
+                if reading.available:  # only from labels the line does not touch
+                    self.assert_candles_right(reading, ratio)
+
+
 # ARTIFICIAL candles with three decimals, like a quote of 161.xxx, for HANGING_PAGE; not the Pocket Option.
 HANGING_BARS = []
 _price = 161.420

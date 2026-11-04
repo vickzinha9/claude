@@ -198,7 +198,7 @@ class Continuous:
         args, ctx = self.args, self.ctx
         lock = None
         try:
-            say(operate.INTRO)
+            say(operate.REAL_INTRO.format(account=self.args.conta) if getattr(self.args, "real", False) else operate.INTRO)
             say(INTRO)
             # The lock first, held from the first run to the last: the state is read only by its holder.
             lock = scan.ScanLock(ctx.runtime_dir / scan.LOCK_FILE_NAME)
@@ -299,6 +299,7 @@ class Continuous:
         try:
             execution.open(rules=number == 1)
             session = self.open_session(self.profile_dir)
+            execution.attach(session)  # the real execution reads the page's socket from the start
             observe.open_page(session, self.url)
             if not self.reviewed:  # the first run whose browser opened: you are there
                 scan.wait_for_login(self.read_line, args.configure)

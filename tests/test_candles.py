@@ -741,3 +741,43 @@ class StampTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DashedLineTest(unittest.TestCase):
+    """candles._dashed_lines and _crossed_by on masks drawn here: a dashed column, and the 1s of stacked labels."""
+
+    def mask(self, width, height, pixels):
+        mask = bytearray(width * height)
+        for x, y in pixels:
+            mask[y * width + x] = candles._TEXT
+        return mask
+
+    def labels(self, width, rows, digit_columns):
+        """Stacked labels: at each row range, short vertical strokes at the digit columns (a 1 among them)."""
+        return [(x, y) for top, bottom in rows for x in digit_columns for y in range(top, bottom)]
+
+    def test_stacked_1s_in_one_column_are_never_a_dashed_line(self):
+        width, height = 40, 200
+        rows = [(top, top + 9) for top in range(10, 190, 18)]  # labels every 18 rows, 9 rows tall
+        mask = self.mask(width, height, self.labels(width, rows, (5, 9, 10, 14, 18, 22)))
+        before = bytes(mask)
+        self.assertEqual(candles._dashed_lines(mask, width, height, 1.0), {})
+        self.assertEqual(bytes(mask), before)  # nothing taken out
+
+    def test_a_dashed_column_is_taken_out_and_the_labels_it_touches_are_found(self):
+        width, height = 40, 200
+        rows = [(top, top + 9) for top in range(10, 190, 30)]
+        pixels = self.labels(width, rows, (5, 9, 14, 18))
+        dash = [(30, y) for start in range(0, height, 8) for y in range(start, start + 4)]
+        dash += [(31, y) for start in range(0, height, 8) for y in range(start, start + 4)]  # two pixels wide
+        through = [(14, y) for start in range(0, height, 8) for y in range(start, start + 4)]  # over a digit
+        mask = self.mask(width, height, pixels + dash + through)
+        found = candles._dashed_lines(mask, width, height, 1.0)
+        self.assertEqual(sorted(found), [14, 30, 31])
+        self.assertFalse(any(mask[y * width + 30] == candles._TEXT for y in range(height)))
+        self.assertFalse(any(mask[y * width + 31] == candles._TEXT for y in range(height)))
+        top, bottom = rows[0]
+        self.assertEqual(candles._crossed_by(found, mask, width, top, bottom, 4, 20), 14)  # its 4-row gaps keep the digit
+        clear = {x: dashes for x, dashes in found.items() if x != 14}
+        self.assertIsNone(candles._crossed_by(clear, mask, width, top, bottom, 4, 20))
+        self.assertTrue(all(mask[y * width + 5] == candles._TEXT for y in range(top, bottom)))  # the 1s stay

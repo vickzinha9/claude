@@ -1,0 +1,89 @@
+"""The launcher's window (pocketautonomo.app): its commands, its panel and its arm switch, without trading."""
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from pocketautonomo import app, arming
+
+
+class CommandTest(unittest.TestCase):
+    def test_each_mode_runs_operate_and_the_window_never_arms_by_itself(self):
+        url = "https://pocketoption.com/pt/cabinet/quick-high-low/"
+        analysis = app.command("Análise", "demo", url)
+        simulation = app.command("Simulação", "demo", url)
+        real = app.command("Execução real", "real", url)
+        for args in (analysis, simulation, real):
+            self.assertEqual(args[1:4], ["-m", "pocketautonomo.operate", "--continuo"])
+            self.assertNotIn("--armar", args)
+        self.assertIn("--analise", analysis)
+        self.assertNotIn("--real", simulation)
+        self.assertEqual(real[-3:], ["--real", "--conta", "real"])
+
+    def test_the_panel_lines(self):
+        self.assertIn("Sem dados", app.describe_panel(None)[0])
+        lines = app.describe_panel({
+            "execution": "REAL (conta real)", "state": "PENDÊNCIA", "attempt": 2, "stake_cents": 1000,
+            "decision": {"asset": "EUR/USD OTC", "action": "PUT", "reason": "regra validada", "rule": "tendência"},
+            "quote": {"asset": "EUR/USD OTC", "quote": "1.11451", "captured_at": "2026-11-04T12:00:01.250+00:00"},
+            "last_event": {"event": "ordem real aceita pela conta"}, "session": {"cycles": 1, "net_cents": -500},
+        })
+        text = "\n".join(lines)
+        for part in ("PENDÊNCIA", "EUR/USD OTC", "1.11451", "12:00:01.250", "PUT", "tentativa 2 de 4, stake R$ 10", "-5.00"):
+            self.assertIn(part, text)
+
+
+class FakeRunner:
+    def __init__(self):
+        import queue
+
+        self.lines = queue.Queue()
+        self.started = []
+        self.alive = False
+
+    def start(self, args):
+        self.started.append(args)
+        self.alive = True
+
+    def running(self):
+        return self.alive
+
+    def enter(self):
+        pass
+
+    def stop(self):
+        self.alive = False
+
+
+class WindowTest(unittest.TestCase):
+    def test_the_window_shows_the_panel_and_starts_disarmed(self):
+        try:
+            import tkinter as tk
+
+            root = tk.Tk()
+        except Exception as error:  # noqa: BLE001 - no display (Linux CI)
+            self.skipTest(f"sem tela para o Tk: {error}")
+        self.addCleanup(root.destroy)
+        root.withdraw()
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        runtime = Path(directory.name)
+        arming.arm(runtime, "real", "teste")  # left armed by something else: Iniciar disarms
+        (runtime / "painel.json").write_text(json.dumps({"state": "COLETANDO", "attempt": 1, "stake_cents": 500}))
+        runner = FakeRunner()
+        window = app.App(root, runtime, runner)
+        window.mode.set("Execução real")
+        window.account.set("real")
+        window.start()
+        self.assertEqual(runner.started[0][-3:], ["--real", "--conta", "real"])
+        self.assertIsNone(arming.read_state(runtime / arming.ARM_FILE_NAME))
+        window.refresh()
+        self.assertIn("DESARMADA", window.arm_state.get())
+        self.assertIn("COLETANDO", window.panel.get())
+        window.stop()
+        self.assertFalse(runner.alive)
+
+
+if __name__ == "__main__":
+    unittest.main()
