@@ -843,6 +843,14 @@ class Operator:
         fresh_after = min(expiry, now) if isinstance(expiry, datetime) else None
         self.window = Window(status.cycle_id, status.attempt, now, now + timedelta(seconds=self.gale_window), fresh_after)
         since = f", lida depois do vencimento ({hour(fresh_after)})," if fresh_after is not None else ""
+        # The account's own closing price, sent with the LOSS at the expiry, is a quote of after the lost order:
+        # the gale enters at once, without waiting for the chart, which hides the price right then (2026-11-04
+        # 21:02: no reading in the 5 s of the window, and the cycle was abandoned).
+        close = getattr(order, "close_price", None) if fresh_after is not None else None
+        closing = None
+        if isinstance(close, (int, float)) and close > 0 and (now - fresh_after).total_seconds() <= MAX_QUOTE_AGE_SECONDS:
+            closing = Seen(status.asset, fresh_after, float(close), f"{close:g}", payout_note="fechamento da conta")
+            since = f" já: o fechamento da conta ({close:g}, às {hour(fresh_after)}) é a cotação nova, prazo"
         self._write(
             WINDOW_OPENED,
             self._row(attempt=status.attempt, stake_cents=stake_for_attempt(status.attempt)),
@@ -854,6 +862,9 @@ class Operator:
                 " mesmo ativo e mesma direção, sem exigir payout"
             ),
         )
+        if closing is not None:
+            window, self.window = self.window, None
+            self._enter(window, closing)
 
     def _expire(self, window, now):
         self.window = None

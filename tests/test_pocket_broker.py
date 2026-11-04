@@ -435,12 +435,12 @@ class RealOperationTest(RealTestCase):
         self.read()  # before the expiry: not a quote of after the order
         self.clock.advance(1.0)
         self.platform.close(order_id, LOSS)
-        self.operator.tick()
-        self.assertEqual(self.platform.clicks, [("CALL", 5)])
-        [opened] = [row for row in self.log.rows if row["event"] == operation.WINDOW_OPENED]
-        self.assertIn("lida depois do vencimento", opened["reason"])
-        self.read()  # after the expiry: the gale enters at once
+        self.operator.tick()  # no reading after the expiry: the account's closing price is the fresh quote
         self.assertEqual(self.platform.clicks, [("CALL", 5), ("CALL", 10)])
+        [opened] = [row for row in self.log.rows if row["event"] == operation.WINDOW_OPENED]
+        self.assertIn("fechamento da conta", opened["reason"])
+        self.read()
+        self.assertEqual(self.platform.clicks, [("CALL", 5), ("CALL", 10)])  # never twice
 
     def test_a_quote_read_after_the_expiry_but_too_old_lets_the_gale_window_expire(self):
         self.operator.consider(self.decision())
