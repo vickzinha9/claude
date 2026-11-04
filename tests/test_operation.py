@@ -9,10 +9,11 @@ the scan's CSV files, the only data of the analysis.
 import csv
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from pocketautonomo import analysis, operation
+from pocketautonomo import analysis, chart_analysis, operation
 from pocketautonomo.broker import OrderRequest
 from pocketautonomo.coordinator import Coordinator
 from pocketautonomo.cycle import ABANDONED, CALL, CANCELLED, DRAW, LOSS, PUT, REJECTED, UNKNOWN, WIN
@@ -133,7 +134,7 @@ class OperationTestCase(unittest.TestCase):
         self.coordinator = self.broker = None
         self.addCleanup(self.close)
 
-    def start(self, store=SqliteStore, broker=PaperBroker, gale_window=operation.GALE_WINDOW_SECONDS):
+    def start(self, store=SqliteStore, broker=PaperBroker, gale_window=operation.GALE_WINDOW_SECONDS, trend=False):
         self.store = store(self.directory / "operacao-simulada.db")
         if isinstance(self.store, (SlowReservation, SlowStart)):
             self.store.clock = self.clock
@@ -143,7 +144,7 @@ class OperationTestCase(unittest.TestCase):
         self.logs.append(self.log)
         self.operator = Operator(
             self.coordinator, self.broker, self.log, now=self.clock.now, monotonic=self.clock.monotonic,
-            horizon=HORIZON, gale_window=gale_window,
+            horizon=HORIZON, gale_window=gale_window, trend=trend,
         )
         self.operator.recover()
         return self.operator
@@ -461,6 +462,33 @@ class NextCycleTest(OperationTestCase):
         second = self.rows(operation.CYCLE_STARTED)[-1]["at_utc"]
         self.assertLess((second - ended).total_seconds(), 0.01)  # no waiting time between the cycles
         self.assertEqual(self.orders(), [(500, WIN), (500, "OPEN")])
+
+
+class TrendModeTest(OperationTestCase):
+    """The trend mode: a decision of the chart's reading, not validated, starts the cycle of gales; only in that mode."""
+
+    def trend_decision(self, action=PUT, payout=92.0):
+        decision = self.decision(action, payout=payout, age=0.0)
+        validation = chart_analysis.ChartValidation(False, chart_analysis.TREND_REASON, chart_analysis.CONSENSUS, trend=True)
+        return replace(decision, validation=validation, reason=validation.reason)
+
+    def test_the_reading_of_the_chart_starts_the_gales_only_in_the_trend_mode(self):
+        self.start()
+        refused = self.consider(self.trend_decision())
+        self.assertFalse(refused.started)
+        self.assertIn("não vem de uma regra validada", refused.reason)
+        self.restart(trend=True)
+        self.assertIn("não vem de uma regra validada", self.consider(self.decision(PUT, validated=False, age=0.0)).reason)
+        self.assertIn("payout 85%", self.consider(self.trend_decision(payout=85.0)).reason)
+        started = self.consider(self.trend_decision())
+        self.assertTrue(started.started, started)
+        for stake in (500, 1000, 2000):
+            self.settle(LOSS)
+            self.read()
+            self.assertEqual(self.orders()[-1], (stake * 2, "OPEN"))
+        self.settle(WIN)
+        self.assertEqual([stake for stake, _ in self.orders()], [500, 1000, 2000, 4000])
+        self.assertIn("leitura do gráfico", self.rows(operation.CYCLE_STARTED)[-1]["reason"])
 
 
 class CollectionPauseTest(OperationTestCase):

@@ -637,6 +637,10 @@ class ChartValidation:
     decisions: int = 0  # decision moments with a known result
     break_even: float = 0.0
     bars: int = 0
+    trend: bool = False  # the trend mode's stand-in: the chart's reading, NOT validated on separate data
+
+
+TREND_REASON = "MODO TENDÊNCIA, sem regra validada: a leitura do gráfico decide a primeira entrada"
 
 
 def moments_of(series, horizon):
@@ -796,6 +800,7 @@ class ChartSetup:
     cache: dict = field(default_factory=dict)  # (asset key, period) -> (version, ChartValidation)
     clock: platform_clock.ClockOffset = field(default_factory=platform_clock.ClockOffset)  # the platform's clock
     layout: dict = field(default_factory=dict)  # what one reading measured of the platform's chart, for the next
+    trend: bool = False  # the trend mode: without a validated rule, the chart's reading (CONSENSUS) decides
 
     def validation(self, name):
         series = self.history.get(name, self.model.period)
@@ -1036,7 +1041,9 @@ def assess(setup, observation, payout, now):
         return ChartAssessment(observation, market, analysis.Decision(name, WAIT, reason, validation, sample), validation, setup.model.period)
 
     if not validation.validated:
-        return wait(validation.reason)
+        if not setup.trend:
+            return wait(validation.reason)
+        validation = ChartValidation(False, TREND_REASON, CONSENSUS, trend=True)  # wait() sees this one too
     if not last_closed:
         return wait(f"{validation.reason}; mas {LAST_CLOSED_MISSING}")
     if not 0 <= age <= MAX_READING_AGE:

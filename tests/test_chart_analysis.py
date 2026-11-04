@@ -664,6 +664,32 @@ class AssessTest(unittest.TestCase):
         self.assertEqual(result.decision.action, WAIT)
         self.assertIn("dados insuficientes: 29 velas de 60 s gravadas", result.decision.reason)
 
+    def test_the_trend_mode_lets_the_reading_of_the_chart_decide_without_a_validated_rule(self):
+        setup = replace(setup_of(), trend=True)
+        observation = ca.absorb(setup, observation_of(trend(30), self.MOMENT))
+        result = ca.assess(setup, observation, 92.0, self.MOMENT + timedelta(seconds=1))
+        decision = result.decision
+        self.assertEqual((result.market.direction, decision.action), (ca.ALTA, CALL))
+        self.assertEqual(decision.valid_until, self.MOMENT + timedelta(seconds=5))
+        self.assertFalse(decision.validation.validated)
+        self.assertTrue(decision.validation.trend)
+        self.assertIs(decision.validation.rule, ca.CONSENSUS)
+        self.assertIn("MODO TENDÊNCIA, sem regra validada", decision.reason)
+        falling = ca.assess(setup, observation_of(trend(30, step=-0.0001), self.MOMENT), 92.0, self.MOMENT)
+        self.assertEqual(falling.decision.action, PUT)
+        cases = (  # the other guards still hold
+            (observation_of(trend(30), self.MOMENT), 85.0, self.MOMENT, "o payout 85,0% não permite a primeira entrada"),
+            (observation_of(trend(30), self.MOMENT), 92.0, self.MOMENT + timedelta(seconds=6), "a leitura é de há 6,0 s"),
+            (observation_of(flat(30), self.MOMENT), 92.0, self.MOMENT, "a regra não dá direção agora"),
+            (observation_of(trend(30), self.MOMENT, stamp_problem="a captura foi a 1,0 s da troca de vela"), 92.0,
+             self.MOMENT, "a captura foi a 1,0 s da troca de vela"),
+        )
+        for observation, payout, now, message in cases:
+            with self.subTest(message=message):
+                waited = ca.assess(setup, observation, payout, now).decision
+                self.assertEqual(waited.action, WAIT)
+                self.assertIn(message, waited.reason)
+
     def test_a_validated_rule_on_a_current_reading_gives_a_decision_valid_for_moments(self):
         setup = self.validated_setup()
         observation = observation_of(trend(30), self.MOMENT)

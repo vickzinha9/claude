@@ -400,6 +400,7 @@ class Operator:
         gale_window=GALE_WINDOW_SECONDS,
         gate=None,
         limits=None,
+        trend=False,
     ):
         self.coordinator = coordinator
         self.broker = broker
@@ -413,6 +414,7 @@ class Operator:
         # gate() is None, or why no cycle may start now (execution disarmed, pause asked in the launcher).
         self.gate = gate
         self.limits = limits  # SessionLimits of the run, or None
+        self.trend = trend  # the trend mode: a decision of the chart's reading may start a cycle without validation
         self.real = getattr(log, "execution", None) in REAL_EXECUTIONS
         self._id_key = "real_order_id" if self.real else "simulated_order_id"
         self.session = {"full_losses": 0, "net_cents": 0, "cycles": 0}
@@ -495,7 +497,8 @@ class Operator:
         blocked = self.gate() if self.gate is not None else None
         if blocked:
             return self._refuse(row, blocked)
-        if not (validation is not None and validation.validated and validation.rule is not None):
+        trend = self.trend and getattr(validation, "trend", False)
+        if not (validation is not None and (validation.validated or trend) and validation.rule is not None):
             return self._refuse(row, "a decisão não vem de uma regra validada em dados separados")
         if sample is None or decision.valid_until is None:
             return self._refuse(row, "a decisão não tem a cotação e o prazo de entrada")

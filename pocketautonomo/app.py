@@ -28,7 +28,10 @@ from pathlib import Path
 
 from pocketautonomo import arming
 
-MODES = ("Análise", "Simulação", "Execução real")
+MODES = ("Análise", "Simulação", "Execução real", "Tendência real")
+REAL_MODES = ("Execução real", "Tendência real")
+# The trend mode: the chart's reading opens the cycles, without a validated rule; R$ 150 or two cycles of four LOSS stop it.
+TREND_ARGS = ["--tendencia", "--limite-perda", "150", "--limite-ciclos-perdidos", "2"]
 DEFAULT_URL = "https://pocketoption.com/pt/cabinet/quick-high-low/"
 SETTINGS_FILE_NAME = "launcher.json"
 POLL_MS = 500
@@ -47,6 +50,8 @@ def command(mode, account, url):
     base = [sys.executable, "-m", "pocketautonomo.operate", "--continuo", "--painel", "--url", url]
     if mode == "Análise":
         return base + ["--analise"]
+    if mode == "Tendência real":
+        return base + TREND_ARGS + ["--real", "--conta", account]
     if mode == "Execução real":
         return base + ["--real", "--conta", account]
     return base
@@ -130,7 +135,7 @@ class App:
         top.pack(fill="x")
         ttk.Label(top, text="Modo:").pack(side="left")
         self.mode = tk.StringVar(value=settings.get("mode", MODES[1]))
-        ttk.Combobox(top, textvariable=self.mode, values=MODES, state="readonly", width=14).pack(side="left", padx=4)
+        ttk.Combobox(top, textvariable=self.mode, values=MODES, state="readonly", width=16).pack(side="left", padx=4)
         ttk.Label(top, text="Conta:").pack(side="left")
         self.account = tk.StringVar(value=settings.get("account", "demo"))
         ttk.Combobox(top, textvariable=self.account, values=arming.ACCOUNTS, state="readonly", width=6).pack(side="left", padx=4)
@@ -179,10 +184,10 @@ class App:
         from tkinter import messagebox
 
         mode, account = getattr(self, "started", (None, None))
-        if mode != "Execução real" or not self.runner.running():
+        if mode not in REAL_MODES or not self.runner.running():
             messagebox.showinfo(
                 "PocketAutonomo",
-                "Só a execução que está rodando no modo 'Execução real' pode ser armada. Pare a atual e inicie esse modo.",
+                "Só a execução que está rodando no modo 'Execução real' ou 'Tendência real' pode ser armada. Pare a atual e inicie um desses modos.",
             )
             return
         if not messagebox.askyesno(

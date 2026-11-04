@@ -57,6 +57,7 @@ import csv
 import math
 import sys
 import uuid
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -275,7 +276,7 @@ class Execution:
         self.quotes = CycleQuotes(ctx.runtime_dir, warn)
         self.operator = operation.Operator(
             self.coordinator, self.broker, self.log, now=ctx.now, monotonic=ctx.monotonic, horizon=args.horizon,
-            gale_window=args.gale_window, gate=gate, limits=limits,
+            gale_window=args.gale_window, gate=gate, limits=limits, trend=getattr(args, "tendencia", False),
         )
         if rules:
             print_rules(args, self.database, self.orders)
@@ -300,6 +301,8 @@ class Execution:
         """
         state = self.state = scan.Scan(selectors, favorites_selector, self.args.load_timeout, self.progress)
         state.chart = scan.chart_setup(selectors, self.ctx.runtime_dir, self.args.horizon)
+        if state.chart is not None and getattr(self.args, "tendencia", False):
+            state.chart = replace(state.chart, trend=True)
         if state.chart is not None:
             self.progress.candle_log = state.chart.log
         state.hooks = OperationHooks(self.operator, state, self.ctx, self.quotes, self.panel_path(), self.switch)
@@ -435,6 +438,14 @@ def build_parser():
         help="com --real: ciclos iniciados que encerram o envio (padrão: sem limite)",
     )
     parser.add_argument(
+        "--tendencia",
+        action="store_true",
+        help=(
+            "MODO TENDÊNCIA: sem regra validada, a leitura do gráfico (favorece ALTA ou BAIXA) abre o ciclo de"
+            " gales; não há prova de vantagem, e o payout de 90%% ou mais e os limites de perda continuam valendo"
+        ),
+    )
+    parser.add_argument(
         "--analise",
         action="store_true",
         help="modo análise: a varredura e a decisão CALL/PUT/AGUARDAR, sem ciclo nem entrada, nem simulada",
@@ -475,6 +486,8 @@ def parse_arguments(argv):
         parser.error("--armar só vale com --real")
     if args.analise and args.real:
         parser.error("--analise não envia nada: não use com --real")
+    if args.tendencia and (args.analise or args.demonstracao):
+        parser.error("--tendencia abre ciclos: não use com --analise nem com --demonstracao")
     if args.real and args.horizon != 300:
         parser.error("a execução real envia ordens de 300 s: --horizon 300")
     return args
@@ -505,6 +518,12 @@ def print_rules(args, database, orders):
             f"EXECUÇÃO REAL na conta {args.conta}: ordens só enquanto armada; limite da execução: perda líquida de"
             f" R$ {args.limite_perda:g}, {args.limite_ciclos_perdidos} ciclo(s) com quatro LOSS, ciclos: {cycles}."
             " Ctrl+C encerra (e desarma)."
+        )
+    if getattr(args, "tendencia", False):
+        say(
+            "MODO TENDÊNCIA: sem regra validada, a leitura das velas do gráfico (favorece ALTA ou BAIXA, logo depois"
+            " do fechamento de uma vela, com payout de 90% ou mais) abre o ciclo de gales. Essa leitura NÃO foi"
+            " validada: nos dados gravados ela acerta perto de 50%, e com gales o resultado médio é de perda."
         )
     else:
         say(f"Os tempos de envio são do simulador: {operation.SIMULATOR_TIME_NOTE}. Ctrl+C encerra.")
