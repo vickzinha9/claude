@@ -361,20 +361,11 @@ class PlatformClockTest(unittest.TestCase):
     def local(self, platform_moment):
         return platform_moment + timedelta(seconds=self.AHEAD)
 
-    def clock_text(self, platform_moment):
-        shown = platform_moment - timedelta(hours=3)  # the page shows UTC-3
-        return f"{shown:%H:%M:%S} UTC-3"
+    def countdown(self, platform_moment):
+        """The seconds that the chart writes beside the forming candle: what is left of its minute."""
+        return PERIOD - int(platform_moment.timestamp()) % PERIOD
 
-    def test_the_text_of_the_clock_and_its_zone(self):
-        from pocketautonomo import platform_clock
-
-        self.assertEqual(platform_clock.parse("17:44:51 UTC-3"), (20 * 3600 + 44 * 60 + 51))
-        self.assertEqual(platform_clock.parse("01:00:00 UTC+5:30"), (24 * 3600 + 3600 - 5 * 3600 - 30 * 60) % 86400)
-        self.assertEqual(platform_clock.parse(" 23:59:59 UTC "), 86399)
-        for text in ("Expiration time 15:49:37", "15:49:37", "25:00:00 UTC", "", None):
-            self.assertIsNone(platform_clock.parse(text))
-
-    def test_readings_of_the_clock_converge_on_the_offset_and_a_changed_clock_starts_again(self):
+    def test_countdowns_of_the_chart_converge_on_the_offset_and_a_changed_clock_starts_again(self):
         from pocketautonomo import platform_clock
 
         clock = platform_clock.ClockOffset()
@@ -382,19 +373,19 @@ class PlatformClockTest(unittest.TestCase):
         for step in range(40):  # one reading every 3.37 s: every phase of the second
             moment += timedelta(seconds=3.37)
             before = self.local(moment)
-            self.assertTrue(clock.update(before, before + timedelta(milliseconds=8), self.clock_text(moment)))
+            estimate = clock.estimate()[0] or 0.0
+            clock.update(*platform_clock.from_countdown(before, before + timedelta(milliseconds=600), PERIOD, self.countdown(moment), estimate))
         offset, uncertainty = clock.estimate()
         self.assertLessEqual(clock.low, -self.AHEAD)
         self.assertGreaterEqual(clock.high, -self.AHEAD)
-        self.assertLess(uncertainty, 0.6)
-        self.assertAlmostEqual(offset, -self.AHEAD, delta=0.6)
-        # Windows synchronized its clock: the next reading does not fit, and the interval starts again from it.
+        self.assertLess(uncertainty, 1.1)
+        self.assertAlmostEqual(offset, -self.AHEAD, delta=1.1)
+        self.assertEqual(clock.restarts, 0)
+        # Windows synchronized its clock: the next interval does not fit, and the offset starts again from it.
         moment += timedelta(seconds=3)
-        self.assertTrue(clock.update(moment, moment + timedelta(milliseconds=8), self.clock_text(moment)))
+        clock.update(*platform_clock.from_countdown(moment, moment + timedelta(milliseconds=600), PERIOD, self.countdown(moment), offset))
         self.assertEqual(clock.restarts, 1)
-        self.assertAlmostEqual(clock.estimate()[0], 0.0, delta=1.1)
-        self.assertFalse(clock.update(moment, moment, "Expiration time 15:49:37"))
-        self.assertEqual(clock.unread, 1)
+        self.assertAlmostEqual(clock.estimate()[0], 0.0, delta=1.6)
 
     def test_the_capture_of_the_log_is_numbered_by_the_platform_and_not_one_minute_late(self):
         # The capture of USD/JPY OTC at 14:21:03.05 by this computer, 14:20:55.05 by the platform: by this
@@ -412,18 +403,14 @@ class PlatformClockTest(unittest.TestCase):
         _, problem = candles.stamp(reading, self.local(self.TRUE + timedelta(seconds=1.5)), PERIOD, -self.AHEAD, 0.5)
         self.assertIn("a 3.5 s da troca de vela, e o relógio da plataforma não diz com segurança", problem)
 
-    def test_the_reading_reads_the_clock_of_the_page_and_uses_it(self):
+    def test_the_countdown_of_the_chart_dates_the_candles_and_the_offset_is_kept(self):
         from pocketautonomo import observe, quote_reader
 
-        test = self
         state = {"now": self.local(self.TRUE)}
 
         class Session:
             def capture(self, selector, timeout_ms, strip=None):
                 return observe.Capture(1, True, quote_reader.RgbImage(4, 4, bytes(48)), 4.0)
-
-            def platform_clock(self):
-                return test.clock_text(state["now"] - timedelta(seconds=test.AHEAD))
 
         class Context:
             engine = mock.Mock()
@@ -440,20 +427,69 @@ class PlatformClockTest(unittest.TestCase):
 
         setup = replace(setup_of(), source=mock.Mock(chart="#grafico", marker=None))
         reading = observation_of(trend(30), self.TRUE).reading
+        timed = replace(reading, countdown=self.countdown(self.TRUE), countdown_text="00:05")  # 14:20:55 by the platform
         shown = observe.FieldReading("EUR/USD OTC", "ok")
-        with mock.patch.object(observe, "read_field", return_value=shown), mock.patch.object(candles, "read_candles", return_value=reading):
+        with mock.patch.object(observe, "read_field", return_value=shown), mock.patch.object(candles, "read_candles", return_value=timed):
             observation = ca.observe_chart(Session(), setup, "EUR/USD OTC", Context())
         self.assertIsNone(observation.problem)
-        self.assertAlmostEqual(observation.clock_offset, -self.AHEAD, delta=1.1)
-        self.assertEqual(observation.stamps[0], datetime(2026, 11, 4, 14, 20, tzinfo=timezone.utc))
-        self.assertIn("horários pelo relógio da plataforma (este computador está", observation.status(PERIOD))
+        self.assertAlmostEqual(observation.clock_offset, -self.AHEAD, delta=1.5)
+        self.assertEqual(observation.stamps[0], datetime(2026, 11, 4, 14, 20, tzinfo=timezone.utc))  # not 14:21
+        self.assertIn("horários pela contagem da vela no gráfico (este computador está", observation.status(PERIOD))
         self.assertIn("adiantado", observation.status(PERIOD))
-        # A page without that clock: the reading says so, and keeps this computer's clock.
-        Session.platform_clock = lambda self: None
+        # The next reading has no countdown read: the offset kept still dates it.
+        state["now"] = self.local(self.TRUE + timedelta(seconds=20))
+        with mock.patch.object(observe, "read_field", return_value=shown), mock.patch.object(candles, "read_candles", return_value=reading):
+            observation = ca.observe_chart(Session(), setup, "EUR/USD OTC", Context())
+        self.assertAlmostEqual(observation.clock_offset, -self.AHEAD, delta=1.5)
+        self.assertEqual(observation.stamps[0], datetime(2026, 11, 4, 14, 21, tzinfo=timezone.utc))
+        # A run that never read the countdown says so, and keeps this computer's clock.
         with mock.patch.object(observe, "read_field", return_value=shown), mock.patch.object(candles, "read_candles", return_value=reading):
             observation = ca.observe_chart(Session(), replace(setup_of(), source=setup.source), "EUR/USD OTC", Context())
         self.assertIsNone(observation.clock_offset)
-        self.assertIn("relógio da plataforma não lido", observation.status(PERIOD))
+        self.assertIn("contagem da vela no gráfico ainda não lida", observation.status(PERIOD))
+
+    def test_the_reading_gets_the_asset_button_and_keeps_the_grid_distance_for_the_next_chart(self):
+        from pocketautonomo import observe, quote_reader
+
+        class Session:
+            boxes = []
+
+            def capture(self, selector, timeout_ms, strip=None):
+                # 1160 CSS pixels at a scale of 1.25, the chart 10 pixels from the left of the page
+                return observe.Capture(1, True, quote_reader.RgbImage(1450, 4, bytes(1450 * 12)), 1160.0, origin=(10.0, 20.0))
+
+            def element_box(self, selector):
+                Session.boxes.append(selector)
+                return (84.0, 51.0, 92.0, 15.0)  # the asset's name, as on 2026-11-04 (74, 31 in the chart)
+
+        class Context:
+            engine = mock.Mock()
+
+            def now(self):
+                return PlatformClockTest.TRUE
+
+            def monotonic(self):
+                return 0.0
+
+            def elapsed_ms(self, start):
+                return 1.0
+
+        setup = replace(setup_of(), source=mock.Mock(chart="#grafico", marker=None), asset_source="span.current-symbol")
+        found = replace(
+            observation_of(trend(30), PlatformClockTest.TRUE).reading,
+            geometry=candles.Geometry(scale=1.25, grid_offset=14.375),  # 11.5 CSS pixels
+        )
+        shown = observe.FieldReading("EUR/USD OTC", "ok")
+        with mock.patch.object(observe, "read_field", return_value=shown), mock.patch.object(candles, "read_candles", return_value=found) as read:
+            ca.observe_chart(Session(), setup, "EUR/USD OTC", Context())
+            ca.observe_chart(Session(), setup, "EUR/USD OTC", Context())
+        first, second = read.call_args_list
+        self.assertEqual(Session.boxes, ["span.current-symbol"] * 2)
+        (covered,) = first.args[6]
+        self.assertEqual(covered, (0.0, (31 - 16) * 1.25, (74 + 92 + 16) * 1.25, (31 + 15 + 16) * 1.25))
+        self.assertIsNone(first.args[5])  # nothing learned yet
+        self.assertEqual(second.args[5], 11.5)  # the grid of the first chart, in CSS pixels
+        self.assertEqual(setup.layout[ca.GRID_OFFSET], 11.5)
 
     def test_a_refused_reading_keeps_its_capture_once_per_asset_and_reason(self):
         from pocketautonomo import observe, quote_reader

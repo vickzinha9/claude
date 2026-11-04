@@ -138,8 +138,34 @@ class ReadCandlesTest(unittest.TestCase):
             "mais larga(s) que as velas" in reading.reason or "se sobrepõem" in reading.reason, reading.reason
         )
 
+    def test_a_flag_of_the_asset_over_the_chart_is_never_a_candle(self):
+        # The red flag in the button of the asset (USD/CHF OTC on 2026-11-04), here where a candle four places
+        # before the first would be: without the area of the button it passes for one.
+        bars = ci.artificial_bars(40)
+        flag = (26, 4, 34, 16, ci.CANDLE_RED)  # 8 pixels wide, centered 48 pixels (4 spacings) left of the first
+        chart = chart_of(bars, blobs=[flag])
+        taken = read(chart)
+        self.assertTrue(any(candle.x0 == 26 for candle in taken.candles), "a flag aligned with the candles is read as one")
+        reading = candles.read_candles(chart.image, chart.scale, MODEL, chart.marker, chart.engine(), covered=((0, 0, 60, 22),))
+        self.assert_candles(reading, chart)
+        self.assertEqual(reading.geometry.covered, 1)
+
+    def test_a_grid_hidden_by_the_background_is_replaced_by_the_distance_learned_from_another_chart(self):
+        # 2026-11-04: the labels' digits sit 11.5 pixels over their grid lines, and behind the picture of the
+        # background the lines were not found: the digits put the marker's quote 10 to 12 pixels off.
+        chart = chart_of(ci.artificial_bars(40), label_shift=-11)
+        refused = read(chart)
+        self.assertFalse(refused.available)
+        self.assertIn("não confere com a escala lida no eixo", refused.reason)
+        reading = candles.read_candles(chart.image, chart.scale, MODEL, chart.marker, chart.engine(), grid_offset=11.0)
+        self.assert_candles(reading, chart)
+        self.assertTrue(reading.geometry.grid_learned)
+        # A wrong distance is still caught by the marker: the scale must put its quote where the chart draws it.
+        wrong = candles.read_candles(chart.image, chart.scale, MODEL, chart.marker, chart.engine(), grid_offset=4.0)
+        self.assertIn("não confere com a escala lida no eixo", wrong.reason)
+
     def test_candles_of_two_pixels_are_a_zoom_too_far_out_and_said_so(self):
-        # The log of 2026-11-04: "espaçamento irregular" and "19 pixels, contra 2" were charts of 2-pixel candles.
+        # Narrow candles merge and leave irregular gaps: the reason names the zoom, not "something else" on the chart.
         for spacing in (3, 2.6):
             with self.subTest(spacing=spacing):
                 reading = read(chart_of(ci.artificial_bars(40), spacing=spacing, body=2))

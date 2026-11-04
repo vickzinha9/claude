@@ -72,7 +72,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from pocketautonomo import platform_clock, quote_reader, quote_timings
+from pocketautonomo import quote_reader, quote_timings
 from pocketautonomo.quote_ocr import WARM_UP_SAMPLE, OcrUnavailable, RapidOcrEngine, decode_png
 
 ALLOWED_DOMAIN = "pocketoption.com"
@@ -275,6 +275,7 @@ class Capture:
     box_ms: object = None
     png_bytes: object = None  # the size of the PNG that the screenshot returned
     strip_css: object = None  # the width of the right strip captured; None for the whole element
+    origin: object = None  # (x, y) of the captured area in the page, in CSS pixels, when the session gives it
 
     @property
     def scale(self):
@@ -1883,22 +1884,6 @@ class PlaywrightSession:
         except (self._error_type, ReadError, KeyError, TypeError):
             return None
 
-    def platform_clock(self):
-        """The text of the platform's clock beside the chart ("17:44:51 UTC-3"), or None.
-
-        Found by its text (platform_clock.CLOCK_PATTERN), not by a selector: only when exactly one
-        visible element shows it. It only reads, like read.
-        """
-        try:
-            locator = self._page.get_by_text(platform_clock.CLOCK_PATTERN)
-            matches = locator.count()
-            visible = [index for index in range(min(matches, 4)) if locator.nth(index).is_visible()]
-            if matches > 4 or len(visible) != 1:
-                return None
-            return locator.nth(visible[0]).inner_text(timeout=READ_TIMEOUT_MS)
-        except self._error_type:
-            return None
-
     def read(self, selector, timeout_ms):
         """ElementText for selector: the text only when exactly one visible element matches."""
         try:
@@ -1964,7 +1949,18 @@ class PlaywrightSession:
         across, down = image.width / clip["width"], image.height / clip["height"]
         if abs(across - down) > 0.02 * max(across, down):
             return Capture(1, True, None, clip["width"], clipped=True, **steps)
-        return Capture(1, True, image, clip["width"], **steps)
+        return Capture(1, True, image, clip["width"], origin=(clip["x"], clip["y"]), **steps)
+
+    def element_box(self, selector):
+        """(x, y, width, height) in CSS pixels of the page of the only visible element of selector, or None."""
+        try:
+            locator = self._page.locator(selector)
+            if locator.count() != 1 or not locator.is_visible():
+                return None
+            box = locator.bounding_box(timeout=READ_TIMEOUT_MS)
+        except self._error_type:
+            return None
+        return None if box is None else (box["x"], box["y"], box["width"], box["height"])
 
     def find_quote_texts(self, limit):
         """TextMatch of up to limit visible elements whose whole text looks like a quote."""

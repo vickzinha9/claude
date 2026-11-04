@@ -68,6 +68,7 @@ asset's chart (chart_analysis.CandleHistory).
 """
 
 import math
+import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from itertools import groupby
@@ -216,9 +217,9 @@ class CandleReading:
     decimals: int = 0  # of the marker's quote: how the prices are shown
     unread_labels: int = 0  # lines of the axis that the OCR could not read as a price
     geometry: object = None  # Geometry: where each part was found, for the diagnosis
-    # The countdown of the marker, a line such as 00:42 under the quote: its seconds and its text, when both
-    # readings of the OCR gave the same text with MIN_SCORE or more. Only shown and compared with this
-    # computer's clock (countdown_check): nothing is decided by it.
+    # The time left in the forming candle, as the chart writes it beside the candle ("00:26" under "M1") or,
+    # without it, a line such as 00:42 under the marker's quote: its seconds and its text, when both readings
+    # of the OCR gave the same text with MIN_SCORE or more. The chart's dates the candles (platform_clock).
     countdown: object = None
     countdown_text: object = None
     marker_others: tuple = ()  # (text, text): the two readings of each line of the marker that is not the quote
@@ -281,8 +282,10 @@ class Geometry:
     label_x0: object = None  # the first column where the labels are looked for
     axis_lines: tuple = ()  # AxisLine, top down
     grid_offset: object = None  # rows from the middle of the labels' digits to their grid lines, when used
+    grid_learned: bool = False  # that distance came from an earlier reading, not from lines found in this one
     label_line: object = None  # ScaleLine through the labels alone, before the check
     shapes: int = 0  # shapes of the candle colors taken for candles
+    covered: int = 0  # shapes of those colors left out because the page draws over them there (read_candles' covered)
     forming: object = None  # the Shape of the forming candle
     close_row: object = None  # the row of its close
     marker_lines: object = None  # ThinLine of each thin line across the chart at the marker's height, once looked for
@@ -1064,13 +1067,27 @@ def shapes_of(image, scale, x_end, classify):
     return sorted(shapes, key=lambda shape: shape.center)
 
 
+def _touches(shape, zone):
+    x0, y0, x1, y1 = zone
+    return shape.x0 < x1 and shape.x1 > x0 and shape.top < y1 and shape.bottom + 1 > y0
+
+
 def _px(value):
     """A row or a column for the messages: whole, or with one decimal."""
     return f"{value:.0f}" if float(value).is_integer() else f"{value:.1f}"
 
 
-def read_candles(image, scale, model, marker_model, engine):
-    """CandleReading of a capture of the whole chart element, in device pixels, scale per CSS pixel."""
+def read_candles(image, scale, model, marker_model, engine, grid_offset=None, covered=()):
+    """CandleReading of a capture of the whole chart element, in device pixels, scale per CSS pixel.
+
+    covered are (x0, y0, x1, y1), in the device pixels of the capture, where the page draws over the chart
+    (chart_analysis.covered_areas): a shape of a candle color that touches one is not read.
+
+    grid_offset, in CSS pixels, is the distance from the middle of the labels' digits to their grid lines
+    found in an earlier reading (Geometry.grid_offset / scale): the same in every chart of the platform's
+    layout (11.5 on 2026-11-04). It stands for the grid when the lines are not found, as behind a picture
+    of the chart's background; the marker still checks the scale that comes out of it.
+    """
     seen = {"scale": scale, "width": image.width, "height": image.height}
 
     def refuse(reason, **values):
@@ -1104,6 +1121,10 @@ def read_candles(image, scale, model, marker_model, engine):
     lines = read_axis(image, scale, label_x0, skip, engine, (model.up, model.down), decimals)
     labels = [line for line in lines if line.price is not None]
     ticks, offset = grid_ticks(image, scale, axis_x0, labels, skip, background)
+    if ticks is None and grid_offset is not None and labels:
+        offset = grid_offset * scale
+        ticks = [label.center + offset for label in labels]
+        seen["grid_learned"] = True
     if ticks is not None:
         tick_of = dict(zip(labels, ticks))
         lines = [replace(line, tick=tick_of[line]) if line in tick_of else line for line in lines]
@@ -1123,6 +1144,13 @@ def read_candles(image, scale, model, marker_model, engine):
         for shape in shapes_of(image, scale, axis_x0, candle_kind)
         if shape.width >= MIN_CANDLE_WIDTH * scale and shape.pixels >= 4
     ]
+    hidden_by = [shape for shape in shapes if any(_touches(shape, zone) for zone in covered)]
+    if hidden_by:
+        # The button of the asset is drawn over the chart, and its flags have the candles' colors: the flag of
+        # Switzerland was a "candle" that broke the spacing of USD/CHF OTC on 2026-11-04. A candle under the
+        # button is not whole on the screen either: neither is read, and a candle there counts as not read.
+        shapes = [shape for shape in shapes if shape not in hidden_by]
+        seen["covered"] = len(hidden_by)
     if shapes and shapes[0].x0 == 0:
         shapes = shapes[1:]  # cut by the left edge of the capture
     seen["shapes"] = len(shapes)
@@ -1141,8 +1169,8 @@ def read_candles(image, scale, model, marker_model, engine):
     widths = sorted(shape.width for shape in shapes)
     median_width = widths[len(widths) // 2]
     if median_width < MIN_READABLE_WIDTH * scale:
-        # On 2026-11-04, charts of 2-pixel candles: neighbors of one color merged into wider shapes, and the gaps,
-        # a pixel or two, came out irregular. Neither is something else on the chart: the zoom is too far out.
+        # Candles of 2 pixels: neighbors of one color merge into wider shapes, and the gaps, a pixel or two, come
+        # out irregular. Neither is something else on the chart: the zoom is too far out to read.
         return refuse(
             f"as velas do gráfico têm {median_width} pixel(s) de largura, menos que {_px(MIN_READABLE_WIDTH * scale)}: o"
             " zoom do gráfico deste ativo está afastado demais, e velas vizinhas se encostam; no navegador, aproxime o zoom"
@@ -1254,6 +1282,21 @@ def read_candles(image, scale, model, marker_model, engine):
             f" gráfico ({_px(price_row)}, {source}), e o limite é {tolerance:.1f}",
             **found,
         )
+    # Beside the forming candle the chart writes its period and the time left in it, "M1" over "00:26": the
+    # platform's own clock, which starts and ends the candles.
+    countdown, countdown_text = found["countdown"], found["countdown_text"]
+    if forming.x1 < axis_x0:
+        (left_s, left_text), (period, period_text) = chart_countdown(
+            image, scale, forming.x1 + 1, min(axis_x0, forming.x1 + round(COUNTDOWN_REACH * scale)), price_row, engine,
+        )
+        if period is not None and period != model.period:
+            return refuse(
+                f"o gráfico mostra velas de {period_text} ({period} s) e a calibração é de velas de {model.period} s: volte"
+                " o gráfico ao tempo calibrado ou calibre de novo",
+                **found,
+            )
+        if left_s is not None:  # the chart's, checked against the platform's clock on 2026-11-04, before the marker's
+            countdown, countdown_text = left_s, left_text
     # The slope comes from the labels, and the line goes through the quote's row in the chart: the
     # labels' digits may sit a pixel or so off their ticks.
     line = ScaleLine(
@@ -1307,6 +1350,46 @@ def countdown_of(others):
             continue
         found.append((hours * 3600 + minutes * 60 + seconds, text_a))
     return found[0] if len(found) == 1 else (None, None)
+
+
+COUNTDOWN_REACH = 100.0  # CSS pixels right of the forming candle where the chart writes "M1" and "00:26"
+COUNTDOWN_ROWS = 24.0  # CSS pixels above and below the quote's row where those two lines are
+TIMEFRAME_PATTERN = re.compile(r"([SMHD])([0-9]{1,2})")
+TIMEFRAME_SECONDS = {"S": 1, "M": 60, "H": 3600, "D": 86400}
+
+
+def chart_countdown(image, scale, x0, x1, row, engine):
+    """((seconds, text), (period, text)) that the chart writes right of the forming candle, each (None, None) when unread.
+
+    The two lines are gray text on the chart's background, "M1" over the price line and "00:26" under it,
+    and each is taken only when both readings of the OCR give the same text with MIN_SCORE or more, and
+    only one line has that shape. The rows above the price line and those below it are read apart, without
+    the line: its color, brighter than the text's, would pass for the text's.
+    """
+    if x1 - x0 < 10 * scale:
+        return (None, None), (None, None)
+    gap = round(LINE_WIDTH * scale) + 1
+    bands = (
+        (max(0, math.floor(row - COUNTDOWN_ROWS * scale)), max(0, math.floor(row) - gap)),
+        (min(image.height, math.floor(row) + gap + 1), min(image.height, math.ceil(row + COUNTDOWN_ROWS * scale))),
+    )
+    lines = []
+    for y0, y1 in bands:
+        if y1 - y0 < 6 * scale:
+            continue
+        colors = sorted((color for y in range(y0, y1) for color in image.row(y, x0, x1)), key=sum)
+        gray = quote_reader._luminance_free_crop(image, Box(x0, y0, x1, y1, colors[len(colors) // 2]))
+        if gray is not None:
+            lines += quote_reader._text_lines(gray)
+    readings, periods = [], []
+    for line in lines:
+        (text_a, score_a), (text_b, score_b) = engine.recognize(line), engine.recognize(black_and_white(line))
+        text_a, text_b = "".join(text_a.split()), "".join(text_b.split())
+        readings.append((text_a, text_b, min(score_a, score_b), None))
+        match = TIMEFRAME_PATTERN.fullmatch(text_a.upper())
+        if match is not None and text_a == text_b and min(score_a, score_b) >= MIN_SCORE and int(match.group(2)) > 0:
+            periods.append((TIMEFRAME_SECONDS[match.group(1)] * int(match.group(2)), text_a.upper()))
+    return countdown_of(readings), (periods[0] if len(periods) == 1 else (None, None))
 
 
 def countdown_check(reading, captured_at, period):

@@ -795,6 +795,7 @@ class ChartSetup:
     log: object = None  # CandleLog
     cache: dict = field(default_factory=dict)  # (asset key, period) -> (version, ChartValidation)
     clock: platform_clock.ClockOffset = field(default_factory=platform_clock.ClockOffset)  # the platform's clock
+    layout: dict = field(default_factory=dict)  # what one reading measured of the platform's chart, for the next
 
     def validation(self, name):
         series = self.history.get(name, self.model.period)
@@ -861,10 +862,35 @@ class ChartObservation:
         if self.stamp_problem:
             text += f"; velas não gravadas: {self.stamp_problem}"
         if self.clock_offset is None:
-            text += "; relógio da plataforma não lido: horários pelo relógio deste computador"
+            text += "; contagem da vela no gráfico ainda não lida: horários pelo relógio deste computador"
         elif abs(self.clock_offset) >= platform_clock.NOTICE_SECONDS:
-            text += f"; horários pelo relógio da plataforma ({platform_clock.describe(self.clock_offset)})"
+            text += f"; horários pela contagem da vela no gráfico ({platform_clock.describe(self.clock_offset)})"
         return text
+
+
+ASSET_MARGIN = 16.0  # CSS pixels around the asset's name: the button that holds it and the flags left of it
+
+
+def covered_areas(session, asset_selector, capture):
+    """Where the page draws the button of the asset over the chart, in the capture's device pixels; () when unknown.
+
+    The flags left of the asset's name, in that button, have the candles' colors (USD/CHF, AUD/CAD and
+    AED/CNY OTC on 2026-11-04). The area is the row of the name, from the chart's left edge to just past
+    the name. It only reads the position of the asset's element.
+    """
+    element_box = getattr(session, "element_box", None)  # the sessions of the tests may not have it
+    if element_box is None or capture.origin is None or capture.image is None:
+        return ()
+    box = element_box(asset_selector)
+    if box is None:
+        return ()
+    x, y, width, height = box
+    left, top = capture.origin
+    scale = capture.scale
+    return ((
+        0.0, (y - top - ASSET_MARGIN) * scale, (x - left + width + ASSET_MARGIN) * scale,
+        (y - top + height + ASSET_MARGIN) * scale,
+    ),)
 
 
 def observe_chart(session, setup, expected, ctx):
@@ -877,14 +903,9 @@ def observe_chart(session, setup, expected, ctx):
     if not (before.available and analysis.asset_key(before.value) == analysis.asset_key(expected)):
         shown = before.value if before.available else f"INDISPONÍVEL ({before.reason})"
         return ChartObservation(expected, None, problem=f"a tela mostrava {shown}, e não {expected}, antes da captura do gráfico")
-    read_clock = getattr(session, "platform_clock", None)  # the sessions of the tests may not have it
-    if read_clock is not None:
-        before_clock = ctx.now()
-        text = read_clock()
-        setup.clock.update(before_clock, ctx.now(), text)
-    offset, uncertainty = setup.clock.estimate()
     captured_at = ctx.now()
     capture, problem = observe.capture_chart(session, setup.source.chart)
+    captured_by = ctx.now()  # the screen was taken between captured_at and captured_by
     after = observe.read_field(session, "asset", setup.asset_source, ctx)
     if capture is None:
         return ChartObservation(expected, None, captured_at, problem=problem, ms=ctx.elapsed_ms(start))
@@ -894,10 +915,23 @@ def observe_chart(session, setup, expected, ctx):
             expected, None, captured_at, problem=f"a tela mostrava {shown}, e não {expected}, depois da captura do gráfico",
             ms=ctx.elapsed_ms(start),
         )
-    reading = candles.read_candles(capture.image, capture.scale, setup.model, setup.source.marker, ctx.engine.get())
+    period = setup.model.period
+    reading = candles.read_candles(
+        capture.image, capture.scale, setup.model, setup.source.marker, ctx.engine.get(), setup.layout.get(GRID_OFFSET),
+        covered_areas(session, setup.asset_source, capture),
+    )
     stamps = stamp_problem = diagnostic = None
     if reading.available:
-        stamps, stamp_problem = candles.stamp(reading, captured_at, setup.model.period, offset, uncertainty or 0.0)
+        geometry = reading.geometry
+        if geometry is not None and geometry.grid_offset is not None and not geometry.grid_learned:
+            setup.layout[GRID_OFFSET] = geometry.grid_offset / geometry.scale  # the same in every chart: kept for the next
+        if reading.countdown is not None and 0 <= reading.countdown <= period:
+            setup.clock.update(*platform_clock.from_countdown(
+                captured_at, captured_by, period, reading.countdown, setup.clock.estimate()[0] or 0.0,
+            ))
+    offset, uncertainty = setup.clock.estimate()
+    if reading.available:
+        stamps, stamp_problem = candles.stamp(reading, captured_at, period, offset, uncertainty or 0.0)
     elif setup.log is not None:
         diagnostic = setup.log.save_diagnostic(expected, capture.image, reading)
     return ChartObservation(
@@ -906,6 +940,7 @@ def observe_chart(session, setup, expected, ctx):
     )
 
 
+GRID_OFFSET = "grid_offset"  # setup.layout: CSS pixels from the labels' digits to their grid lines
 MAX_LOCAL_CONFLICTS = 2  # recorded candles a reading may contradict before the reading itself counts as wrong
 
 

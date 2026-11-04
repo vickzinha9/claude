@@ -241,7 +241,8 @@ def configure(session, selectors, current, read_line, ctx):
                 save_diagnostic(ctx, image, None, read_line)
             else:
                 model = candles.CandleModel(colors[0], colors[1], period)
-                reading = candles.read_candles(image, scale, model, source.marker, ctx.engine.get())
+                covered = chart_analysis.covered_areas(session, selectors["asset"], capture)
+                reading = candles.read_candles(image, scale, model, source.marker, ctx.engine.get(), covered=covered)
                 for line in preview_lines(model, reading, captured_at, captured_by) + candles.geometry_lines(reading):
                     say(line)
                 if reading.available:

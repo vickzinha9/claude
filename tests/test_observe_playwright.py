@@ -878,6 +878,51 @@ class RealChartTest(unittest.TestCase):
         self.assertIsNone(self.clicks)  # nothing on the page was clicked
         self.assertNotIn("SEGREDO", text)
 
+    def test_the_flag_over_the_chart_is_no_candle_and_the_countdown_beside_the_forming_one_dates_them(self):
+        """2026-11-04: the asset's button with a red flag over the chart, and "M1" over "00:26" beside the forming candle."""
+        from pocketautonomo import candles, chart_analysis, scan
+
+        flag = (
+            '<div id="asset" style="position:absolute;left:40px;top:14px;color:#ccc;font:13px Arial">'
+            '<span style="display:inline-block;width:18px;height:18px;border-radius:50%;background:#ff3e1f;'
+            'vertical-align:middle;margin-right:6px"></span>EUR/USD OTC</div>'
+        )
+        base = CANDLE_PAGE.replace("__BARS__", json.dumps(CANDLE_BARS)).replace('<div id="asset">EUR/USD OTC</div>', flag)
+        # As on the platform, the forming candle stands well left of the axis, with room for its two lines.
+        base = base.replace("const left = AXIS - 20 -", "const left = AXIS - 90 -")
+        model = candles.CandleModel((0x45, 0xB7, 0x34), (0xFF, 0x3E, 0x1F), 60)
+        source = scan.load_reader_selectors(self.runtime / observe.SELECTORS_FILE_NAME)["price"]
+        now = datetime(2026, 11, 4, 16, 0, 20, tzinfo=timezone.utc)  # this computer: 26 s left on the chart is 16:00:34
+        observations, unguarded = {}, None
+        for period_text in ("M1", "M5"):
+            beside = (
+                "const fx = left + (BARS.length - 1) * SPACING + BODY + 18;\n"
+                f'p.fillStyle = "#8a8f9e"; p.font = "11px Arial"; p.fillText("{period_text}", fx, y - 10);'
+                ' p.fillText("00:26", fx, y + 10);\n</script>'
+            )
+            self.page = base.replace("</script>", beside, 1)
+            session = self.open_session(self.runtime / f"perfil-{period_text}")
+            session.open(CANDLE_URL)
+            session.wait(0.5)
+            ctx = observe.Context(now=lambda: now)
+            setup = chart_analysis.ChartSetup(model, source, "#asset", 300.0, chart_analysis.CandleHistory())
+            observations[period_text] = chart_analysis.observe_chart(session, setup, "EUR/USD OTC", ctx)
+            if unguarded is None:  # the same capture without the area of the asset's button
+                capture, _ = observe.capture_chart(session, "#plot")
+                unguarded = candles.read_candles(capture.image, capture.scale, model, source.marker, ctx.engine.get())
+            session.close()  # one Playwright at a time
+        self.assertIn("o espaçamento entre as velas é irregular", unguarded.reason)  # the flag, taken for a candle
+        one = observations["M1"]
+        self.assertTrue(one.usable, one.problem)
+        self.assertEqual(one.reading.geometry.covered, 1)
+        self.assertEqual(len(one.reading.completed), 44)  # the oldest of the 46 is cut by the left edge
+        self.assertEqual(one.reading.countdown_text, "00:26")
+        self.assertAlmostEqual(one.clock_offset, 14.0, delta=1.6)
+        self.assertEqual(one.stamps[0], datetime(2026, 11, 4, 16, 0, tzinfo=timezone.utc))
+        five = observations["M5"]
+        self.assertFalse(five.usable)
+        self.assertIn("o gráfico mostra velas de M5 (300 s) e a calibração é de velas de 60 s", five.problem)
+
     def test_a_marker_hanging_below_its_price_with_a_countdown_is_read_from_the_chart_drawing(self):
         """The geometry of the reported failure, drawn in canvas: the quote's row is not the box's middle."""
         from pocketautonomo import candles, chart, chart_analysis
