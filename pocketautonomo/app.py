@@ -172,14 +172,19 @@ class App:
         self.write("Iniciando: " + " ".join(args[1:]))
         self.write("Faça o login no navegador que abrir e clique em 'Já fiz login'.")
         self.runner.start(args)
+        # What runs now, not what the lists show: they can be changed while it runs.
+        self.started = (self.mode.get(), self.account.get())
 
     def arm(self):
         from tkinter import messagebox
 
-        if self.mode.get() != "Execução real" or not self.runner.running():
-            messagebox.showinfo("PocketAutonomo", "Inicie o modo 'Execução real' antes de armar.")
+        mode, account = getattr(self, "started", (None, None))
+        if mode != "Execução real" or not self.runner.running():
+            messagebox.showinfo(
+                "PocketAutonomo",
+                "Só a execução que está rodando no modo 'Execução real' pode ser armada. Pare a atual e inicie esse modo.",
+            )
             return
-        account = self.account.get()
         if not messagebox.askyesno(
             "Armar execução real",
             f"Armar a execução REAL na conta {account.upper()}?\n\nCada CALL/PUT válido envia uma ordem de"

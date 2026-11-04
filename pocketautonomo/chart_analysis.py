@@ -51,16 +51,19 @@ last candle) is measured on the same evaluation decisions, to compare.
 
 import csv
 import math
+import os
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 
-from pocketautonomo import analysis, candles, observe
+from pocketautonomo import analysis, candles, observe, platform_clock
 from pocketautonomo.analysis import CALL, DRAW, LOSS, PUT, WAIT, WIN, Trade, evaluate
 
 ALTA, BAIXA, INDEFINIDO = "ALTA", "BAIXA", "INDEFINIDO"
 ORIGIN_CHART = "gráfico"  # a candle read on the screen, from the chart's pixels
 CANDLE_PREFIX = "velas-"
+DIAGNOSTIC_PREFIX = "velas-recusada-"  # the capture of a reading of the candles that failed, with its ruler
+MAX_DIAGNOSTICS = 12  # such captures in a run, at most
 CANDLE_COLUMNS = (
     "asset", "period_s", "start_utc", "open", "high", "low", "close", "kind", "resolution", "read_at_utc", "origin",
 )
@@ -405,6 +408,10 @@ class CandleSeries:
         self.version += 1
 
 
+SHIFT_REACH = 2  # candles: how far apart two readings of the same candles are looked for
+MIN_SHIFT_MATCHES = 5  # candles shared at a shift, at least, to call two readings the same candles shifted
+
+
 @dataclass
 class CandleHistory:
     """The candles read on the chart, from every file, with what was left out and why."""
@@ -427,6 +434,25 @@ class CandleHistory:
         if series is None:
             return []
         return [bar for bar in bars if series.get(bar.start) is not None and not same_candle(series.get(bar.start), bar)]
+
+    def shifted_by(self, name, period, bars, reach=SHIFT_REACH):
+        """k (±1 to ±reach) when bars agree with the recorded candles k periods later, or 0.
+
+        Agreeing means MIN_SHIFT_MATCHES candles or more shared at that shift, and all but a fifth of
+        them the same: a reading numbered one candle off by a clock, not other values.
+        """
+        series = self.get(name, period)
+        if series is None:
+            return 0
+        for k in sorted(range(-reach, reach + 1), key=abs):
+            if k == 0:
+                continue
+            step = timedelta(seconds=k * period)
+            pairs = [(series.get(bar.start + step), bar) for bar in bars if bar.start is not None]
+            pairs = [(known, bar) for known, bar in pairs if known is not None]
+            if len(pairs) >= MIN_SHIFT_MATCHES and sum(same_candle(known, bar) for known, bar in pairs) * 5 >= 4 * len(pairs):
+                return k
+        return 0
 
     def add(self, name, period, bar):
         """'nova', 'igual' or 'conflito': what adding bar did."""
@@ -523,6 +549,27 @@ class CandleLog:
         self._warn = warn
         self._file = self._writer = None
         self._retry_at = None
+        self.diagnostics = {}  # (asset key, reason) -> path of the capture saved for it in this run
+
+    def save_diagnostic(self, name, image, reading):
+        """Save the capture of a reading that failed, with the ruler of candles.diagnostic_png; its path, or None.
+
+        One capture per asset and reason in a run, MAX_DIAGNOSTICS in all: enough to see why, without filling
+        the disk. The chart shows no account data: the balance is outside it.
+        """
+        key = (analysis.asset_key(name), (reading.reason or "")[:60])
+        if key in self.diagnostics or len(self.diagnostics) >= MAX_DIAGNOSTICS:
+            return None
+        self.diagnostics[key] = None
+        try:
+            self.runtime_dir.mkdir(parents=True, exist_ok=True)
+            path = self.runtime_dir / f"{DIAGNOSTIC_PREFIX}{datetime.now():%Y%m%d-%H%M%S}-{key[0]}-{uuid.uuid4().hex[:6]}.png"
+            path.write_bytes(candles.diagnostic_png(image, reading))
+        except OSError as error:
+            self._warn(f"AVISO: a captura da leitura recusada não foi gravada ({error}).")
+            return None
+        self.diagnostics[key] = path
+        return path
 
     def write(self, name, period, bars, read_at):
         if not bars:
@@ -747,6 +794,7 @@ class ChartSetup:
     history: CandleHistory
     log: object = None  # CandleLog
     cache: dict = field(default_factory=dict)  # (asset key, period) -> (version, ChartValidation)
+    clock: platform_clock.ClockOffset = field(default_factory=platform_clock.ClockOffset)  # the platform's clock
 
     def validation(self, name):
         series = self.history.get(name, self.model.period)
@@ -773,6 +821,16 @@ class ChartObservation:
     ms: object = None
     added: int = 0  # new candles recorded
     conflicts: int = 0  # recorded candles that this reading contradicted
+    clock_offset: object = None  # seconds added to this computer's clock for the platform's, when it was read
+    clock_uncertainty: float = 0.0
+    diagnostic: object = None  # the path of the capture saved because the reading failed
+
+    @property
+    def platform_at(self):
+        """captured_at by the platform's clock, when it was read; otherwise by this computer's."""
+        if self.captured_at is None or self.clock_offset is None:
+            return self.captured_at
+        return self.captured_at + timedelta(seconds=self.clock_offset)
 
     @property
     def usable(self):
@@ -790,7 +848,8 @@ class ChartObservation:
 
     def status(self, period):
         if self.problem is not None:
-            return f"indisponível: {self.problem}"
+            saved = "" if self.diagnostic is None else f" (captura em {self.diagnostic.parent.name}{os.sep}{self.diagnostic.name})"
+            return f"indisponível: {self.problem}{saved}"
         reading = self.reading
         text = (
             f"{len(reading.completed)} velas completas de {period} s e a que se forma (escala por"
@@ -801,6 +860,10 @@ class ChartObservation:
             text += f"; {len(reading.missing)} posição(ões) sem vela lida"
         if self.stamp_problem:
             text += f"; velas não gravadas: {self.stamp_problem}"
+        if self.clock_offset is None:
+            text += "; relógio da plataforma não lido: horários pelo relógio deste computador"
+        elif abs(self.clock_offset) >= platform_clock.NOTICE_SECONDS:
+            text += f"; horários pelo relógio da plataforma ({platform_clock.describe(self.clock_offset)})"
         return text
 
 
@@ -814,6 +877,12 @@ def observe_chart(session, setup, expected, ctx):
     if not (before.available and analysis.asset_key(before.value) == analysis.asset_key(expected)):
         shown = before.value if before.available else f"INDISPONÍVEL ({before.reason})"
         return ChartObservation(expected, None, problem=f"a tela mostrava {shown}, e não {expected}, antes da captura do gráfico")
+    read_clock = getattr(session, "platform_clock", None)  # the sessions of the tests may not have it
+    if read_clock is not None:
+        before_clock = ctx.now()
+        text = read_clock()
+        setup.clock.update(before_clock, ctx.now(), text)
+    offset, uncertainty = setup.clock.estimate()
     captured_at = ctx.now()
     capture, problem = observe.capture_chart(session, setup.source.chart)
     after = observe.read_field(session, "asset", setup.asset_source, ctx)
@@ -826,12 +895,14 @@ def observe_chart(session, setup, expected, ctx):
             ms=ctx.elapsed_ms(start),
         )
     reading = candles.read_candles(capture.image, capture.scale, setup.model, setup.source.marker, ctx.engine.get())
-    stamps = stamp_problem = None
+    stamps = stamp_problem = diagnostic = None
     if reading.available:
-        stamps, stamp_problem = candles.stamp(reading, captured_at, setup.model.period)
+        stamps, stamp_problem = candles.stamp(reading, captured_at, setup.model.period, offset, uncertainty or 0.0)
+    elif setup.log is not None:
+        diagnostic = setup.log.save_diagnostic(expected, capture.image, reading)
     return ChartObservation(
         expected, reading, captured_at, ctx.now(), stamps, None if reading.available else reading.reason, stamp_problem,
-        ctx.elapsed_ms(start),
+        ctx.elapsed_ms(start), clock_offset=offset, clock_uncertainty=uncertainty or 0.0, diagnostic=diagnostic,
     )
 
 
@@ -857,11 +928,30 @@ def absorb(setup, observation):
     shared = sum(series.get(bar.start) is not None for bar in bars) if series is not None else 0
     contradicted = setup.history.disagreements(observation.asset, period, bars)
     if contradicted:
-        if len(contradicted) > max(MAX_LOCAL_CONFLICTS, shared // 5):
+        shifted = setup.history.shifted_by(observation.asset, period, bars)
+        if shifted > 0 and observation.clock_offset is not None and len(contradicted) > max(MAX_LOCAL_CONFLICTS, shared // 5):
+            # The recorded candles are these, numbered shifted later: recorded by a clock ahead of the platform's,
+            # which numbered this reading. They leave the analysis, also after the next start: this one is written
+            # too, and the two versions of each candle are a conflict.
+            for bar in contradicted:
+                setup.history.add(observation.asset, period, bar)
+            if setup.log is not None:
+                setup.log.write(observation.asset, period, contradicted, observation.captured_at)
             problem = (
-                f"a leitura não confere com {len(contradicted)} de {shared} velas já gravadas deste ativo, além da resolução:"
-                " o relógio deste computador, o período calibrado ou o ativo do gráfico podem estar errados; nada desta"
-                " leitura foi usado nem gravado"
+                f"as velas já gravadas deste ativo são as desta leitura deslocadas {shifted} vela(s) para depois: foram"
+                " datadas por um relógio adiantado em relação ao da plataforma, que datou esta leitura; as duas versões de"
+                f" {len(contradicted)} vela(s) ficam fora da análise, como conflito, e esta leitura não foi usada"
+            )
+            return replace(observation, problem=problem, conflicts=len(contradicted))
+        if len(contradicted) > max(MAX_LOCAL_CONFLICTS, shared // 5):
+            why = (
+                f"; ela confere com as velas gravadas deslocadas {shifted:+d} vela(s): o gráfico pode não ter avançado, ou o"
+                " relógio de uma das duas leituras estava fora do da plataforma" if shifted else
+                ": o relógio deste computador, o período calibrado ou o ativo do gráfico podem estar errados"
+            )
+            problem = (
+                f"a leitura não confere com {len(contradicted)} de {shared} velas já gravadas deste ativo, além da resolução"
+                f"{why}; nada desta leitura foi usado nem gravado"
             )
         else:
             for bar in contradicted:
@@ -918,7 +1008,7 @@ def assess(setup, observation, payout, now):
         return wait(f"{validation.reason}; mas a leitura é de há {number(age, 1)} s, e uma decisão só vale até {number(MAX_READING_AGE, 0)} s depois da captura")
     if observation.stamp_problem is not None:
         return wait(f"{validation.reason}; mas {observation.stamp_problem}")
-    into = candles.seconds_into(observation.captured_at, setup.model.period)
+    into = candles.seconds_into(observation.platform_at, setup.model.period)
     if into > ENTRY_WINDOW_SECONDS:
         return wait(
             f"{validation.reason}; mas a regra foi medida com a decisão no fechamento da vela, e a leitura foi"

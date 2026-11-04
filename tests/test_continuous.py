@@ -237,6 +237,30 @@ class RecoveryTest(ContinuousTestCase):
         self.assertIsNone(self.state()["pausa"])
         self.assertIn("MODO CONTÍNUO encerrado: 2 execuções.", self.out)
 
+    def test_the_first_cycle_waits_for_the_favorites_drawn_after_the_enter(self):
+        # The log of 2026-11-04: Enter before the bar of favorites was drawn, and the first cycle found none.
+        platform = ts.FakePlatform()
+        platform.logged_in = False
+        waits = []
+
+        def on_wait(seconds):
+            if not platform.logged_in:
+                waits.append(seconds)
+                if len(waits) == 6:
+                    platform.logged_in = True  # drawn 3 s after the Enter
+                    moments.append(platform.t)
+            if seconds == scan.DEFAULT_INTERVAL:
+                raise KeyboardInterrupt
+
+        moments = []
+        code = self.run_continuous(platform=platform, on_wait=on_wait)
+        self.assertEqual(code, 130, self.err)
+        self.assertEqual(waits, [continuous.FAVORITES_POLL_SECONDS] * 6)
+        self.assertIn("A tela ainda não mostra os favoritos (os favoritos não aparecem (o seletor não encontrou nenhum elemento))", self.out)
+        self.assertNotIn("sem favoritos para visitar", self.out)
+        self.assertIn("CICLO 1: 3 favoritos", self.out)
+        self.assertEqual(self.clicks_between(platform, 0, moments[0]), [])  # nothing clicked while waiting
+
     def test_a_lost_session_ends_the_run_and_the_next_one_waits_for_the_login_without_clicking(self):
         platform = ts.FakePlatform()
         moments = {}

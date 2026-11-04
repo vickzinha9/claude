@@ -114,6 +114,7 @@ GRID_REACH = 1.5  # heights of a label's digits: how far from them its grid line
 GRID_AGREEMENT = 1.0  # CSS pixels: how much the labels' distances to their grid lines may differ
 MAX_CANDLE_WIDTH = 40.0  # CSS pixels: a longer run of one color in a row is a line
 MIN_CANDLE_WIDTH = 2.0  # CSS pixels: a narrower shape is not a candle
+MIN_READABLE_WIDTH = 4.0  # CSS pixels: narrower candles touch at the chart's gaps, a zoom too far out to read
 MAX_WIDTH_RATIO = 1.7  # a shape this much wider than the median candle is not one candle
 SPACING_TOLERANCE = 0.3  # share of the spacing that a gap between two candles may be off by
 MIN_CANDLES = 6  # candles in a reading, at least, with the forming one
@@ -1139,6 +1140,15 @@ def read_candles(image, scale, model, marker_model, engine):
         )
     widths = sorted(shape.width for shape in shapes)
     median_width = widths[len(widths) // 2]
+    if median_width < MIN_READABLE_WIDTH * scale:
+        # On 2026-11-04, charts of 2-pixel candles: neighbors of one color merged into wider shapes, and the gaps,
+        # a pixel or two, came out irregular. Neither is something else on the chart: the zoom is too far out.
+        return refuse(
+            f"as velas do gráfico têm {median_width} pixel(s) de largura, menos que {_px(MIN_READABLE_WIDTH * scale)}: o"
+            " zoom do gráfico deste ativo está afastado demais, e velas vizinhas se encostam; no navegador, aproxime o zoom"
+            " do gráfico deste ativo até cada vela ter alguns pixels de largura e espaço entre elas",
+            **found,
+        )
     wide = [shape for shape in shapes if shape.width > MAX_WIDTH_RATIO * median_width]
     if wide:
         return refuse(
@@ -1477,23 +1487,28 @@ def diagnostic_png(image, reading=None):
     return quote_reader.png_bytes(width, image.height, pixels)
 
 
-def stamp(reading, captured_at, period):
+def stamp(reading, captured_at, period, offset=None, uncertainty=0.0):
     """({index: start} of the candles of reading, None or why those times are not certain).
 
-    captured_at is this computer's clock, in UTC, at the capture. The forming candle (index 0)
-    started at the last multiple of period; the candle at index k, k periods earlier. The starts
-    always say which candles follow each other; near a change of candle, within
-    BOUNDARY_GUARD_SECONDS, they may all be one period off, and the reason says so: such times
-    are never recorded nor used for a decision.
+    captured_at is this computer's clock, in UTC, at the capture. offset, when the platform's clock
+    was read (platform_clock), is the seconds to add to it to get the platform's, which starts and
+    ends the candles; uncertainty is how far off that offset may be. Without offset, this computer's
+    clock is taken as the platform's. The forming candle (index 0) started at the last multiple of
+    period; the candle at index k, k periods earlier. The starts always say which candles follow
+    each other; near a change of candle, within BOUNDARY_GUARD_SECONDS plus the uncertainty, they
+    may all be one period off, and the reason says so: such times are never recorded nor used for a
+    decision.
     """
-    epoch = captured_at.timestamp()
+    epoch = captured_at.timestamp() + (offset or 0.0)
     start = math.floor(epoch / period) * period
     into = epoch - start
     starts = {index: datetime.fromtimestamp(start - index * period, timezone.utc) for index in reading.indices}
-    if into < BOUNDARY_GUARD_SECONDS or period - into < BOUNDARY_GUARD_SECONDS:
+    guard = BOUNDARY_GUARD_SECONDS + uncertainty
+    if into < guard or period - into < guard:
+        clock = "o relógio da plataforma" if offset is not None else "o relógio deste computador"
         return starts, (
-            f"a captura foi a {min(into, period - into):.1f} s da troca de vela, e o relógio deste computador não"
-            " diz com segurança qual vela estava se formando"
+            f"a captura foi a {min(into, period - into):.1f} s da troca de vela, e {clock} não diz com segurança qual"
+            " vela estava se formando"
         )
     return starts, None
 

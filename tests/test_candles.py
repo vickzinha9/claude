@@ -138,6 +138,16 @@ class ReadCandlesTest(unittest.TestCase):
             "mais larga(s) que as velas" in reading.reason or "se sobrepõem" in reading.reason, reading.reason
         )
 
+    def test_candles_of_two_pixels_are_a_zoom_too_far_out_and_said_so(self):
+        # The log of 2026-11-04: "espaçamento irregular" and "19 pixels, contra 2" were charts of 2-pixel candles.
+        for spacing in (3, 2.6):
+            with self.subTest(spacing=spacing):
+                reading = read(chart_of(ci.artificial_bars(40), spacing=spacing, body=2))
+                self.assertFalse(reading.available)
+                self.assertIn("as velas do gráfico têm 2 pixel(s) de largura, menos que 4", reading.reason)
+                self.assertIn("aproxime o zoom do gráfico deste ativo", reading.reason)
+                self.assertNotIn("que não é uma vela", reading.reason)
+
     def test_a_long_line_of_a_candle_color_is_not_a_candle(self):
         bars = ci.artificial_bars(40)
         chart = chart_of(bars, lines=[(200, 0, 560, ci.CANDLE_GREEN)])  # a level drawn across the chart

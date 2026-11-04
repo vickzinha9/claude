@@ -72,7 +72,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from pocketautonomo import quote_reader, quote_timings
+from pocketautonomo import platform_clock, quote_reader, quote_timings
 from pocketautonomo.quote_ocr import WARM_UP_SAMPLE, OcrUnavailable, RapidOcrEngine, decode_png
 
 ALLOWED_DOMAIN = "pocketoption.com"
@@ -1881,6 +1881,22 @@ class PlaywrightSession:
         try:
             return self._cdp("Browser.getWindowForTarget", {})["bounds"]["windowState"]
         except (self._error_type, ReadError, KeyError, TypeError):
+            return None
+
+    def platform_clock(self):
+        """The text of the platform's clock beside the chart ("17:44:51 UTC-3"), or None.
+
+        Found by its text (platform_clock.CLOCK_PATTERN), not by a selector: only when exactly one
+        visible element shows it. It only reads, like read.
+        """
+        try:
+            locator = self._page.get_by_text(platform_clock.CLOCK_PATTERN)
+            matches = locator.count()
+            visible = [index for index in range(min(matches, 4)) if locator.nth(index).is_visible()]
+            if matches > 4 or len(visible) != 1:
+                return None
+            return locator.nth(visible[0]).inner_text(timeout=READ_TIMEOUT_MS)
+        except self._error_type:
             return None
 
     def read(self, selector, timeout_ms):

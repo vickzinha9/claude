@@ -84,6 +84,40 @@ class WindowTest(unittest.TestCase):
         window.stop()
         self.assertFalse(runner.alive)
 
+    def test_only_a_running_real_execution_can_be_armed_whatever_the_list_shows(self):
+        from unittest import mock
+
+        try:
+            import tkinter as tk
+
+            root = tk.Tk()
+        except Exception as error:  # noqa: BLE001 - no display (Linux CI)
+            self.skipTest(f"sem tela para o Tk: {error}")
+        self.addCleanup(root.destroy)
+        root.withdraw()
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        runtime = Path(directory.name)
+        runner = FakeRunner()
+        window = app.App(root, runtime, runner)
+        window.mode.set("Análise")
+        window.start()
+        window.mode.set("Execução real")  # changed in the list while the analysis runs, as in the log of 2026-11-04
+        with mock.patch("tkinter.messagebox.showinfo") as info, mock.patch("tkinter.messagebox.askyesno", return_value=True) as ask:
+            window.arm()
+        info.assert_called_once()
+        ask.assert_not_called()
+        self.assertIsNone(arming.read_state(runtime / arming.ARM_FILE_NAME))
+        window.stop()
+        window.mode.set("Execução real")
+        window.account.set("demo")
+        window.start()
+        window.account.set("real")  # the list again: the run is on the demo account
+        with mock.patch("tkinter.messagebox.askyesno", return_value=True) as ask:
+            window.arm()
+        self.assertIn("DEMO", ask.call_args[0][1])
+        self.assertEqual(arming.read_state(runtime / arming.ARM_FILE_NAME)["account"], "demo")
+
 
 if __name__ == "__main__":
     unittest.main()

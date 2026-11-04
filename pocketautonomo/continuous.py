@@ -317,6 +317,9 @@ class Continuous:
                         self.saved.change(last_click=None)  # you checked the list that the selector finds now
                         say("Registro do último clique apagado: você conferiu a lista de favoritos.")
                 self.reviewed = True
+                # The Enter may come before the page draws the favorites bar: the first cycle would find
+                # no favorite and wait 20 s for nothing.
+                wait_for_favorites(session, self.selectors, self.favorites_selector, ctx)
             else:
                 wait_for_screen(session, self.selectors, self.favorites_selector, ctx)
             say(scan.HANDS_OFF)
@@ -881,6 +884,35 @@ def wait_for_screen(session, selectors, favorites_selector, ctx):
                 say(f"  Sessão indisponível, às {utc_text(ctx.now())} (relógio local, UTC): {problem}. Esperando, sem clicar.")
                 shown, shown_at = problem, moment
         session.wait(SCREEN_POLL_SECONDS)
+
+
+FAVORITES_POLL_SECONDS = 0.5  # after your Enter, between two readings of the page until the favorites appear
+FAVORITES_WAIT_SECONDS = 60.0  # after your Enter, the longest wait for them; then the scan says what is missing
+
+
+def wait_for_favorites(session, selectors, favorites_selector, ctx):
+    """After your Enter, read the page until the favorites and the asset appear, for FAVORITES_WAIT_SECONDS at most.
+
+    You are at the window, so there is no wait for the screen to stay ready, as in wait_for_screen:
+    the first cycle starts as soon as the bar of favorites is drawn. It only reads the page.
+    """
+    started = ctx.monotonic()
+    told = False
+    while True:
+        if session.is_closed():
+            raise scan.WindowClosed()
+        problem, _ = screen_problem(session, selectors, favorites_selector, ctx)
+        waited = ctx.monotonic() - started
+        if problem is None:
+            if told:
+                say(f"  Favoritos visíveis depois de {seconds_text(round(waited, 1))} s: a varredura começa.")
+            return
+        if waited >= FAVORITES_WAIT_SECONDS:
+            return  # the first cycle tells what is missing, as before
+        if not told:
+            say(f"  A tela ainda não mostra os favoritos ({problem}): esperando até {seconds_text(FAVORITES_WAIT_SECONDS)} s, sem clicar.")
+            told = True
+        session.wait(FAVORITES_POLL_SECONDS)
 
 
 def screen_problem(session, selectors, favorites_selector, ctx):
