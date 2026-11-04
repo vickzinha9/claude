@@ -216,6 +216,9 @@ class Window:
     attempt: int
     opens: datetime
     closes: datetime
+    # A quote read after this moment may enter; None: after opens. With the account, the expiry of the lost
+    # order: its LOSS arrives a moment later, and the platform may hide the price on the chart right then.
+    fresh_after: Optional[datetime] = None
 
 
 @dataclass(frozen=True)
@@ -584,7 +587,7 @@ class Operator:
                 seen = self._latest.get(analysis.asset_key(status.asset))
                 if (
                     seen is not None
-                    and seen.captured_at > window.opens  # read after the LOSS was confirmed
+                    and seen.captured_at > (window.fresh_after or window.opens)  # read after the lost order ended
                     and 0 <= (now - seen.captured_at).total_seconds() <= MAX_QUOTE_AGE_SECONDS
                 ):
                     self.window = None
@@ -836,7 +839,10 @@ class Operator:
             return  # a restored cycle releases no gale: _finish_recovery() abandons it
         self._prepare(stake_for_attempt(status.attempt))  # the gale's amount, before its window
         now = self.now()
-        self.window = Window(status.cycle_id, status.attempt, now, now + timedelta(seconds=self.gale_window))
+        expiry = getattr(order, "expires_at", None) if self.real else None
+        fresh_after = min(expiry, now) if isinstance(expiry, datetime) else None
+        self.window = Window(status.cycle_id, status.attempt, now, now + timedelta(seconds=self.gale_window), fresh_after)
+        since = f", lida depois do vencimento ({hour(fresh_after)})," if fresh_after is not None else ""
         self._write(
             WINDOW_OPENED,
             self._row(attempt=status.attempt, stake_cents=stake_for_attempt(status.attempt)),
@@ -844,7 +850,7 @@ class Operator:
             window_closes_utc=self.window.closes,
             reason=(
                 f"LOSS confirmada na tentativa {attempt}: a tentativa {status.attempt} precisa de uma"
-                f" cotação nova de {status.asset} até {hour(self.window.closes)}; sem nova decisão,"
+                f" cotação nova de {status.asset}{since} até {hour(self.window.closes)}; sem nova decisão,"
                 " mesmo ativo e mesma direção, sem exigir payout"
             ),
         )

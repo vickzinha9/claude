@@ -17,7 +17,7 @@ from pathlib import Path
 from pocketautonomo import analysis, arming, operation
 from pocketautonomo.broker import ORDER_ACCEPTED, ORDER_REJECTED, OrderRequest
 from pocketautonomo.coordinator import Coordinator
-from pocketautonomo.cycle import CALL, LOSS, PUT, REJECTED, UNKNOWN, WIN
+from pocketautonomo.cycle import ABANDONED, CALL, LOSS, PUT, REJECTED, UNKNOWN, WIN
 from pocketautonomo.operation import OperationLog, Operator, SessionLimits
 from pocketautonomo.pocket_broker import (
     DEMO,
@@ -416,9 +416,8 @@ class RealOperationTest(RealTestCase):
         self.assertEqual(self.operator.state(), operation.PENDING_ENTRY)
         order_id = self.coordinator.status().broker_order_id
         self.platform.close(order_id, LOSS)
-        self.read()  # LOSS confirmed: the gale's window opens
         self.platform.mode = "refuse"
-        self.read()
+        self.read()  # LOSS confirmed: the gale's window opens, and its entry is refused
         self.assertEqual(len(self.platform.clicks), 2)
         status = self.coordinator.status()
         self.assertEqual((status.is_active, status.outcome), (False, REJECTED))  # a refused gale never skips a level
@@ -426,6 +425,36 @@ class RealOperationTest(RealTestCase):
         self.assertTrue(self.operator.consider(self.decision()).started)
         self.assertEqual([amount for _, amount in self.platform.clicks], [5, 10, 5])
 
+
+    def test_the_gale_enters_with_a_quote_read_after_the_expiry_while_the_chart_hides_the_price(self):
+        # As on 2026-11-04 at 19:55: a reading 0.6 s after the expiry, the LOSS from the account a moment later,
+        # and then no reading for 7 s, the closed deal covering the price on the chart.
+        self.operator.consider(self.decision())
+        order_id = self.coordinator.status().broker_order_id
+        self.clock.advance(299.0)
+        self.read()  # before the expiry: not a quote of after the order
+        self.clock.advance(1.0)
+        self.platform.close(order_id, LOSS)
+        self.operator.tick()
+        self.assertEqual(self.platform.clicks, [("CALL", 5)])
+        [opened] = [row for row in self.log.rows if row["event"] == operation.WINDOW_OPENED]
+        self.assertIn("lida depois do vencimento", opened["reason"])
+        self.read()  # after the expiry: the gale enters at once
+        self.assertEqual(self.platform.clicks, [("CALL", 5), ("CALL", 10)])
+
+    def test_a_quote_read_after_the_expiry_but_too_old_lets_the_gale_window_expire(self):
+        self.operator.consider(self.decision())
+        order_id = self.coordinator.status().broker_order_id
+        self.clock.advance(300.5)
+        self.read()  # after the expiry
+        self.clock.advance(5.5)  # the account answers late: that quote is 6 s old
+        self.platform.close(order_id, LOSS)
+        self.operator.tick()
+        self.assertEqual(len(self.platform.clicks), 1)
+        self.clock.advance(5.1)
+        self.operator.tick()
+        self.assertEqual(self.coordinator.status().outcome, ABANDONED)
+        self.assertEqual(len(self.platform.clicks), 1)  # never a late gale
 
 if __name__ == "__main__":
     unittest.main()
