@@ -200,7 +200,10 @@ class App:
         self.url.set(url)
         self._save(mode=self.mode.get(), account=self.account.get(), url=url)
         arming.disarm(self.runtime_dir)  # a new run always starts disarmed
-        args = command(self.mode.get(), self.account.get(), url)
+        # ...and unpaused: a Pausar left from an earlier run refused every decision of the next one, unseen
+        # (2026-11-04, 18:28-19:00 local). Disarmed, no order leaves before ARMAR anyway.
+        arming.set_pause(self.runtime_dir, False)
+        args =command(self.mode.get(), self.account.get(), url)
         self.write("Iniciando: " + " ".join(args[1:]))
         self.write("Faça o login no navegador que abrir e clique em 'Já fiz login'.")
         self.runner.start(args)

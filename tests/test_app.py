@@ -79,6 +79,7 @@ class WindowTest(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         runtime = Path(directory.name)
         arming.arm(runtime, "real", "teste")  # left armed by something else: Iniciar disarms
+        arming.set_pause(runtime, True)  # left paused by an earlier run: Iniciar lifts it
         (runtime / "painel.json").write_text(json.dumps({"state": "COLETANDO", "attempt": 1, "stake_cents": 500}))
         runner = FakeRunner()
         window = app.App(root, runtime, runner)
@@ -87,6 +88,7 @@ class WindowTest(unittest.TestCase):
         window.start()
         self.assertEqual(runner.started[0][-3:], ["--real", "--conta", "real"])
         self.assertIsNone(arming.read_state(runtime / arming.ARM_FILE_NAME))
+        self.assertFalse((runtime / arming.PAUSE_FILE_NAME).exists())
         window.refresh()
         self.assertIn("DESARMADA", window.arm_state.get())
         self.assertIn("COLETANDO", window.panel.get())
