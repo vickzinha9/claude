@@ -87,3 +87,11 @@ class WindowTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CleanUrlTest(unittest.TestCase):
+    def test_a_token_in_the_link_is_never_kept_or_passed_on(self):
+        self.assertEqual(
+            app.clean_url(" https://pocketoption.com/pt/cabinet/quick-high-low/?ssid=SEGREDO#SEGREDO "),
+            "https://pocketoption.com/pt/cabinet/quick-high-low/",
+        )

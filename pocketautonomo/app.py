@@ -34,6 +34,14 @@ SETTINGS_FILE_NAME = "launcher.json"
 POLL_MS = 500
 
 
+def clean_url(url):
+    """The link without its query and fragment, where a session token may be: the profile keeps the login."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    parts = urlsplit(url.strip())
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+
+
 def command(mode, account, url):
     """The operate command of a mode: never --armar, the window arms explicitly."""
     base = [sys.executable, "-m", "pocketautonomo.operate", "--continuo", "--painel", "--url", url]
@@ -156,7 +164,8 @@ class App:
         if self.runner.running():
             self.write("Já existe uma execução rodando.")
             return
-        url = self.url.get().strip()
+        url = clean_url(self.url.get())
+        self.url.set(url)
         self._save(mode=self.mode.get(), account=self.account.get(), url=url)
         arming.disarm(self.runtime_dir)  # a new run always starts disarmed
         args = command(self.mode.get(), self.account.get(), url)
