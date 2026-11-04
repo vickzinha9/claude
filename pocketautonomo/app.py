@@ -113,6 +113,15 @@ class Runner:
             except OSError:
                 pass
 
+    def release(self):
+        """Type LIBERAR for the PAUSA prompt of the continuous mode (the window's button only sends Enter otherwise)."""
+        if self.running():
+            try:
+                self.process.stdin.write("LIBERAR\n")
+                self.process.stdin.flush()
+            except OSError:
+                pass
+
     def stop(self):
         if self.running():
             self.process.terminate()
@@ -145,7 +154,8 @@ class App:
         buttons = ttk.Frame(root, padding=(8, 0))
         buttons.pack(fill="x")
         for text, action in (
-            ("Iniciar", self.start), ("Já fiz login", self.runner.enter), ("Pausar/Retomar", self.toggle_pause),
+            ("Iniciar", self.start), ("Já fiz login", self.runner.enter), ("Liberar PAUSA", self.release_pause),
+            ("Pausar/Retomar", self.toggle_pause),
             ("Parar", self.stop), ("Estatísticas", self.show_stats), ("Diagnóstico", self.diagnostic),
         ):
             ttk.Button(buttons, text=text, command=action).pack(side="left", padx=2, pady=4)
@@ -164,6 +174,23 @@ class App:
         self.refresh()
 
     # Actions.
+
+    def release_pause(self):
+        """Answer 'Digite LIBERAR' of the program, after the user confirms the chart is the one the PAUSA names."""
+        from tkinter import messagebox
+
+        if not self.runner.running() or not getattr(self, "release_asked", False):
+            self.write("Nenhuma PAUSA esperando o LIBERAR agora: o botão só vale quando o log pede 'Digite LIBERAR'.")
+            return
+        if not messagebox.askyesno(
+            "PocketAutonomo",
+            "Na janela do navegador, o gráfico é do ativo da PAUSA (veja o log) e a lista de favoritos é a que você"
+            " quer? O programa não consegue conferir isso sozinho. Liberar a PAUSA?",
+        ):
+            return
+        self.release_asked = False
+        self.runner.release()
+        self.write("PAUSA liberada por você (LIBERAR enviado ao programa).")
 
     def start(self):
         if self.runner.running():
@@ -242,9 +269,11 @@ class App:
     def refresh(self):
         while True:
             try:
-                self.write(self.runner.lines.get_nowait())
+                line = self.runner.lines.get_nowait()
             except queue.Empty:
                 break
+            self.release_asked = "Digite LIBERAR" in line or (getattr(self, "release_asked", False) and not line.strip())
+            self.write(line)
         state = arming.read_state(self.runtime_dir / arming.ARM_FILE_NAME)
         paused = (self.runtime_dir / arming.PAUSE_FILE_NAME).exists()
         self.arm_state.set(

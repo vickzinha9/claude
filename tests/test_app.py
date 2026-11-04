@@ -58,6 +58,9 @@ class FakeRunner:
     def enter(self):
         pass
 
+    def release(self):
+        self.released = getattr(self, "released", 0) + 1
+
     def stop(self):
         self.alive = False
 
@@ -89,6 +92,40 @@ class WindowTest(unittest.TestCase):
         self.assertIn("COLETANDO", window.panel.get())
         window.stop()
         self.assertFalse(runner.alive)
+
+    def test_the_pause_is_released_only_when_the_program_asks_and_the_user_confirms(self):
+        from unittest import mock
+
+        try:
+            import tkinter as tk
+
+            root = tk.Tk()
+        except Exception as error:  # noqa: BLE001 - no display (Linux CI)
+            self.skipTest(f"sem tela para o Tk: {error}")
+        self.addCleanup(root.destroy)
+        root.withdraw()
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        runner = FakeRunner()
+        window = app.App(root, Path(directory.name), runner)
+        runner.alive = True
+        with mock.patch("tkinter.messagebox.askyesno", return_value=True) as ask:
+            window.release_pause()  # nothing asked yet
+            ask.assert_not_called()
+            self.assertEqual(getattr(runner, "released", 0), 0)
+            runner.lines.put("? Digite LIBERAR para liberar a PAUSA e começar, ou Enter para sair sem mudar nada:")
+            window.root.update()
+            window.root.after(0)
+            window.refresh()
+            ask.return_value = False
+            window.release_pause()  # asked, but the user says no
+            self.assertEqual(getattr(runner, "released", 0), 0)
+            ask.return_value = True
+            window.release_pause()
+        self.assertEqual(runner.released, 1)
+        with mock.patch("tkinter.messagebox.askyesno", return_value=True):
+            window.release_pause()  # already answered: not twice
+        self.assertEqual(runner.released, 1)
 
     def test_only_a_running_real_execution_can_be_armed_whatever_the_list_shows(self):
         from unittest import mock
