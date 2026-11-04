@@ -113,7 +113,9 @@ class WindowTest(unittest.TestCase):
             window.release_pause()  # nothing asked yet
             ask.assert_not_called()
             self.assertEqual(getattr(runner, "released", 0), 0)
-            runner.lines.put("? Digite LIBERAR para liberar a PAUSA e começar, ou Enter para sair sem mudar nada:")
+            # As in the real log: the prompt has no line break, so only the PAUSA block before it reaches the window.
+            runner.lines.put("Com a tela de operações visível, pressione Enter aqui para começar a varredura (Ctrl+C cancela). PAUSA DO MODO CONTÍNUO: a operação contínua não recomeça sozinha.")
+            runner.lines.put("  Último clique gravado: GBP/USD OTC, posição 5, com 8 elementos na lista; troca pendente.")
             window.root.update()
             window.root.after(0)
             window.refresh()

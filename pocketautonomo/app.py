@@ -272,7 +272,11 @@ class App:
                 line = self.runner.lines.get_nowait()
             except queue.Empty:
                 break
-            self.release_asked = "Digite LIBERAR" in line or (getattr(self, "release_asked", False) and not line.strip())
+            # The prompt itself has no line break, so the window never sees it: the PAUSA block just before it says it comes.
+            if "Digite LIBERAR" in line or "PAUSA DO MODO CONTÍNUO" in line:
+                self.release_asked = True
+            elif line.startswith("[processo terminou"):
+                self.release_asked = False
             self.write(line)
         state = arming.read_state(self.runtime_dir / arming.ARM_FILE_NAME)
         paused = (self.runtime_dir / arming.PAUSE_FILE_NAME).exists()
