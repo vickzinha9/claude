@@ -413,6 +413,18 @@ class RealOperationTest(RealTestCase):
         self.assertTrue(again.started, again.reason)  # the gales still go 5/10/20/40, and only the balance stops it
         self.assertEqual([amount for _, amount in self.platform.clicks], [5, 10, 20, 40, 5])
 
+    def test_the_contrarian_option_is_the_trend_mode_and_never_an_analysis(self):
+        from unittest import mock
+
+        from pocketautonomo import operate
+
+        args = operate.parse_arguments(["--real", "--contra-tendencia", "--so-elegiveis", "--sem-limites"])
+        self.assertTrue(args.contra_tendencia and args.tendencia)  # the operator lets the chart's reading start cycles
+        self.assertFalse(operate.parse_arguments(["--real", "--tendencia"]).contra_tendencia)
+        for other in ("--analise", "--demonstracao"):
+            with self.subTest(other=other), self.assertRaises(SystemExit), mock.patch("sys.stderr"):
+                operate.parse_arguments(["--contra-tendencia", other])
+
     def test_a_win_ends_the_cycle_and_the_next_one_starts_at_5(self):
         self.operator.consider(self.decision())
         self.settle(LOSS)

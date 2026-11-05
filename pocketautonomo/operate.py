@@ -303,7 +303,10 @@ class Execution:
         """
         state = self.state = scan.Scan(selectors, favorites_selector, self.args.load_timeout, self.progress)
         state.chart = scan.chart_setup(selectors, self.ctx.runtime_dir, self.args.horizon)
-        if state.chart is not None and getattr(self.args, "tendencia", False):
+        if state.chart is not None and getattr(self.args, "contra_tendencia", False):
+            exactly = chart_analysis.CONTRA_SIGNALS
+            state.chart = replace(state.chart, trend=True, contrarian=True, min_signals=exactly, max_signals=exactly)
+        elif state.chart is not None and getattr(self.args, "tendencia", False):
             state.chart = replace(state.chart, trend=True, min_signals=chart_analysis.TREND_MIN_SIGNALS)
         if state.chart is not None:
             self.progress.candle_log = state.chart.log
@@ -460,6 +463,16 @@ def build_parser():
         ),
     )
     parser.add_argument(
+        "--contra-tendencia",
+        dest="contra_tendencia",
+        action="store_true",
+        help=(
+            "MODO CONTRA-TENDÊNCIA (inclui --tendencia): quando a leitura do gráfico favorece ALTA ou BAIXA com"
+            f" exatamente {chart_analysis.CONTRA_SIGNALS} sinais, a primeira entrada vai para o lado oposto; medido"
+            " depois do fato em dois dias (55%% a 60%%), sem confirmação em dados novos"
+        ),
+    )
+    parser.add_argument(
         "--analise",
         action="store_true",
         help="modo análise: a varredura e a decisão CALL/PUT/AGUARDAR, sem ciclo nem entrada, nem simulada",
@@ -500,8 +513,11 @@ def parse_arguments(argv):
         parser.error("--armar só vale com --real")
     if args.analise and args.real:
         parser.error("--analise não envia nada: não use com --real")
+    if args.contra_tendencia and (args.analise or args.demonstracao):
+        parser.error("--contra-tendencia abre ciclos: não use com --analise nem com --demonstracao")
     if args.tendencia and (args.analise or args.demonstracao):
         parser.error("--tendencia abre ciclos: não use com --analise nem com --demonstracao")
+    args.tendencia = args.tendencia or args.contra_tendencia  # the contrarian mode is the trend mode, the other way
     if args.real and args.horizon != 300:
         parser.error("a execução real envia ordens de 300 s: --horizon 300")
     return args
@@ -539,7 +555,16 @@ def print_rules(args, database, orders):
             )
             + f", ciclos: {cycles}. Ctrl+C encerra (e desarma)."
         )
-    if getattr(args, "tendencia", False):
+    if getattr(args, "contra_tendencia", False):
+        say(
+            "MODO CONTRA-TENDÊNCIA: sem regra validada, quando a leitura das velas do gráfico favorece ALTA ou BAIXA"
+            f" com exatamente {chart_analysis.CONTRA_SIGNALS} sinais (uma tendência fraca), com payout de 90% ou mais,"
+            " a primeira entrada vai para o lado OPOSTO (PUT contra ALTA, CALL contra BAIXA), e os gales seguem esse"
+            " lado. Medido depois do fato: o lado oposto venceu 60,2% (83 casos) em 2026-11-04 e 55,1% (78) na"
+            " noite seguinte; isso NÃO foi confirmado em dados novos, e com gales, abaixo de 52% o resultado médio é"
+            " de perda."
+        )
+    elif getattr(args, "tendencia", False):
         say(
             "MODO TENDÊNCIA: sem regra validada, a leitura das velas do gráfico (favorece ALTA ou BAIXA com"
             f" {chart_analysis.TREND_MIN_SIGNALS} ou mais sinais de acordo, fora da troca de vela, com payout de 90%"

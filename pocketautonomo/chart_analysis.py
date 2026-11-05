@@ -642,6 +642,14 @@ class ChartValidation:
 
 TREND_MIN_SIGNALS = 5  # of the 6 directional signals; with 3 or 4 the reading hit 43% and 46%, with 5 or more 60% (n=80, not confirmed)
 TREND_REASON = "MODO TENDÊNCIA, sem regra validada: a leitura do gráfico, com sinais fortes, decide a primeira entrada"
+# The contrarian mode: against a weak reading (exactly 3 signals). Measured at 300 s, one reading per asset every
+# 300 s: the opposite side won 60.2% (n=83) on 2026-11-04 and 55.1% (n=78) on the night after, found after the fact
+# and NOT confirmed on fresh data; the strong readings (5 or more) stayed at about 52%, the break-even.
+CONTRA_SIGNALS = 3
+CONTRA_REASON = (
+    "MODO CONTRA-TENDÊNCIA, sem regra validada: contra a leitura fraca do gráfico (exatamente 3 sinais), a"
+    " primeira entrada vai para o lado oposto"
+)
 
 
 def moments_of(series, horizon):
@@ -803,6 +811,8 @@ class ChartSetup:
     layout: dict = field(default_factory=dict)  # what one reading measured of the platform's chart, for the next
     trend: bool = False  # the trend mode: without a validated rule, the chart's reading (CONSENSUS) decides
     min_signals: int = 0  # the trend mode's strength filter: signals of the reading that must agree (0: the reading's own 3)
+    max_signals: int = 0  # the most signals that may agree (0: no upper bound); the contrarian mode wants weak readings
+    contrarian: bool = False  # the contrarian mode: the entry goes against the chart's reading
 
     def validation(self, name):
         series = self.history.get(name, self.model.period)
@@ -1045,7 +1055,8 @@ def assess(setup, observation, payout, now):
     if not validation.validated:
         if not setup.trend:
             return wait(validation.reason)
-        validation = ChartValidation(False, TREND_REASON, CONSENSUS, trend=True)  # wait() sees this one too
+        reason = CONTRA_REASON if setup.contrarian else TREND_REASON
+        validation = ChartValidation(False, reason, CONSENSUS, trend=True)  # wait() sees this one too
     if not last_closed:
         return wait(f"{validation.reason}; mas {LAST_CLOSED_MISSING}")
     if not 0 <= age <= MAX_READING_AGE:
@@ -1069,7 +1080,7 @@ def assess(setup, observation, payout, now):
     direction = rule_direction(validation.rule, bars[-MIN_BARS:], reading.resolution)
     if direction is None:
         return wait(f"{validation.reason}; mas a regra não dá direção agora")
-    if setup.trend and setup.min_signals:
+    if setup.trend and (setup.min_signals or setup.max_signals):
         side = 1 if direction == CALL else -1
         agreeing = sum(1 for signal in read_market(bars[-MIN_BARS:], reading.resolution).signals if signal.direction == side)
         if agreeing < setup.min_signals:
@@ -1077,6 +1088,13 @@ def assess(setup, observation, payout, now):
                 f"{validation.reason}; mas só {agreeing} sinais concordam, e o modo exige {setup.min_signals} ou mais"
                 " (com 3 ou 4 a leitura acertou menos que 50% nos dados de 2026-11-04)"
             )
+        if setup.max_signals and agreeing > setup.max_signals:
+            return wait(
+                f"{validation.reason}; mas {agreeing} sinais concordam, e o modo só aposta contra leituras com até"
+                f" {setup.max_signals}"
+            )
+    if setup.contrarian and validation.trend:  # never against a rule validated on separate data
+        direction = PUT if direction == CALL else CALL
     decision = analysis.Decision(
         name, direction, validation.reason, validation, sample,
         observation.captured_at + timedelta(seconds=analysis.DECISION_WINDOW_SECONDS),

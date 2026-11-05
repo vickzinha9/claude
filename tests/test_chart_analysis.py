@@ -711,6 +711,31 @@ class AssessTest(unittest.TestCase):
                 if action == WAIT:
                     self.assertIn(f"só {agreeing} sinais concordam, e o modo exige {need} ou mais", result.reason)
 
+    def test_the_contrarian_mode_bets_against_weak_readings_only(self):
+        base = replace(setup_of(), trend=True)
+        observation = ca.absorb(base, observation_of(trend(30), self.MOMENT))
+        reading = ca.read_market(observation.bars(), observation.reading.resolution)
+        agreeing = sum(1 for signal in reading.signals if signal.direction > 0)
+        self.assertGreaterEqual(agreeing, 3)
+        now = self.MOMENT + timedelta(seconds=1)
+        weak = replace(base, contrarian=True, min_signals=agreeing, max_signals=agreeing)  # this reading counts as weak
+        decision = ca.assess(weak, observation, 92.0, now).decision
+        self.assertEqual(decision.action, PUT)  # the chart favors ALTA: the entry goes the other way
+        self.assertTrue(decision.validation.trend)
+        self.assertIn("MODO CONTRA-TENDÊNCIA, sem regra validada", decision.reason)
+        other = replace(setup_of(), trend=True)  # a history of its own: the rising candles above would conflict
+        falling = ca.absorb(other, observation_of(trend(30, step=-0.0001), self.MOMENT))
+        down = sum(1 for signal in ca.read_market(falling.bars(), falling.reading.resolution).signals if signal.direction < 0)
+        weak_down = replace(other, contrarian=True, min_signals=down, max_signals=down)
+        self.assertEqual(ca.assess(weak_down, falling, 92.0, self.MOMENT).decision.action, CALL)
+        strong = replace(weak, max_signals=agreeing - 1)  # the same reading, now too strong for the mode
+        waited = ca.assess(strong, observation, 92.0, now).decision
+        self.assertEqual(waited.action, WAIT)
+        self.assertIn(f"{agreeing} sinais concordam, e o modo só aposta contra leituras com até {agreeing - 1}", waited.reason)
+        self.assertEqual(ca.assess(weak, observation, 85.0, now).decision.action, WAIT)  # the payout guard still holds
+        validated = replace(self.validated_setup(), trend=True, contrarian=True)
+        self.assertEqual(ca.assess(validated, observation_of(trend(30), self.MOMENT), 92.0, now).decision.action, CALL)
+
     def test_a_validated_rule_on_a_current_reading_gives_a_decision_valid_for_moments(self):
         setup = self.validated_setup()
         observation = observation_of(trend(30), self.MOMENT)

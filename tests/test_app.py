@@ -27,6 +27,14 @@ class CommandTest(unittest.TestCase):
         for part in ("--tendencia", "--so-elegiveis", "--sem-limites"):
             self.assertIn(part, trend)
         self.assertNotIn("--sem-limites", real)  # the validated-rule mode keeps its default limits
+        contra = app.command("Contra-tendência real", "real", url)
+        self.assertNotIn("--armar", contra)
+        self.assertEqual(contra[-3:], ["--real", "--conta", "real"])
+        for part in ("--contra-tendencia", "--so-elegiveis", "--sem-limites"):
+            self.assertIn(part, contra)
+        self.assertNotIn("--tendencia", contra)  # --contra-tendencia turns the trend path on by itself
+        self.assertIn("Contra-tendência real", app.REAL_MODES)
+        self.assertIn("Contra-tendência real", app.MODES)
         self.assertIn("--so-elegiveis", analysis)
         self.assertNotIn("--so-elegiveis", real)  # the validated-rule mode keeps scanning every favorite
 
