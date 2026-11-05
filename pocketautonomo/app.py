@@ -30,8 +30,9 @@ from pocketautonomo import arming
 
 MODES = ("Análise", "Simulação", "Execução real", "Tendência real")
 REAL_MODES = ("Execução real", "Tendência real")
-# The trend mode: the chart's reading opens the cycles, without a validated rule; R$ 150 or two cycles of four LOSS stop it.
-TREND_ARGS = ["--tendencia", "--so-elegiveis", "--limite-perda", "150", "--limite-ciclos-perdidos", "2"]
+# The trend mode: the chart's reading opens the cycles, without a validated rule. No loss limit, by the user's choice
+# of 2026-11-05: only a balance that does not cover the next entry stops the sending.
+TREND_ARGS = ["--tendencia", "--so-elegiveis", "--sem-limites"]
 DEFAULT_URL = "https://pocketoption.com/pt/cabinet/quick-high-low/"
 SETTINGS_FILE_NAME = "launcher.json"
 POLL_MS = 500

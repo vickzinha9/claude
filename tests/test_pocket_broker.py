@@ -398,6 +398,21 @@ class RealOperationTest(RealTestCase):
         self.assertEqual([row["session_net_cents"] for row in results], [-500, -1500, -3500, -7500])
         self.assertTrue(all(row["execution"] == operation.REAL and row["real_order_id"] for row in results))
 
+    def test_without_limits_a_cycle_of_four_losses_does_not_end_the_sending(self):
+        from pocketautonomo import operate
+
+        self.assertTrue(operate.build_parser().parse_args(["--real", "--sem-limites"]).sem_limites)
+        self.operator.limits = SessionLimits(full_losses=None, loss_cents=None, cycles=None)  # what --sem-limites builds
+        self.assertTrue(self.operator.consider(self.decision(PUT)).started)
+        for attempt in range(4):
+            self.settle(LOSS)
+            if attempt < 3:
+                self.read()
+        self.assertEqual(self.operator.session["net_cents"], -7500)
+        again = self.operator.consider(self.decision())
+        self.assertTrue(again.started, again.reason)  # the gales still go 5/10/20/40, and only the balance stops it
+        self.assertEqual([amount for _, amount in self.platform.clicks], [5, 10, 20, 40, 5])
+
     def test_a_win_ends_the_cycle_and_the_next_one_starts_at_5(self):
         self.operator.consider(self.decision())
         self.settle(LOSS)

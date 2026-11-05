@@ -263,8 +263,10 @@ class Execution:
             )
             execution = operation.REAL if args.conta == "real" else operation.REAL_ON_DEMO
             gate = self.switch.gate
+            unlimited = getattr(args, "sem_limites", False)  # the user's choice of 2026-11-05: only the balance stops it
             limits = operation.SessionLimits(
-                full_losses=args.limite_ciclos_perdidos, loss_cents=round(args.limite_perda * 100),
+                full_losses=None if unlimited else args.limite_ciclos_perdidos,
+                loss_cents=None if unlimited else round(args.limite_perda * 100),
                 cycles=args.limite_ciclos,
             )
         else:
@@ -433,6 +435,12 @@ def build_parser():
         help="com --real: ciclos com quatro LOSS que encerram o envio (padrão 1)",
     )
     parser.add_argument(
+        "--sem-limites",
+        dest="sem_limites",
+        action="store_true",
+        help="com --real: desliga --limite-perda e --limite-ciclos-perdidos; só o saldo encerra o envio",
+    )
+    parser.add_argument(
         "--limite-ciclos",
         type=observe.positive_int,
         help="com --real: ciclos iniciados que encerram o envio (padrão: sem limite)",
@@ -521,9 +529,15 @@ def print_rules(args, database, orders):
     if getattr(args, "real", False):
         cycles = "sem limite" if args.limite_ciclos is None else str(args.limite_ciclos)
         say(
-            f"EXECUÇÃO REAL na conta {args.conta}: ordens só enquanto armada; limite da execução: perda líquida de"
-            f" R$ {args.limite_perda:g}, {args.limite_ciclos_perdidos} ciclo(s) com quatro LOSS, ciclos: {cycles}."
-            " Ctrl+C encerra (e desarma)."
+            f"EXECUÇÃO REAL na conta {args.conta}: ordens só enquanto armada; "
+            + (
+                "SEM LIMITE DE PERDA: só o saldo que não cobre a próxima entrada encerra o envio (um ciclo inteiro"
+                " perdido custa R$ 75)"
+                if getattr(args, "sem_limites", False)
+                else f"limite da execução: perda líquida de R$ {args.limite_perda:g}, {args.limite_ciclos_perdidos}"
+                f" ciclo(s) com quatro LOSS"
+            )
+            + f", ciclos: {cycles}. Ctrl+C encerra (e desarma)."
         )
     if getattr(args, "tendencia", False):
         say(
