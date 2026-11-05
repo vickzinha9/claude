@@ -452,7 +452,7 @@ def build_parser():
         "--so-elegiveis",
         dest="only_eligible",
         action="store_true",
-        help="visita só os favoritos cuja lista mostra payout de 90%% ou mais (ou nenhum payout); a lista é lida de novo a cada ciclo",
+        help="visita só os favoritos cuja lista mostra payout de 90%% ou mais (um sem payout na lista, como um ativo fechado, fica de fora); a lista é lida de novo a cada ciclo",
     )
     parser.add_argument(
         "--tendencia",

@@ -297,7 +297,7 @@ class EligibleOnlyTest(ScanTestCase):
             with self.subTest(text=text):
                 self.assertEqual(scan.listed_payout(text), payout)
         favorites = [scan.Favorite(i, text, text.split()[0]) for i, text in enumerate(("A/B OTC +92 %", "C/D OTC +89 %", "E/F OTC", "G/H +90%"))]
-        self.assertEqual([item.position for item in scan.eligible_targets(favorites)], [1, 3, 4])  # no payout shown: the visit decides
+        self.assertEqual([item.position for item in scan.eligible_targets(favorites)], [1, 4])  # no payout shown: a closed asset, left out
         platform = FakePlatform()
         code = self.run_scan("--cycles", "2", "--interval", "7", "--so-elegiveis", platform=platform)
         self.assertEqual((code, self.err), (0, ""), self.out)

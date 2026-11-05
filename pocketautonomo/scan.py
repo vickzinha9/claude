@@ -764,7 +764,7 @@ def build_parser():
         "--so-elegiveis",
         dest="only_eligible",
         action="store_true",
-        help="visita só os favoritos cuja lista mostra payout de 90%% ou mais (ou nenhum payout); a lista é lida de novo a cada ciclo",
+        help="visita só os favoritos cuja lista mostra payout de 90%% ou mais (um sem payout na lista, como um ativo fechado, fica de fora); a lista é lida de novo a cada ciclo",
     )
     parser.add_argument(
         "--load-timeout",
@@ -935,8 +935,11 @@ def listed_payout(text):
 
 def eligible_targets(favorites):
     """The favorites to visit when only the eligible ones matter: payout of ELIGIBLE_PAYOUT% or more in
-    the list, or none shown there (then the visit decides). The list is read again every cycle."""
-    return [item for item in favorites if item.payout is None or item.payout >= ELIGIBLE_PAYOUT]
+    the list. One that shows no payout is left out: in the log of 2026-11-05, GBP/USD OTC lost its
+    payout in the list (the asset closed), its click never switched, and each new run ended in the
+    same PAUSA until the restart limit stopped the continuous mode. The list is read again every
+    cycle, so such a favorite comes back once it shows a payout again."""
+    return [item for item in favorites if item.payout is not None and item.payout >= ELIGIBLE_PAYOUT]
 
 
 def favorite_name(text):
