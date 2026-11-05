@@ -148,7 +148,7 @@ REFERENCE_BUDGET_SECONDS = 2.5
 # Data for analysis: a complete visit whose quote was captured at most this long before the
 # visit was recorded. Older data is never presented as current.
 MAX_DATA_AGE_SECONDS = 5.0
-MAX_FAVORITES = 30
+MAX_FAVORITES = 80  # more than this is a selector that grabbed more than the favorites (55 were in use on 2026-11-05)
 MAX_FAVORITE_WIDTH, MAX_FAVORITE_HEIGHT = 400, 120  # CSS pixels: a favorite is a small label
 CLICK_TIMEOUT_MS = 5_000
 REMOVED_RECHECK_SECONDS = 1.0
@@ -339,6 +339,11 @@ class Favorite:
     @property
     def key(self):
         return asset_key(self.name) if self.name else None
+
+    @property
+    def payout(self):
+        """The payout that the list shows beside the name ('AUD/CAD OTC +92 %'), in percent, or None."""
+        return listed_payout(self.text)
 
 
 @dataclass(frozen=True)
@@ -756,6 +761,12 @@ def build_parser():
         f" dobra, até {MAX_PAUSE:g} s",
     )
     parser.add_argument(
+        "--so-elegiveis",
+        dest="only_eligible",
+        action="store_true",
+        help="visita só os favoritos cuja lista mostra payout de 90%% ou mais (ou nenhum payout); a lista é lida de novo a cada ciclo",
+    )
+    parser.add_argument(
         "--load-timeout",
         type=seconds_from(MIN_LOAD_TIMEOUT, MAX_LOAD_TIMEOUT),
         default=DEFAULT_LOAD_TIMEOUT,
@@ -909,6 +920,23 @@ def financial_word(text):
         if word in FINANCIAL_WORDS:
             return word
     return None
+
+
+def listed_payout(text):
+    """The payout in percent that a favorite's text shows, or None when it shows none."""
+    found = PERCENT_PATTERN.findall(" ".join((text or "").split()))
+    if not found:
+        return None
+    try:
+        return float(found[-1].replace("%", "").replace(",", ".").replace(" ", "").lstrip("+"))
+    except ValueError:
+        return None
+
+
+def eligible_targets(favorites):
+    """The favorites to visit when only the eligible ones matter: payout of ELIGIBLE_PAYOUT% or more in
+    the list, or none shown there (then the visit decides). The list is read again every cycle."""
+    return [item for item in favorites if item.payout is None or item.payout >= ELIGIBLE_PAYOUT]
 
 
 def favorite_name(text):
@@ -1139,13 +1167,23 @@ def run_scan(session, scan, args, ctx):
         favorites = checked_favorites(session, scan)
         visits = []
         complete = 0  # complete readings as read: the PAUSA withholds them, but the screen showed them
+        targets = []
         if favorites.problem is not None:
             say(f"CICLO {cycle}: sem favoritos para visitar: {favorites.problem}.")
         else:
-            say(cycle_heading(cycle, favorites))
+            targets = favorites.usable
+            if args.only_eligible:
+                targets = eligible_targets(targets)
+                say(
+                    f"CICLO {cycle}: {len(targets)} de {len(favorites.usable)} favoritos com payout de"
+                    f" {ELIGIBLE_PAYOUT}% ou mais na lista: só eles são visitados"
+                    + (" ({}).".format(", ".join(f"{item.position} {item.name}" for item in targets)) if targets else ".")
+                )
+            else:
+                say(cycle_heading(cycle, favorites))
             unconfirmed = 0  # switches in a row that the asset field did not confirm
             try:
-                for favorite in favorites.usable:
+                for favorite in targets:
                     if scan.hooks is not None:
                         scan.hooks.before_visit(session, favorite)
                     waiting = scan.standby.get(favorite.key)
@@ -1179,7 +1217,8 @@ def run_scan(session, scan, args, ctx):
             except WindowClosed:
                 say("A janela do navegador foi fechada; a varredura terminou.")
                 return
-        streak = 0 if complete else streak + 1
+        nothing_eligible = args.only_eligible and favorites.problem is None and not targets
+        streak = 0 if (complete or nothing_eligible) else streak + 1  # no eligible favorite is not a failing page
         line = cycle_summary(cycle, visits, ctx.elapsed_ms(start) / 1000)
         ending = scan.after_cycle(cycle, favorites, complete) if scan.after_cycle is not None else None
         if ending is not None or (args.cycles is not None and cycle >= args.cycles):

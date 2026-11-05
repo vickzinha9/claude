@@ -640,7 +640,8 @@ class ChartValidation:
     trend: bool = False  # the trend mode's stand-in: the chart's reading, NOT validated on separate data
 
 
-TREND_REASON = "MODO TENDÊNCIA, sem regra validada: a leitura do gráfico decide a primeira entrada"
+TREND_MIN_SIGNALS = 5  # of the 6 directional signals; with 3 or 4 the reading hit 43% and 46%, with 5 or more 60% (n=80, not confirmed)
+TREND_REASON = "MODO TENDÊNCIA, sem regra validada: a leitura do gráfico, com sinais fortes, decide a primeira entrada"
 
 
 def moments_of(series, horizon):
@@ -801,6 +802,7 @@ class ChartSetup:
     clock: platform_clock.ClockOffset = field(default_factory=platform_clock.ClockOffset)  # the platform's clock
     layout: dict = field(default_factory=dict)  # what one reading measured of the platform's chart, for the next
     trend: bool = False  # the trend mode: without a validated rule, the chart's reading (CONSENSUS) decides
+    min_signals: int = 0  # the trend mode's strength filter: signals of the reading that must agree (0: the reading's own 3)
 
     def validation(self, name):
         series = self.history.get(name, self.model.period)
@@ -1051,7 +1053,9 @@ def assess(setup, observation, payout, now):
     if observation.stamp_problem is not None:
         return wait(f"{validation.reason}; mas {observation.stamp_problem}")
     into = candles.seconds_into(observation.platform_at, setup.model.period)
-    if into > ENTRY_WINDOW_SECONDS:
+    # The trend mode has no rule measured at the close of the candle: its strength filter replaces the window
+    # (on 2026-11-04 the readings inside and outside 10 s hit alike, 48.6% and 48.2%).
+    if into > ENTRY_WINDOW_SECONDS and not setup.trend:
         return wait(
             f"{validation.reason}; mas a regra foi medida com a decisão no fechamento da vela, e a leitura foi"
             f" {number(into, 0)} s depois da abertura da vela atual, mais que {number(ENTRY_WINDOW_SECONDS, 0)} s"
@@ -1065,6 +1069,14 @@ def assess(setup, observation, payout, now):
     direction = rule_direction(validation.rule, bars[-MIN_BARS:], reading.resolution)
     if direction is None:
         return wait(f"{validation.reason}; mas a regra não dá direção agora")
+    if setup.trend and setup.min_signals:
+        side = 1 if direction == CALL else -1
+        agreeing = sum(1 for signal in read_market(bars[-MIN_BARS:], reading.resolution).signals if signal.direction == side)
+        if agreeing < setup.min_signals:
+            return wait(
+                f"{validation.reason}; mas só {agreeing} sinais concordam, e o modo exige {setup.min_signals} ou mais"
+                " (com 3 ou 4 a leitura acertou menos que 50% nos dados de 2026-11-04)"
+            )
     decision = analysis.Decision(
         name, direction, validation.reason, validation, sample,
         observation.captured_at + timedelta(seconds=analysis.DECISION_WINDOW_SECONDS),

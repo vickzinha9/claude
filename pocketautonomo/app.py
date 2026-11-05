@@ -31,7 +31,7 @@ from pocketautonomo import arming
 MODES = ("Análise", "Simulação", "Execução real", "Tendência real")
 REAL_MODES = ("Execução real", "Tendência real")
 # The trend mode: the chart's reading opens the cycles, without a validated rule; R$ 150 or two cycles of four LOSS stop it.
-TREND_ARGS = ["--tendencia", "--limite-perda", "150", "--limite-ciclos-perdidos", "2"]
+TREND_ARGS = ["--tendencia", "--so-elegiveis", "--limite-perda", "150", "--limite-ciclos-perdidos", "2"]
 DEFAULT_URL = "https://pocketoption.com/pt/cabinet/quick-high-low/"
 SETTINGS_FILE_NAME = "launcher.json"
 POLL_MS = 500
@@ -49,7 +49,7 @@ def command(mode, account, url):
     """The operate command of a mode: never --armar, the window arms explicitly."""
     base = [sys.executable, "-m", "pocketautonomo.operate", "--continuo", "--painel", "--url", url]
     if mode == "Análise":
-        return base + ["--analise"]
+        return base + ["--analise", "--so-elegiveis"]  # only the favorites that pay 90% or more matter to the entries
     if mode == "Tendência real":
         return base + TREND_ARGS + ["--real", "--conta", account]
     if mode == "Execução real":

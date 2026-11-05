@@ -61,7 +61,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from pocketautonomo import analysis, observe, operation, scan
+from pocketautonomo import analysis, chart_analysis, observe, operation, scan
 from pocketautonomo.coordinator import Coordinator, CoordinatorError
 from pocketautonomo.cycle import CALL, LOSS, MAX_ATTEMPTS, PUT, WIN
 from pocketautonomo.observe import (
@@ -302,7 +302,7 @@ class Execution:
         state = self.state = scan.Scan(selectors, favorites_selector, self.args.load_timeout, self.progress)
         state.chart = scan.chart_setup(selectors, self.ctx.runtime_dir, self.args.horizon)
         if state.chart is not None and getattr(self.args, "tendencia", False):
-            state.chart = replace(state.chart, trend=True)
+            state.chart = replace(state.chart, trend=True, min_signals=chart_analysis.TREND_MIN_SIGNALS)
         if state.chart is not None:
             self.progress.candle_log = state.chart.log
         state.hooks = OperationHooks(self.operator, state, self.ctx, self.quotes, self.panel_path(), self.switch)
@@ -438,6 +438,12 @@ def build_parser():
         help="com --real: ciclos iniciados que encerram o envio (padrão: sem limite)",
     )
     parser.add_argument(
+        "--so-elegiveis",
+        dest="only_eligible",
+        action="store_true",
+        help="visita só os favoritos cuja lista mostra payout de 90%% ou mais (ou nenhum payout); a lista é lida de novo a cada ciclo",
+    )
+    parser.add_argument(
         "--tendencia",
         action="store_true",
         help=(
@@ -521,9 +527,11 @@ def print_rules(args, database, orders):
         )
     if getattr(args, "tendencia", False):
         say(
-            "MODO TENDÊNCIA: sem regra validada, a leitura das velas do gráfico (favorece ALTA ou BAIXA, logo depois"
-            " do fechamento de uma vela, com payout de 90% ou mais) abre o ciclo de gales. Essa leitura NÃO foi"
-            " validada: nos dados gravados ela acerta perto de 50%, e com gales o resultado médio é de perda."
+            "MODO TENDÊNCIA: sem regra validada, a leitura das velas do gráfico (favorece ALTA ou BAIXA com"
+            f" {chart_analysis.TREND_MIN_SIGNALS} ou mais sinais de acordo, fora da troca de vela, com payout de 90%"
+            " ou mais) abre o ciclo de gales. Essa leitura NÃO foi validada: com 3 ou 4 sinais ela acertou"
+            " menos de 50%, e com 5 ou mais, 60% em 80 casos, o que ainda não prova vantagem; com gales, abaixo de"
+            " 52% o resultado médio é de perda."
         )
     else:
         say(f"Os tempos de envio são do simulador: {operation.SIMULATOR_TIME_NOTE}. Ctrl+C encerra.")

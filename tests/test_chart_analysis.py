@@ -690,6 +690,27 @@ class AssessTest(unittest.TestCase):
                 self.assertEqual(waited.action, WAIT)
                 self.assertIn(message, waited.reason)
 
+    def test_the_trend_mode_asks_for_strong_readings_and_no_longer_for_the_first_10_seconds(self):
+        base = replace(setup_of(), trend=True)
+        late = observation_of(trend(30), self.MOMENT + timedelta(seconds=16))
+        now = self.MOMENT + timedelta(seconds=17)
+        late_result = ca.assess(base, ca.absorb(base, late), 92.0, now).decision
+        self.assertEqual(late_result.action, CALL)  # 20 s into the candle: the window is the validated rules' own
+        validated = ca.assess(self.validated_setup(), late, 92.0, now).decision
+        self.assertIn("mais que 10 s", validated.reason)
+        reading = ca.read_market(ca.absorb(base, observation_of(trend(30), self.MOMENT)).bars(), ca.absorb(
+            base, observation_of(trend(30), self.MOMENT)).reading.resolution)
+        agreeing = sum(1 for signal in reading.signals if signal.direction > 0)
+        self.assertGreaterEqual(agreeing, 3)
+        observation = ca.absorb(base, observation_of(trend(30), self.MOMENT))
+        for need, action in ((agreeing, CALL), (agreeing + 1, WAIT)):
+            with self.subTest(need=need):
+                strict = replace(base, min_signals=need)
+                result = ca.assess(strict, observation, 92.0, self.MOMENT + timedelta(seconds=1)).decision
+                self.assertEqual(result.action, action)
+                if action == WAIT:
+                    self.assertIn(f"só {agreeing} sinais concordam, e o modo exige {need} ou mais", result.reason)
+
     def test_a_validated_rule_on_a_current_reading_gives_a_decision_valid_for_moments(self):
         setup = self.validated_setup()
         observation = observation_of(trend(30), self.MOMENT)

@@ -288,6 +288,24 @@ def in_range(quote, base):
     return abs(float(quote) - base) < 0.001
 
 
+class EligibleOnlyTest(ScanTestCase):
+    def test_the_list_payout_is_read_in_any_position_and_only_eligible_favorites_are_visited(self):
+        for text, payout in (
+            ("AUD/CAD OTC +92 %", 92.0), ("EUR/USD OTC\n92%", 92.0), ("+90% GBP/USD OTC", 90.0), ("USD/JPY OTC 66,5%", 66.5),
+            ("EUR/USD OTC", None), ("", None),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(scan.listed_payout(text), payout)
+        favorites = [scan.Favorite(i, text, text.split()[0]) for i, text in enumerate(("A/B OTC +92 %", "C/D OTC +89 %", "E/F OTC", "G/H +90%"))]
+        self.assertEqual([item.position for item in scan.eligible_targets(favorites)], [1, 3, 4])  # no payout shown: the visit decides
+        platform = FakePlatform()
+        code = self.run_scan("--cycles", "2", "--interval", "7", "--so-elegiveis", platform=platform)
+        self.assertEqual((code, self.err), (0, ""), self.out)
+        self.assertEqual([row["asset"] for row in self.rows()], [EUR[0], GBP[0]] * 2)  # the +85% one is never visited
+        self.assertEqual(self.session.clicked(), [1, 0, 1])
+        self.assertIn("2 de 3 favoritos com payout de 90% ou mais na lista: só eles são visitados", self.out)
+
+
 class SwitchTest(ScanTestCase):
     def test_switches_between_favorites_and_records_each_asset(self):
         platform = FakePlatform()
@@ -1243,7 +1261,7 @@ class FavoritesTest(unittest.TestCase):
                 self.assertIn(word, favorites.problem)
         crowded = scan.classify("div", scan.FavoriteList(scan.MAX_FAVORITES + 1))
         self.assertTrue(crowded.unsafe)
-        self.assertIn("mais que 30", crowded.problem)
+        self.assertIn(f"mais que {scan.MAX_FAVORITES}", crowded.problem)
         self.assertFalse(scan.classify(FAVORITES, scan.FavoriteList(0)).unsafe)
 
     def test_the_element_is_checked_again_right_before_the_click(self):
