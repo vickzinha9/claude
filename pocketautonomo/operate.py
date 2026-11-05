@@ -497,6 +497,13 @@ def build_parser():
         " sozinho depois de uma PAUSA ou de uma parada por segurança. Grava runtime/continuo-*.log e"
         " runtime/continuo-estado.json e, no Windows, impede a suspensão enquanto roda; não aceita --cycles",
     )
+    parser.add_argument(
+        "--retomar-pausa",
+        dest="retomar_pausa",
+        action="store_true",
+        help="com --continuo: depois de uma PAUSA de troca de ativo não confirmada, o navegador fecha, e uma execução"
+        " nova abre outro e recomeça sozinha, sem pedir LIBERAR; a liberação fica registrada em pausas_liberadas",
+    )
     return parser
 
 
@@ -507,6 +514,8 @@ def parse_arguments(argv):
         parser.error("--continuo roda até Ctrl+C e não aceita --cycles")
     if args.continuo and args.demonstracao:
         parser.error("--continuo não pode ser usado com --demonstracao")
+    if args.retomar_pausa and not args.continuo:
+        parser.error("--retomar-pausa só vale com --continuo")
     if args.real and args.demonstracao:
         parser.error("--real não pode ser usado com --demonstracao")
     if args.armar and not args.real:

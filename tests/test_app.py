@@ -17,6 +17,7 @@ class CommandTest(unittest.TestCase):
         for args in (analysis, simulation, real):
             self.assertEqual(args[1:4], ["-m", "pocketautonomo.operate", "--continuo"])
             self.assertNotIn("--armar", args)
+            self.assertIn("--retomar-pausa", args)  # by the user's choice of 2026-11-05: no LIBERAR to type
         self.assertIn("--analise", analysis)
         self.assertNotIn("--real", simulation)
         self.assertEqual(real[-3:], ["--real", "--conta", "real"])

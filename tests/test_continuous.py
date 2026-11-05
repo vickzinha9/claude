@@ -460,6 +460,77 @@ class PauseTest(ContinuousTestCase):
                 self.assertIn("PAUSA DO MODO CONTÍNUO", self.err)
                 self.assertEqual(self.sessions[0].clicked(), [])
 
+    def test_with_the_resume_option_a_pause_closes_the_browser_and_a_new_run_goes_on(self):
+        platform = ts.FakePlatform()
+        platform.ignored.add(1)  # the switch to GBP/USD OTC fails in the first browser only
+
+        def on_open(number):
+            if number == 1:
+                platform.ignored.clear()
+
+        code = self.run_continuous(
+            "--load-timeout", "5", "--retomar-pausa", platform=platform, on_open=on_open,
+            on_wait=stop_at_interval(self, 2),
+        )
+        self.assertEqual(code, 130, self.err)
+        self.assertEqual(len(self.sessions), 2)  # a new browser, with no LIBERAR typed
+        self.assertEqual(self.sessions[0].clicked(), [1])  # nothing was clicked after the switch that failed
+        self.assertIn(1, self.sessions[1].clicked())
+        self.assertEqual(len(self.sleeps), 1)
+        state = self.state()
+        self.assertIsNone(state["pausa"])
+        [released] = state["pausas_liberadas"]
+        self.assertEqual((released["ativo"], released["liberada_por"]), (ts.GBP[0], continuous.AUTO_RELEASED_BY))
+        self.assertIn("não foi confirmada", released["motivo"])
+        self.assertIn("PAUSA de GBP/USD OTC liberada pelo programa (--retomar-pausa)", self.out)
+        self.assertIn("com --retomar-pausa, o programa a libera assim que este navegador fechar", self.err)
+        self.assertIn("RETOMADA AUTOMÁTICA", self.out)
+
+    def test_with_the_resume_option_a_kept_pause_is_released_at_the_login_without_the_word(self):
+        platform = ts.FakePlatform()
+        self.start_with_a_pause(platform)  # a start without the option keeps it
+        platform.ignored.clear()
+        code = self.run_continuous("--retomar-pausa", platform=platform, on_wait=stop_at_interval(self, 1))
+        self.assertEqual(code, 130, self.err)
+        self.assertNotIn("Digite LIBERAR", self.out + self.err)
+        state = self.state()
+        self.assertIsNone(state["pausa"])
+        [released] = state["pausas_liberadas"]
+        self.assertEqual(released["liberada_por"], continuous.AUTO_RELEASED_BY)
+        self.assertEqual(self.sessions[0].clicked(), [1, 2])  # the scan went on after the release
+
+    def test_with_the_resume_option_a_click_left_pending_by_a_browser_failure_goes_on_in_a_new_browser(self):
+        platform = ts.FakePlatform(delays=(0.6, 0.7, 0.8))  # the name changes after the first poll of it
+        interrupt = stop_at_interval(self, 2)
+
+        def on_wait(seconds):
+            if len(self.sessions) == 1 and platform.clicks and seconds == scan.ASSET_POLL_SECONDS and platform.named == 0:
+                raise observe.BrowserError("a espera entre as leituras falhou (Error: Target crashed)")
+            interrupt(seconds)
+
+        code = self.run_continuous("--retomar-pausa", platform=platform, on_wait=on_wait)
+        self.assertEqual(code, 130, self.err)
+        self.assertEqual(len(self.sessions), 2)
+        self.assertIn("Com --retomar-pausa, o programa a libera agora que o navegador fechou.", self.err)
+        state = self.state()
+        self.assertIsNone(state["pausa"])
+        [released] = state["pausas_liberadas"]
+        self.assertIn("antes de a troca ser confirmada", released["motivo"])
+        self.assertEqual(released["ultimo_clique"]["estado"], continuous.PENDING)
+
+    def test_with_the_resume_option_ctrl_c_still_keeps_the_pause_of_a_pending_click(self):
+        platform = ts.FakePlatform(delays=(0.6, 0.7, 0.8))
+
+        def on_wait(seconds):
+            if platform.clicks and seconds == scan.ASSET_POLL_SECONDS and platform.named == 0:
+                raise KeyboardInterrupt
+
+        code = self.run_continuous("--retomar-pausa", platform=platform, on_wait=on_wait)
+        self.assertEqual(code, 130, self.err)
+        self.assertEqual(len(self.sessions), 1)
+        self.assertEqual(self.state()["pausa"]["ativo"], ts.GBP[0])  # the next start releases it, after the login
+        self.assertEqual(self.state()["pausas_liberadas"], [])
+
     def test_a_click_that_failed_with_an_error_and_never_switched_ends_in_a_pause(self):
         def fail(session, selector, index, check):
             raise scan.ClickUncertain("Error: Target page, context or browser has been closed")
@@ -763,7 +834,7 @@ class StopTest(ContinuousTestCase):
     def test_options_that_do_not_fit_and_a_second_instance(self):
         env = dict(os.environ, PYTHONPATH=str(ROOT), PYTHONIOENCODING="utf-8")
         with tempfile.TemporaryDirectory() as directory:
-            for args in (("--continuo", "--cycles", "2"), ("--continuo", "--demonstracao")):
+            for args in (("--continuo", "--cycles", "2"), ("--continuo", "--demonstracao"), ("--retomar-pausa",)):
                 result = subprocess.run(
                     [sys.executable, "-m", "pocketautonomo.operate", *args], cwd=directory, env=env,
                     capture_output=True, encoding="utf-8", timeout=60,

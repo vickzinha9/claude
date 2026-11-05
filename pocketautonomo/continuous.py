@@ -29,7 +29,10 @@ runtime/scan.lock is taken first and held from the first run to the last.
   switch, however it ended, leaves such a PAUSA too (ClickJournal); a click that failed with an
   error of the browser may have reached the page, so its switch has to be confirmed as any other.
   Only you release a PAUSA, typing RELEASE_WORD after the login of the first run of a new start,
-  once you checked the screen.
+  once you checked the screen. With --retomar-pausa (the launcher's choice, from 2026-11-05) the
+  program releases it itself once the browser that made the click is closed: the next run opens a
+  new browser, which keeps no click of the old page, as after a failure of the browser; the first
+  reading of the list still checks the last click, and the release goes to pausas_liberadas.
 - A safety stop of the scan (an unsafe favorites selector, a page outside pocketoption.com, a
   favorite that a click removed, a new tab), a stop of the operation (a write that failed, an
   answer outside the rules), a file that could not be written, a configuration problem and
@@ -111,7 +114,7 @@ STATE_NOTE = (
     " continuo_windows.cmd), gravado pelo programa; não edite. pausa: a PAUSA que impede o modo contínuo de"
     " recomeçar sozinho, até você liberá-la digitando LIBERAR depois do login. ultimo_clique: o último favorito"
     " clicado, conferido na próxima leitura da lista de favoritos, também depois de reabrir. pausas_liberadas:"
-    " as PAUSAS que você liberou."
+    " as PAUSAS liberadas, por você ou pelo programa com --retomar-pausa."
 )
 INTRO = (
     "MODO CONTÍNUO: uma execução depois da outra, até Ctrl+C ou até você fechar a janela do navegador. Depois"
@@ -123,6 +126,13 @@ INTRO = (
     " segurança, de uma falha de gravação ou de Ctrl+C. Cada execução tem as mesmas regras da operação simulada:"
     " nenhuma ordem vai para a Pocket Option."
 )
+AUTO_INTRO = (
+    "RETOMADA AUTOMÁTICA (--retomar-pausa): depois de uma PAUSA de troca de ativo não confirmada, o navegador"
+    " fecha, e uma execução nova abre outro e recomeça sozinha, sem pedir LIBERAR. O navegador novo não guarda o"
+    " clique pendente do anterior, e a primeira leitura da lista de favoritos ainda confere o último clique; cada"
+    " PAUSA liberada assim fica registrada em pausas_liberadas."
+)
+AUTO_RELEASED_BY = "o programa (--retomar-pausa), com o navegador do clique fechado"
 NO_PROOF = (
     "uma página carregada de novo não comprova que o gráfico é do ativo que o nome mostra, e o programa não tem"
     " uma fonte que diga a qual ativo o gráfico pertence"
@@ -193,6 +203,7 @@ class Continuous:
         self.invalid = False  # the favorites file is invalid: --configure replaces it, keeping a copy
         self.runs = 0
         self.reviewed = False  # you confirmed the login, and saw the PAUSA kept, if any: later runs wait by themselves
+        self.auto = bool(getattr(args, "retomar_pausa", False))  # --retomar-pausa: the program releases the PAUSA
 
     def run(self):
         args, ctx = self.args, self.ctx
@@ -200,6 +211,8 @@ class Continuous:
         try:
             say(operate.REAL_INTRO.format(account=self.args.conta) if getattr(self.args, "real", False) else operate.INTRO)
             say(INTRO)
+            if self.auto:
+                say(AUTO_INTRO)
             # The lock first, held from the first run to the last: the state is read only by its holder.
             lock = scan.ScanLock(ctx.runtime_dir / scan.LOCK_FILE_NAME)
             self.saved = ContinuousState.load(self.state_path, ctx.now)  # an unreadable state stops here
@@ -336,7 +349,9 @@ class Continuous:
         except PauseStop:
             self.after_pause(session, execution)
             execution.stopped()
-            outcome = Outcome(True, EXIT_FAILED, why="PAUSA")
+            # With --retomar-pausa a new run follows: settle() releases the PAUSA once this browser is closed.
+            progress = execution.progress.complete > 0
+            outcome = Outcome(not self.auto, EXIT_FAILED, progress=progress, why="PAUSA (troca de ativo não confirmada)")
         except PauseKept as error:
             warn(f"PARADA: {error}.")
             execution.stopped()
@@ -405,11 +420,18 @@ class Continuous:
 
     def after_pause(self, session, execution):
         """The PAUSA ended the run: say so, and read the favorites list once more, only reading."""
-        warn(
-            f"MODO CONTÍNUO: a PAUSA ficou gravada em {self.state_path}, e a operação contínua parou e não recomeça"
-            f" sozinha: {NO_PROOF}. Para recomeçar, abra o modo contínuo de novo e, depois do login, confira a tela"
-            f" e digite {RELEASE_WORD}."
-        )
+        if self.auto:
+            warn(
+                f"MODO CONTÍNUO: a PAUSA ficou gravada em {self.state_path}, e esta execução termina sem outro clique;"
+                " com --retomar-pausa, o programa a libera assim que este navegador fechar, e uma execução nova abre"
+                " outro e recomeça sozinha."
+            )
+        else:
+            warn(
+                f"MODO CONTÍNUO: a PAUSA ficou gravada em {self.state_path}, e a operação contínua parou e não recomeça"
+                f" sozinha: {NO_PROOF}. Para recomeçar, abra o modo contínuo de novo e, depois do login, confira a tela"
+                f" e digite {RELEASE_WORD}."
+            )
         state = execution.state
         if session is None or session.is_closed() or state is None or state.last_clicked is None:
             return
@@ -447,7 +469,17 @@ class Continuous:
             return
 
     def settle(self, outcome, number, execution):
-        """outcome, or a stop with a PAUSA kept when the run ended before the switch of its last click was confirmed."""
+        """outcome, or a stop with a PAUSA kept when the run ended before the switch of its last click was confirmed.
+
+        With --retomar-pausa, a run that a new one follows releases its PAUSA here, after its browser was
+        closed; a run that stops the continuous mode keeps it, for the next start to release.
+        """
+        settled = self.pending_pause(outcome, number, execution)
+        if self.auto and self.saved.pause is not None and settled is not None and not settled.stop:
+            self.auto_release()
+        return settled
+
+    def pending_pause(self, outcome, number, execution):
         record = self.saved.last_click
         if record is None or record.get("estado") != PENDING or self.saved.pause is not None:
             return outcome
@@ -469,6 +501,11 @@ class Continuous:
             self.saved.change(pause=pause)
         except OSError as error:
             warn(f"AVISO: a PAUSA não pôde ser gravada em {self.state_path} ({error}); o clique pendente continua lá.")
+            if self.auto:
+                return Outcome(True, EXIT_FAILED, why="PAUSA não gravada")  # nothing to release: never go on without it
+        if self.auto and outcome is not None and not outcome.stop:
+            warn(f"PAUSA: {reason}. Com --retomar-pausa, o programa a libera agora que o navegador fechou.")
+            return outcome
         warn(f"PAUSA: {reason}. O modo contínuo parou e não recomeça sozinho; depois do login, confira a tela e digite {RELEASE_WORD}.")
         if outcome is None or not outcome.stop:
             return Outcome(True, EXIT_FAILED, why="troca pendente")
@@ -507,6 +544,9 @@ class Continuous:
             f" de um modo contínuo anterior{csv_text(pause.get('csv'))}: {pause['motivo']}."
         )
         compared = self.describe_click(session)
+        if self.auto:  # this browser is a new one: the click of the PAUSA was made in another, closed
+            self.auto_release()
+            return
         say(
             "  O programa não verificou, e não consegue verificar, a qual ativo o gráfico pertence. Antes de"
             " liberar, confira na janela do navegador que o gráfico é o do ativo mostrado e que a lista de"
@@ -529,6 +569,24 @@ class Continuous:
         say(
             "PAUSA liberada por você, depois de conferir a tela; o programa não verificou a identidade do gráfico."
             " A varredura começa."
+        )
+
+    def auto_release(self):
+        """--retomar-pausa: the PAUSA released by the program, with the browser of its click closed.
+
+        The last click stays, confirmed: nobody saw the list, so the first reading of the list in the
+        next visits still checks it, and the scan stops if that favorite is gone and the list shrank.
+        """
+        pause = self.saved.pause
+        released = dict(
+            pause, liberada_utc=utc_text(self.ctx.now()), ultimo_clique=self.saved.last_click, liberada_por=AUTO_RELEASED_BY,
+        )
+        click = self.saved.last_click
+        last_click = None if click is None else dict(click, estado=CONFIRMED)
+        self.saved.change(released=self.saved.released + [released], pause=None, last_click=last_click)
+        say(
+            f"PAUSA de {pause['ativo']} liberada pelo programa (--retomar-pausa): o navegador do clique está fechado, e"
+            " a execução seguinte usa um novo; o programa não verificou a identidade do gráfico."
         )
 
     def review_click(self, session):

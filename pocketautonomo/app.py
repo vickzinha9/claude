@@ -50,7 +50,8 @@ def clean_url(url):
 
 def command(mode, account, url):
     """The operate command of a mode: never --armar, the window arms explicitly."""
-    base = [sys.executable, "-m", "pocketautonomo.operate", "--continuo", "--painel", "--url", url]
+    # --retomar-pausa: by the user's choice of 2026-11-05, a PAUSA no longer waits for LIBERAR; a new browser goes on.
+    base = [sys.executable, "-m", "pocketautonomo.operate", "--continuo", "--retomar-pausa", "--painel", "--url", url]
     if mode == "Análise":
         return base + ["--analise", "--so-elegiveis"]  # only the favorites that pay 90% or more matter to the entries
     if mode == "Tendência real":
